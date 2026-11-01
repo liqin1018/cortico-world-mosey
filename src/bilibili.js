@@ -5,6 +5,8 @@ import {
   formatCount,
   formatDuration,
   parseBvid,
+  parseCvid,
+  parseDynamicId,
   parseKeywords,
   stripTags,
   truncate,
@@ -80,6 +82,53 @@ function commentDeepLink(uri, rootRpid, rpid) {
   if (!anchor) return link;
   return `${link.replace(/#.*$/, '')}#reply${anchor}`;
 }
+
+/** 动态正文分散在 desc / opus / draw / article 里，按类型挨个找。 */
+function dynamicText(item) {
+  const md = item?.modules?.module_dynamic ?? {};
+  const bits = [
+    md.desc?.text,
+    md.major?.opus?.summary?.text,
+    md.major?.opus?.title,
+    md.major?.article?.title,
+    md.major?.article?.desc,
+    md.major?.archive?.title,
+    md.major?.archive?.desc,
+    ...((md.major?.draw?.items ?? []).map((x) => x?.description) ?? []),
+  ];
+  return stripTags(bits.filter(Boolean).join(' '));
+}
+
+/** 动态配图（最多三张），只给面板当标题辅助，不下载。 */
+function dynamicImages(item) {
+  const md = item?.modules?.module_dynamic ?? {};
+  const draw = md.major?.draw?.items ?? md.major?.opus?.pics ?? [];
+  return draw.map((x) => x?.src ?? x?.url ?? '').filter(Boolean).slice(0, 3);
+}
+
+/**
+ * 评论区的 oid / type 不是动态 ID：
+ * 图文动态是 type=11 + 相册 id，视频动态是 type=1 + aid。
+ * 所以每次回复前都先读一遍详情，不能拿动态 ID 硬当 oid。
+ */
+function commentTargetOf(item) {
+  const basic = item?.basic ?? {};
+  const oid = String(basic.comment_id_str ?? basic.rid_str ?? '');
+  const type = Number(basic.comment_type ?? 0);
+  return { oid, type: type || 17 };
+}
+
+/** 一条评论压成面板能直接渲染的样子；rpid 留着，方便在弹层里回。 */
+function replyView(c) {
+  return {
+    rpid: c.rpid,
+    u: truncate(c.author, 12),
+    t: truncate(c.text, 120),
+    l: formatCount(c.like),
+    at: c.at ?? 0,
+  };
+}
+
 
 export class Bilibili {
   constructor({ dataDir, cfg, log, policy, store }) {
@@ -470,12 +519,13 @@ export class Bilibili {
     const v = await this.view(id);
     let top = [];
     try {
-      top = await this.comments(v.aid, comments);
+      top = await this.replyList(1, v.aid, comments);
     } catch {
       top = [];
     }
     return {
       platform: 'bilibili',
+      kind: 'video',
       id: v.bvid,
       title: truncate(v.title, 80),
       author: v.author,
@@ -484,25 +534,220 @@ export class Bilibili {
       desc: truncate(v.desc, 300),
       tags: v.tags,
       url: v.url,
-      comments: top.map((c) => ({ u: truncate(c.author, 12), t: truncate(c.text, 70), l: formatCount(c.like) })),
+      comments: top.map(replyView),
       note: 'B站返回的是文字和热评，没有画面；要看画面用「陪看」插件。',
     };
   }
 
-  async comments(aid, limit = 5) {
+  /** 一条动态：正文、作者、评论区的真实 oid/type，后面回复要用。 */
+  async dynamic(id) {
+    const dynId = parseDynamicId(id) ?? '';
+    if (!dynId) throw new BiliError('BAD_ID', '不是有效的动态链接/ID');
+    const url = `https://t.bilibili.com/${dynId}`;
+    const data = await this.request(
+      '/x/polymer/web-dynamic/v1/detail',
+      { id: dynId, timezone_offset: -480 },
+      { cacheMs: 60 * 1000, referer: url },
+    );
+    const item = data?.item;
+    if (!item) throw new BiliError('NO_DYNAMIC', '这条动态看不到（可能删了、或者只给粉丝看）。');
+    const { oid, type: commentType } = commentTargetOf(item);
+    const stat = item.modules?.module_stat ?? {};
+    const author = item.modules?.module_author ?? {};
+    const text = dynamicText(item);
+    const dynType = String(item.type ?? '');
+    const images = dynamicImages(item);
+    const fallback = {
+      DYNAMIC_TYPE_DRAW: images.length ? `图片动态（${images.length} 张图）` : '图片动态',
+      DYNAMIC_TYPE_WORD: '文字动态',
+      DYNAMIC_TYPE_AV: '视频动态',
+      DYNAMIC_TYPE_ARTICLE: '专栏动态',
+      DYNAMIC_TYPE_FORWARD: '转发动态',
+    }[dynType] ?? '一条动态';
+    return {
+      kind: 'opus',
+      id: String(item.id_str ?? dynId),
+      type: dynType,
+      oid,
+      commentType,
+      title: truncate(text || `${author.name ?? ''} · ${fallback}`, 80),
+      text: truncate(text, 500),
+      author: stripTags(author.name ?? ''),
+      authorId: String(author.mid ?? ''),
+      pubdate: Number(author.pub_ts ?? 0),
+      images,
+      stat: {
+        like: Number(stat.like?.count ?? 0),
+        comment: Number(stat.comment?.count ?? 0),
+        forward: Number(stat.forward?.count ?? 0),
+      },
+      url,
+    };
+  }
+
+  async openDynamic(id, { comments = 5 } = {}) {
+    const d = await this.dynamic(id);
+    let top = [];
+    if (d.oid) {
+      try {
+        top = await this.replyList(d.commentType, d.oid, comments);
+      } catch {
+        top = [];
+      }
+    }
+    return {
+      platform: 'bilibili',
+      kind: 'opus',
+      id: d.id,
+      title: d.title,
+      author: d.author,
+      stat: `${formatCount(d.stat.comment)}评 · ${formatCount(d.stat.like)}赞`,
+      desc: d.text,
+      tags: [],
+      url: d.url,
+      comments: top.map(replyView),
+      note: '这是 B站动态，不是视频；评论区能看，也能在面板里直接回。',
+    };
+  }
+
+  /** 专栏：只读标题和摘要，正文不抓，省流量。 */
+  async article(id) {
+    const cvid = parseCvid(id) ?? '';
+    if (!cvid) throw new BiliError('BAD_ID', '不是有效的专栏链接/ID');
+    const data = await this.request(
+      '/x/article/viewinfo',
+      { id: cvid },
+      { cacheMs: 5 * 60 * 1000, referer: `https://www.bilibili.com/read/cv${cvid}` },
+    );
+    const title = stripTags(data.title ?? '');
+    const text = stripTags(data.summary ?? '');
+    return {
+      kind: 'article',
+      id: cvid,
+      oid: cvid,
+      commentType: 12,
+      title: truncate(title || `专栏 cv${cvid}`, 80),
+      text: truncate(text, 500),
+      author: stripTags(data.author_name ?? ''),
+      authorId: String(data.mid ?? ''),
+      pubdate: Number(data.publish_time ?? 0),
+      stat: {
+        like: Number(data.stats?.like ?? 0),
+        comment: Number(data.stats?.reply ?? 0),
+        view: Number(data.stats?.view ?? 0),
+      },
+      url: `https://www.bilibili.com/read/cv${cvid}`,
+    };
+  }
+
+  async openArticle(id, { comments = 5 } = {}) {
+    const a = await this.article(id);
+    let top = [];
+    try {
+      top = await this.replyList(12, a.oid, comments);
+    } catch {
+      top = [];
+    }
+    return {
+      platform: 'bilibili',
+      kind: 'article',
+      id: a.id,
+      title: a.title,
+      author: a.author,
+      stat: `${formatCount(a.stat.comment)}评 · ${formatCount(a.stat.view)}读`,
+      desc: a.text,
+      tags: [],
+      url: a.url,
+      comments: top.map(replyView),
+      note: '这是 B站专栏，评论区能看也能回。',
+    };
+  }
+
+  /**
+   * 评论区通用读取。type 见 B站：1 视频、11 图文动态、12 专栏、17 转发动态。
+   * sort: 2 按热度，0 按时间。
+   */
+  async replyList(type, oid, limit = 5, sort = 2, cacheMs = 60 * 1000, page = 1) {
     const data = await this.request(
       '/x/v2/reply',
-      { type: 1, oid: String(aid), sort: 2, ps: Math.min(20, Math.max(1, limit)), pn: 1 },
-      { cacheMs: 60000 },
+      { type: Number(type) || 1, oid: String(oid), sort, ps: Math.min(20, Math.max(1, limit)), pn: page },
+      { cacheMs },
     );
     return (data.replies ?? []).slice(0, limit).map((r) => ({
       rpid: String(r.rpid),
       author: stripTags(r.member?.uname ?? ''),
+      uid: String(r.member?.mid ?? ''),
       text: stripTags(r.content?.message ?? ''),
       like: Number(r.like ?? 0),
       root: String(r.root ?? 0),
       parent: String(r.parent ?? 0),
+      at: Number(r.ctime ?? 0),
     }));
+  }
+
+  async comments(aid, limit = 5) {
+    return this.replyList(1, aid, limit);
+  }
+
+  /** 找一条评论：先按热度翻（消息里多半是热评），再按时间补一遍。 */
+  async findReply(type, oid, rpid, pages = 2) {
+    for (const sort of [2, 0]) {
+      for (let page = 1; page <= pages; page++) {
+        const list = await this.replyList(type, oid, 20, sort, page === 1 ? 30 * 1000 : 0, page);
+        const hit = list.find((c) => c.rpid === String(rpid));
+        if (hit) return hit;
+        if (list.length < 20) break;
+      }
+    }
+    return null;
+  }
+
+  /** 面板点「看评论」：不管链接是视频、动态还是专栏，都返回同一个形状。 */
+  async commentsOf(raw, limit = 10) {
+    const link = String(raw ?? '').trim();
+    const bvid = parseBvid(link);
+    if (bvid) {
+      const v = await this.view(bvid);
+      return {
+        kind: 'video',
+        id: v.bvid,
+        oid: v.aid,
+        commentType: 1,
+        title: v.title,
+        url: v.url,
+        total: v.stat.reply,
+        items: await this.replyList(1, v.aid, limit),
+      };
+    }
+    const dyn = parseDynamicId(link);
+    if (dyn) {
+      const d = await this.dynamic(dyn);
+      return {
+        kind: 'opus',
+        id: d.id,
+        oid: d.oid,
+        commentType: d.commentType,
+        title: d.title,
+        url: d.url,
+        total: d.stat.comment,
+        items: d.oid ? await this.replyList(d.commentType, d.oid, limit) : [],
+      };
+    }
+    const cvid = parseCvid(link);
+    if (cvid) {
+      const a = await this.article(cvid);
+      return {
+        kind: 'article',
+        id: a.id,
+        oid: a.oid,
+        commentType: 12,
+        title: a.title,
+        url: a.url,
+        total: a.stat.comment,
+        items: await this.replyList(12, a.oid, limit),
+      };
+    }
+    throw new BiliError('BAD_ID', '这个链接不是 B站视频/动态/专栏。');
   }
 
   async inbox(limit = 8) {
@@ -533,6 +778,8 @@ export class Bilibili {
             at: Number(item.reply_time ?? item.time ?? 0),
             url: commentDeepLink(link, rootRpid, rpid),
             bvid: bvidOf(link),
+            dynamicId: parseDynamicId(link),
+            cvid: parseCvid(link),
             rpid,
             rootRpid,
             likeState: Number(msg.like_state ?? 0) === 1,
@@ -633,8 +880,28 @@ export class Bilibili {
     }
   }
 
-  async comment({ bvid, text, root = '', parent = '', mentionOwner = false }) {
-    const v = await this.view(bvid);
+  /**
+   * 发评论/回复。视频、动态、专栏的 oid/type 不一样，先各自解析成同一个形状再发。
+   * 动态必须读一次详情：图文动态的评论区 oid 是相册 id，不是动态 id。
+   */
+  async comment({ bvid, dynamicId, articleId, oid, replyType, text, root = '', parent = '', mentionOwner = false }) {
+    let target;
+    if (bvid) {
+      const v = await this.view(bvid);
+      target = { kind: 'video', id: v.bvid, oid: v.aid, type: 1, url: v.url };
+    } else if (dynamicId) {
+      const d = await this.dynamic(dynamicId);
+      if (!d.oid) throw new BiliError('NO_COMMENT', '这条动态没开评论区。');
+      target = { kind: 'opus', id: d.id, oid: d.oid, type: d.commentType, url: d.url };
+    } else if (articleId) {
+      const a = await this.article(articleId);
+      target = { kind: 'article', id: a.id, oid: a.oid, type: 12, url: a.url };
+    } else if (oid && replyType) {
+      target = { kind: 'plain', id: String(oid), oid: String(oid), type: Number(replyType) || 17, url: '' };
+    } else {
+      throw new BiliError('BAD_ID', '没给要评论的视频/动态/专栏。');
+    }
+
     const ownerUid = String(this.cfg.ownerUid ?? '').trim();
     let mention = '';
     if (mentionOwner && ownerUid) {
@@ -643,8 +910,8 @@ export class Bilibili {
     }
     const message = `${mention}${text}`.slice(0, Number(this.cfg.commentMaxChars ?? 120) + 20);
     const body = {
-      oid: v.aid,
-      type: 1,
+      oid: target.oid,
+      type: target.type,
       message,
       plat: 1,
       ...(root ? { root: String(root) } : {}),
@@ -653,7 +920,7 @@ export class Bilibili {
     const data = await this.request('/x/v2/reply/add', body, {
       post: true,
       cacheMs: 0,
-      referer: v.url,
+      referer: target.url || ORIGIN,
       origin: ORIGIN,
     });
     const rpid = String(data.rpid ?? '');
@@ -663,18 +930,25 @@ export class Bilibili {
     if (rpid) {
       await new Promise((r) => setTimeout(r, 1200));
       try {
-        const pub = await this.request(
-          '/x/v2/reply',
-          { type: 1, oid: v.aid, sort: 0, ps: 20, pn: 1 },
-          { anon: true, cacheMs: 0 },
-        );
-        const found = (pub.replies ?? []).some((r) => String(r.rpid) === rpid);
-        visibility = found ? 'public' : 'unknown';
+        const pub = await this.replyList(target.type, target.oid, 20, 0, 0);
+        visibility = pub.some((r) => r.rpid === rpid) ? 'public' : 'unknown';
       } catch {
         visibility = 'unknown';
       }
     }
-    return { ok: true, rpid, mentioned, visibility, message, aid: v.aid };
+    return {
+      ok: true,
+      kind: target.kind,
+      targetId: target.id,
+      url: target.url,
+      rpid,
+      mentioned,
+      visibility,
+      message,
+      aid: target.kind === 'video' ? target.oid : undefined,
+      oid: target.oid,
+      type: target.type,
+    };
   }
 
   async post({ text, mentionOwner = false }) {

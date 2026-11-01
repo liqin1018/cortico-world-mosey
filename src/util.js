@@ -173,6 +173,29 @@ export function parseBvid(value) {
   return null;
 }
 
+/**
+ * B站动态 ID：t.bilibili.com/<id>、bilibili.com/opus/<id>、dyn:<id>，或写成纯数字。
+ * 纯数字只在明确按 B站 解析时才认，不然会和抖音视频 ID 撞车。
+ */
+export function parseDynamicId(value) {
+  const text = String(value ?? '').trim();
+  const fromUrl = /(?:t\.bilibili\.com|bilibili\.com\/opus|bilibili\.com\/dynamic)\/(\d{10,25})/.exec(text);
+  if (fromUrl) return fromUrl[1];
+  const tagged = /^dyn[:/]?(\d{10,25})$/i.exec(text);
+  if (tagged) return tagged[1];
+  if (/^\d{15,25}$/.test(text)) return text;
+  return null;
+}
+
+/** B站专栏：/read/cv123456、cv123456，或 cv:<id>。 */
+export function parseCvid(value) {
+  const text = String(value ?? '').trim();
+  const cv = /\bcv(\d{5,20})\b/i.exec(text) || /^cv[:/]?(\d{5,20})$/i.exec(text);
+  if (cv) return cv[1];
+  if (/^\d{5,20}$/.test(text)) return text;
+  return null;
+}
+
 export function parseDouyinId(value) {
   const text = String(value ?? '').trim();
   if (/^\d{10,24}$/.test(text)) return text;

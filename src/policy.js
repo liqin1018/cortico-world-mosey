@@ -64,8 +64,8 @@ export class Policy {
     return { paused: false };
   }
 
-  /** 公开动作总闸。userInitiated 只影响安静时段，不影响额度。 */
-  check(action, platform, target, { userInitiated = false, quotaAction = action } = {}) {
+  /** 公开动作总闸。userInitiated 是你亲手点的：只做防连点，不再按 90 秒节奏拦。 */
+  check(action, platform, target, { userInitiated = false, quotaAction = action, dedupeKey = '' } = {}) {
     if (!this.cfg.enabled) return { ok: false, code: 'DISABLED', message: '摸鱼已停用。' };
     if (platform === 'bilibili' && !this.cfg.bilibili) return { ok: false, code: 'PLATFORM_OFF', message: 'B站这边关着。' };
     if (platform === 'douyin' && !this.cfg.douyin) return { ok: false, code: 'PLATFORM_OFF', message: '抖音这边关着。' };
@@ -84,25 +84,30 @@ export class Policy {
     if (left.daily <= 0) return { ok: false, code: 'DAILY_CAP', message: `今天的「${meta.label}」额度用完了（${left.dailyCap}）。` };
     if (left.weekly <= 0) return { ok: false, code: 'WEEKLY_CAP', message: `这周的「${meta.label}」额度用完了（${left.weeklyCap}）。` };
 
-    const gap = Math.max(30, Number(this.cfg.minGapSeconds ?? 90)) * 1000;
+    // 手动点的动作只防连点；自动出门才需要完整的人类间隔
+    const gap = userInitiated
+      ? 2000
+      : Math.max(30, Number(this.cfg.minGapSeconds ?? 90)) * 1000;
     const since = Date.now() - Number(this.store.data.lastWriteAt ?? 0);
     if (since < gap) {
       return {
         ok: false,
         code: 'TOO_FAST',
-        message: `上一次动作才过去 ${Math.round(since / 1000)} 秒，再等等（至少 ${Math.round(gap / 1000)} 秒）。`,
+        message: userInitiated
+          ? '刚发过一次，等两秒再点，别重复提交。'
+          : `上一次动作才过去 ${Math.round(since / 1000)} 秒，再等等（至少 ${Math.round(gap / 1000)} 秒）。`,
       };
     }
 
-    if (target) {
-      const key = `${platform}:${action}:${target}`;
+    if (target || dedupeKey) {
+      const key = dedupeKey || `${platform}:${action}:${target}`;
       const seen = this.store.seenAt(key);
       const windowMs = action === 'comment' || action === 'reply' ? 7 * 86400000 : 24 * 3600 * 1000;
       if (seen && Date.now() - seen < windowMs) {
         return {
           ok: false,
           code: 'DUPLICATE',
-          message: action === 'comment' || action === 'reply' ? '同一条内容七天内不重复评论。' : '这个对象今天已经做过同样的动作了，不重复。',
+          message: action === 'comment' || action === 'reply' ? '这一条七天内已经回过/评过了，不重复。' : '这个对象今天已经做过同样的动作了，不重复。',
         };
       }
     }
@@ -114,12 +119,14 @@ export class Policy {
   consume(action, platform, target, detail = {}) {
     this.store.bump(detail.quotaAction ?? action);
     for (const tag of detail.tags ?? []) this.store.noteInterest([tag]);
-    if (target) this.store.markSeen(`${platform}:${action}:${target}`);
+    if (detail.dedupeKey) this.store.markSeen(detail.dedupeKey);
+    else if (target) this.store.markSeen(`${platform}:${action}:${target}`);
     this.store.data.lastWriteAt = Date.now();
     this.store.addAction({
       platform,
       action,
       target: String(target ?? '').slice(0, 200),
+      kind: detail.kind ?? '',
       title: String(detail.title ?? '').slice(0, 160),
       text: String(detail.text ?? '').slice(0, 300),
       result: detail.result ?? 'ok',

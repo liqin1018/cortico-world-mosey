@@ -46,20 +46,25 @@
 - **正在看**：她一开始看东西，面板顶部就出现一条浮条——平台（B站/抖音）、标题、作者、已看多久，还有一个「我也看看」直接在你的浏览器打开；右下角会闪一条提醒。默认不花 token，想要「顺便在对话里说一句」可以在配置里改
 - `brief`：一次拿全登录态、今日额度、3 条候选、3 条消息（最省 token 的入口）
 - `feed`：B站热门 / 抖音精选，按兴趣词、关注的人、时长、点赞做**本地排序**，不逐条调模型
-- `open`：你发什么链接就看什么；默认**后台**（headless）读标题/简介/热评，不弹窗；要一起看才开窗口
+- `open`：你发什么链接就看什么；默认**后台**（headless）读标题/简介/热评，不弹窗；要一起看才开窗口。B站视频、**动态**（`t.bilibili.com/…`、`/opus/…`）、**专栏**（`/read/cv…`）都认
+- `comments`：只读评论区，不把这条记进「最近看过」；视频、动态、专栏都能读，返回作者、原文、赞数和 rpid
 - `inbox`：谁回复了你、谁 @ 了你；B站消息按时间排，抖音消息尽力而为
 - 面板「谁找你」：**点一条就用你自己的浏览器打开，并直接跳到那条评论**（`#reply<rpid>` 深链）；能展开全部 15 条、按「评论 / @ 我」筛选、标已读、顺手回一句
+- **动态/专栏的评论也能回**：视频、动态、专栏用同一套回复逻辑；面板里点「回一句」直接发到楼里，不用再跳网页
 - `search`：B站搜索（WBI 签名）
 - `history`：最近做过什么、草稿、兴趣画像、风控状态
 
 ### 动（全部有额度）
 - 点赞 / 取消赞
 - 关注 / 取关（默认每天 3 个，需批准）
-- 评论 / 回复（默认每天 6 条，需批准；禁止链接、广告、复读）
+- 评论 / 回复（默认每天 6 条，需批准；禁止链接、广告、复读）。**动态、专栏下的评论一样能回**：自动读详情拿到真正的评论区 `oid/type`，不再只认 BV 号
 - 发动态（B站纯文字，可 @ 主人；默认每天 2 条）
 - 私信主人（B站可用；抖音需主人 sec_uid；只发主人，不发陌生人）
 - 稍后再看（B站，低风险，可自动）
 - 面板里的「看这条评论」「TA 的主页」「在浏览器看」「稍后再看」都是一键直达，不占她的后台浏览器
+- **评论区弹层**：面板「这一条」旁边点「看评论」，在弹层里翻热评、看原文，点「回这句」当场回到楼里
+
+![评论区弹层](docs/comments-sheet.png)
 - **额度条点开就是明细**：点赞、评论、关注、动态、私信、稍后再看六格都能点，弹层里逐条列出「具体是哪个视频 / 评论原文 / 关注了谁 / 发的是什么」，带时间与跳转
 - 长列表一律走弹层（谁找你、最近、额度明细），**页面本身不会被撑长**：默认各显示 4–10 条，剩下的在弹层里滚
 
@@ -224,6 +229,8 @@ corepack pnpm install
 {"action":"brief"}
 {"action":"open","url":"https://www.douyin.com/video/769..."}
 {"action":"open","url":"https://www.bilibili.com/video/BV...","frames":1}
+{"action":"open","url":"https://t.bilibili.com/1260000000000000000"}
+{"action":"comments","url":"https://www.bilibili.com/opus/1260000000000000000","n":10}
 {"action":"feed","platform":"douyin","n":4}
 {"action":"inbox","n":5}
 {"action":"search","query":"独立游戏"}
@@ -235,6 +242,8 @@ corepack pnpm install
 ```json
 {"action":"like","platform":"bilibili","target":"BV1..."}
 {"action":"comment","platform":"douyin","target":"https://www.douyin.com/video/769...","text":"这个转场有点东西"}
+{"action":"comment","platform":"bilibili","target":"https://t.bilibili.com/1260000000000000000","text":"这张的光线压得很低"}
+{"action":"reply","platform":"bilibili","target":"https://t.bilibili.com/1260000000000000000","reply_to":"322000000000","text":"在等。"}
 {"action":"post","text":"今天下雨，适合在家打游戏。","mention_owner":true}
 {"action":"dm","platform":"bilibili","target":"主人的UID","text":"看到个视频，你肯定喜欢"}
 {"action":"approve","draft_id":"..."}   // 会被拒绝：批准只能主人在面板点

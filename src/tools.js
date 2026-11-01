@@ -4,7 +4,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll',
     description:
-      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；open 后台看指定视频/链接；inbox 看谁回了你；search 搜 B站；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
+      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；open 后台看指定视频/动态/专栏（B站链接都行）；comments 只读评论区；inbox 看谁回了你；search 搜 B站；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
     tags: ['read'],
     parameters: {
       type: 'object',
@@ -12,12 +12,12 @@ export const TOOL_DECLS = [
       properties: {
         action: {
           type: 'string',
-          enum: ['status', 'brief', 'feed', 'open', 'inbox', 'search', 'login', 'history', 'whoami', 'watch'],
+          enum: ['status', 'brief', 'feed', 'open', 'comments', 'inbox', 'search', 'login', 'history', 'whoami', 'watch'],
           description: '要做什么。',
         },
         platform: { type: 'string', enum: ['bilibili', 'douyin'], description: '去哪个平台；open 会从链接自动判断。' },
-        url: { type: 'string', description: '视频链接（open 用）。' },
-        id: { type: 'string', description: 'BV 号 / av 号 / 抖音视频 ID（open 用）。' },
+        url: { type: 'string', description: '视频 / 动态 / 专栏链接（open 用）。' },
+        id: { type: 'string', description: 'BV 号、av 号、动态 ID、cv 号或抖音视频 ID（open 用）。' },
         query: { type: 'string', description: '搜索词（search 用）。' },
         n: { type: 'integer', minimum: 1, maximum: 8, description: '要几条，默认 6。' },
         frames: { type: 'integer', minimum: 0, maximum: 3, description: '抖音抽几帧；默认 0，最省 token。' },
@@ -33,7 +33,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll_act',
     description:
-      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态）、dm、save（B站稍后再看）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下可直接执行。不要自己批准，不要绕过额度。',
+      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态）、dm、save（B站稍后再看）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（评论 rpid）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下可直接执行。不要自己批准，不要绕过额度。',
     tags: ['act', 'speak'],
     parameters: {
       type: 'object',
@@ -44,7 +44,10 @@ export const TOOL_DECLS = [
           enum: ['like', 'unlike', 'follow', 'unfollow', 'comment', 'reply', 'post', 'dm', 'save', 'approve', 'reject'],
         },
         platform: { type: 'string', enum: ['bilibili', 'douyin'] },
-        target: { type: 'string', description: '视频链接/ID；关注时是对方 UID；私信时是对方 UID/sec_uid。' },
+        target: {
+          type: 'string',
+          description: '视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID；私信时是对方 UID/sec_uid。',
+        },
         text: { type: 'string', description: '评论/动态/私信正文。评论不超过 120 字。' },
         reply_to: { type: 'string', description: '回复评论时，被回复的评论 ID（rpid）。' },
         mention_owner: { type: 'boolean', description: '公开内容里 @ 主人；默认 false。' },

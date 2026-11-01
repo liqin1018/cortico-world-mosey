@@ -499,7 +499,8 @@ export default {
         const followBtn = iconButton('plus', '关注', () => quick('quick_follow'));
         const openHereBtn = iconButton('link', '在浏览器看', () => openLastInBrowser('lastOpen'));
         const saveBtn = iconButton('bookmark', '稍后再看', () => quick('save_toview'));
-        nowActions.append(likeBtn, unlikeBtn, followBtn, openHereBtn, saveBtn);
+        const commentsBtn = iconButton('comment', '看评论', () => openComments());
+        nowActions.append(likeBtn, unlikeBtn, followBtn, openHereBtn, saveBtn, commentsBtn);
         const commentRow = el('div', undefined, 'stroll-inline');
         const commentInput = el('input');
         commentInput.type = 'text';
@@ -597,6 +598,8 @@ export default {
         let liveWatch = null;
         let toastTimer = null;
         let lastPresenceKey = '';
+        // 关掉「自己出门」再打开时，恢复上次的次数，而不是硬塞成 1 次
+        let autoRemember = 5;
 
         function msgSet(text, bad = false) {
           msg.textContent = text || '';
@@ -735,15 +738,16 @@ export default {
           switchLabel.textContent = bgOn ? '后台模式' : '开窗模式';
           browseSwitch.setAttribute('aria-checked', String(bgOn));
           const autoCap = Number(cfg.autoSessionsPerDay ?? 0);
+          if (autoCap > 0) autoRemember = autoCap;
           autoTrack.classList.toggle('on', autoCap > 0);
           autoSwitch.setAttribute('aria-checked', String(autoCap > 0));
           const autoNext = data?.autoNext;
-          let autoText = autoCap > 0 ? `每天自己逛 ${autoCap} 次` : '每天自己逛一次';
+          let autoText = autoCap > 0 ? `每天自己逛 ${autoCap} 次` : '关着，只在你叫的时候';
           if (autoCap > 0) {
             if (autoNext?.done) autoText += ' · 今天够了';
             else if (autoNext?.at) {
-              const left = Number(autoNext.at) - Date.now();
-              autoText += left > 5 * 60 * 1000 ? ` · 下次约 ${hhmm(Number(autoNext.at))}` : ' · 快出门了';
+              const remainMs = Number(autoNext.at) - Date.now();
+              autoText += remainMs > 5 * 60 * 1000 ? ` · 下次约 ${hhmm(Number(autoNext.at))}` : ' · 快出门了';
             }
           }
           autoLabel.textContent = autoText;
@@ -812,12 +816,22 @@ export default {
           nowLive.style.display = lastOpen ? '' : 'none';
           if (lastOpen) {
             const isDy = lastOpen.platform === 'douyin';
-            nowBadge.textContent = isDy ? '抖音' : 'B站';
+            const kind = lastOpen.kind || 'video';
+            const kindLabel = kind === 'opus' ? '动态' : kind === 'article' ? '专栏' : '';
+            nowBadge.textContent = isDy ? '抖音' : kindLabel ? `B站·${kindLabel}` : 'B站';
             nowBadge.className = `stroll-badge ${isDy ? 'douyin' : 'bilibili'}`;
             nowTitle.textContent = lastOpen.title || lastOpen.id || '';
             nowTitle.title = lastOpen.title || lastOpen.url || '';
             nowWhen.textContent = lastOpen.at ? `${hhmm(lastOpen.at)} 打开` : '';
-            saveBtn.style.display = isDy ? 'none' : '';
+            // 点赞/稍后再看只对视频有效；动态和专栏只开放评论与关注
+            const videoLike = !isDy && kind === 'video';
+            likeBtn.style.display = videoLike ? '' : 'none';
+            unlikeBtn.style.display = videoLike ? '' : 'none';
+            saveBtn.style.display = videoLike ? '' : 'none';
+            commentsBtn.style.display = isDy ? 'none' : '';
+            commentInput.maxLength = Number(cfg.commentMaxChars ?? 120);
+            commentInput.placeholder =
+              kind === 'opus' ? '在她这条动态下面说一句…' : kind === 'article' ? '在她这篇专栏下面说一句…' : '以她的口气评论这一条…';
           }
 
           // 看点：看过是本地数据，稍后再看/热门按需拉
@@ -1046,6 +1060,114 @@ export default {
           });
         }
 
+        async function openComments(urlOverride) {
+          const url = String(urlOverride || lastData?.lastOpen?.url || '').trim();
+          if (!url) {
+            msgSet('先打开一条内容。', true);
+            return;
+          }
+          msgSet('正在读评论区…');
+          let data = null;
+          try {
+            data = await ctx.invoke('comments', [url, 12]);
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+            return;
+          }
+          if (!data || data.ok === false) {
+            msgSet(data?.error || '读不到评论。', true);
+            return;
+          }
+          msgSet('');
+          const kindLabel = { video: '视频', opus: '动态', article: '专栏' }[data.kind] || '内容';
+          openSheet({
+            title: `${kindLabel}评论区`,
+            hint: `《${cut(data.title || '', 18)}》 · 共 ${Number(data.total ?? 0)} 条`,
+            render: (body) => renderCommentList(body, data, url),
+          });
+        }
+
+        function renderCommentList(body, data, url) {
+          const items = Array.isArray(data.items) ? data.items : [];
+          if (!items.length) {
+            const empty = el('div', undefined, 'stroll-empty soft');
+            empty.append(el('strong', '评论区还是空的'), el('span', '没有热评；想看原文就点「在浏览器看」。'));
+            body.append(empty);
+            return;
+          }
+          body.append(el('p', `热评 ${items.length} 条 · 点「回这句」直接回到楼里`, 'stroll-muted'));
+          const list = el('div', undefined, 'stroll-comments');
+          for (const c of items) list.append(commentCard(c, url));
+          body.append(list);
+        }
+
+        function commentCard(c, url) {
+          const row = el('div', undefined, 'stroll-comment');
+          const head = el('div', undefined, 'stroll-comment-head');
+          const name = c.u || '有人';
+          const tone = [...name].reduce((a, ch) => a + ch.charCodeAt(0), 0) % 360;
+          const avatar = el('span', [...name][0] ?? '?', 'stroll-msgavatar');
+          avatar.style.setProperty('--tone', `hsl(${tone} 58% 52%)`);
+          head.append(avatar, el('span', name, 'stroll-msguser'));
+          if (c.l && c.l !== '0') head.append(el('span', `${c.l} 赞`, 'stroll-comment-like'));
+          row.append(head, el('p', c.t || '', 'stroll-comment-text'));
+
+          const acts = el('div', undefined, 'stroll-comment-acts');
+          const replyBtn = button('回这句', () => toggle(), 'ghost xs');
+          acts.append(replyBtn);
+          row.append(acts);
+
+          const box = el('div', undefined, 'stroll-comment-reply');
+          box.style.display = 'none';
+          const input = el('input');
+          input.type = 'text';
+          input.className = 'stroll-input';
+          input.maxLength = Number(lastData?.config?.commentMaxChars ?? 120);
+          input.placeholder = `回 ${cut(name, 8)}…`;
+          const hint = el('span', undefined, 'stroll-token');
+          const send = button('发送', () => submit(), 'primary xs');
+          const line = el('div', undefined, 'stroll-inline');
+          line.append(input, send);
+          box.append(line, hint);
+          row.append(box);
+
+          function toggle() {
+            const open = box.style.display === 'none';
+            box.style.display = open ? '' : 'none';
+            replyBtn.classList.toggle('on', open);
+            if (open) input.focus?.();
+          }
+
+          async function submit() {
+            const text = input.value.trim();
+            if (!text) {
+              hint.textContent = '先写一句。';
+              return;
+            }
+            send.disabled = true;
+            hint.textContent = '发送中…';
+            try {
+              const result = await ctx.invoke('reply_comment', [url, c.rpid, text]);
+              if (result?.ok === false) throw new Error(result.error || '没发出去');
+              input.value = '';
+              hint.textContent = '';
+              box.style.display = 'none';
+              replyBtn.textContent = '已回';
+              row.classList.add('replied');
+              msgSet(result?.receipt || '回复发出去了。');
+            } catch (error) {
+              hint.textContent = error.message || String(error);
+            } finally {
+              send.disabled = false;
+            }
+          }
+
+          input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') submit();
+          });
+          return row;
+        }
+
         function openInboxSheet(filter = sheetFilter) {
           sheetFilter = filter;
           const count = (k) => (k === 'all' ? inboxItems.length : inboxItems.filter((x) => x.kind === k).length);
@@ -1089,13 +1211,18 @@ export default {
           live.style.display = '';
           live.classList.toggle('cowatch', p.phase === 'co-watch');
           const isDy = p.platform === 'douyin';
+          const kindLabel = p.kind === 'opus' ? '动态' : p.kind === 'article' ? '专栏' : '';
           livePlat.textContent = isDy ? '抖音' : 'B站';
           livePlat.className = `stroll-live-plat ${isDy ? 'douyin' : 'bilibili'}`;
           liveTitle.textContent = p.title || p.url || '一条内容';
           liveTitle.title = p.title || p.url || '';
           liveMeta.textContent = [
             p.author ? cut(p.author, 16) : '',
-            p.phase === 'co-watch' ? '一起看，跟着你的进度' : '后台看，不占你的屏幕',
+            p.phase === 'co-watch'
+              ? '一起看，跟着你的进度'
+              : kindLabel
+                ? `后台看${kindLabel}，不占你的屏幕`
+                : '后台看，不占你的屏幕',
             p.duration ? clock(p.duration) : '',
           ]
             .filter(Boolean)
@@ -1127,9 +1254,10 @@ export default {
 
         function showToast(p) {
           const isDy = p.platform === 'douyin';
+          const what = p.kind === 'opus' ? '看动态' : p.kind === 'article' ? '看专栏' : '了';
           toast.replaceChildren(
             icon('play', 12),
-            el('b', `她去${isDy ? '抖音' : 'B站'}了`),
+            el('b', `她去${isDy ? '抖音' : 'B站'}${what}`),
             el('span', cut(p.title || p.url || '', 24)),
           );
           toast.className = `stroll-toast show ${isDy ? 'douyin' : 'bilibili'}`;
@@ -1388,7 +1516,7 @@ export default {
                 ? ['稍后再看是空的', '在 B站把视频加进「稍后再看」，这里就会出现。']
                 : listKind === 'popular'
                   ? ['没取到热门', '检查一下 B站登录，或稍后再试。']
-                  : ['还没看过视频', '打开一条之后，这里会记住它，方便再看。'];
+                  : ['还没看过内容', '打开一条之后，这里会记住它，方便再看。'];
             empty.append(el('strong', text[0]), el('span', text[1]));
             historyList.append(empty);
             return;
@@ -1569,7 +1697,7 @@ export default {
           acts.append(goBtn);
 
           let replyBox = null;
-          if (item.type === 'video' && item.bvid) {
+          if (item.bvid || item.dynamicId || item.cvid) {
             const replyBtn = el('button', undefined, 'stroll-chipbtn');
             replyBtn.type = 'button';
             replyBtn.append(icon('comment', 12), el('span', '回一句'));
@@ -1744,12 +1872,17 @@ export default {
         }
 
         async function toggleAuto() {
-          const on = Number(lastData?.config?.autoSessionsPerDay ?? 0) > 0;
-          msgSet(on ? '正在关掉自己出门…' : '正在开启自己出门…');
+          const cur = Number(lastData?.config?.autoSessionsPerDay ?? 0);
+          const next = cur > 0 ? 0 : autoRemember > 0 ? autoRemember : 5;
+          msgSet(cur > 0 ? '正在关掉自己出门…' : '正在开启自己出门…');
           try {
-            const result = await ctx.invoke('set_auto', [on ? 0 : 1]);
+            const result = await ctx.invoke('set_auto', [next]);
             if (result?.ok === false) throw new Error(result.error || '没改成');
-            msgSet(on ? '已关掉自己出门，只在你叫的时候逛。' : '已开启：每天最多自己逛一次（10–22 点之间）。');
+            msgSet(
+              cur > 0
+                ? '已关掉自己出门，只在你叫的时候逛。'
+                : `已开启：每天最多自己逛 ${next} 次，两次之间会隔一会儿。`,
+            );
             await refresh();
           } catch (error) {
             msgSet(error.message || String(error), true);

@@ -12,7 +12,9 @@ import {
   nowIso,
   openInBrowser,
   parseBvid,
+  parseCvid,
   parseDouyinId,
+  parseDynamicId,
   platformUrl,
   truncate,
 } from './util.js';
@@ -220,6 +222,12 @@ export class StrollWorld {
     if (action === 'feed') return JSON.stringify(await this.feed(args.platform, args.n));
     if (action === 'open') return this.readOpen(args);
     if (action === 'inbox') return JSON.stringify(await this.inbox(args.platform, args.n));
+    if (action === 'comments') {
+      const url = String(args.url ?? args.id ?? '').trim();
+      if (!url) return JSON.stringify({ ok: false, error: '给个 B站视频/动态/专栏链接。' });
+      const data = await this.bili.commentsOf(url, clamp(args.n ?? 10, 1, 20));
+      return JSON.stringify({ ok: true, ...data });
+    }
     if (action === 'search') {
       if (!String(args.query ?? '').trim()) return JSON.stringify({ ok: false, error: '给个搜索词。' });
       if (args.platform === 'douyin') {
@@ -353,6 +361,7 @@ export class StrollWorld {
     }
     try {
       if (this.cfg.bilibili) inbox = await this.bili.inbox(3);
+      if (inbox.length) this.inboxCache = inbox;
     } catch (error) {
       errors.push({ platform: 'bilibili', error: error.message });
     }
@@ -405,13 +414,29 @@ export class StrollWorld {
 
     if (platform === 'bilibili') {
       const bvid = parseBvid(raw);
-      if (!bvid) return JSON.stringify({ ok: false, error: '不是有效的 B站视频链接/ BV 号。' });
-      const detail = await this.bili.open(bvid, { comments: 5 });
+      const dynId = bvid ? null : parseDynamicId(raw);
+      const cvid = bvid || dynId ? null : parseCvid(raw);
+      if (!bvid && !dynId && !cvid) {
+        return JSON.stringify({ ok: false, error: '不是有效的 B站视频 / 动态 / 专栏链接。' });
+      }
+      const detail = bvid
+        ? await this.bili.open(bvid, { comments: 5 })
+        : dynId
+          ? await this.bili.openDynamic(dynId, { comments: 5 })
+          : await this.bili.openArticle(cvid, { comments: 5 });
       this.store.markSeen(`bilibili:open:${detail.id}`);
       this.policy.noteRead('bilibili', { open: true });
-      this.lastOpen = { platform: 'bilibili', id: detail.id, title: detail.title, url: detail.url, at: Date.now() };
+      this.lastOpen = {
+        platform: 'bilibili',
+        kind: detail.kind,
+        id: detail.id,
+        title: detail.title,
+        url: detail.url,
+        at: Date.now(),
+      };
       this.setPresence({
         platform: 'bilibili',
+        kind: detail.kind,
         id: detail.id,
         title: detail.title,
         author: detail.author,
@@ -422,10 +447,11 @@ export class StrollWorld {
       });
       this.store.addViewed({
         platform: 'bilibili',
+        kind: detail.kind,
         id: detail.id,
         title: detail.title,
         author: detail.author,
-        dur: detail.dur,
+        dur: detail.dur ?? '',
         url: detail.url,
       });
       return JSON.stringify({
@@ -476,7 +502,9 @@ export class StrollWorld {
     const p = platform === 'douyin' || platform === 'bilibili' ? platform : 'bilibili';
     if (p === 'bilibili') {
       if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
-      return { ok: true, platform: p, items: await this.bili.inbox(clamp(n ?? 6, 1, 8)) };
+      const items = await this.bili.inbox(clamp(n ?? 6, 1, 8));
+      if (items.length) this.inboxCache = items;
+      return { ok: true, platform: p, items };
     }
     if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
     return { ok: true, platform: p, items: await this.douyin.inbox(clamp(n ?? 5, 1, 8)) };
@@ -528,10 +556,11 @@ export class StrollWorld {
    * 记一条「她现在在看什么」。面板靠它显示浮条，主人一打开就知道她在哪个平台、
    * 看的是哪一条；默认只留在本地，不花 token。
    */
-  setPresence({ platform, id, title, author, url, phase, keepMs = 150000, duration = 0 }) {
+  setPresence({ platform, kind, id, title, author, url, phase, keepMs = 150000, duration = 0 }) {
     const startedAt = Date.now();
     this.presence = {
       platform,
+      kind: kind || 'video',
       id: String(id ?? ''),
       title: title || '',
       author: author || '',
@@ -551,6 +580,7 @@ export class StrollWorld {
     if (p.phase !== 'co-watch' && p.endsAt && Date.now() > p.endsAt) return null;
     return {
       platform: p.platform,
+      kind: p.kind || 'video',
       id: p.id,
       title: p.title,
       author: p.author,
@@ -651,15 +681,24 @@ export class StrollWorld {
   /** B站评论区在 shadow DOM 里，DOM 读不到；一起看时直接用官方评论接口。 */
   async watchComments(digest) {
     if (digest?.platform !== 'bilibili') return digest?.comments ?? [];
-    const bvid = parseBvid(digest.url);
-    if (!bvid) return [];
     try {
-      const info = await this.bili.view(bvid);
-      const list = await this.bili.comments(info.aid, 3);
-      return list.map((c) => `${c.author}：${c.text}`);
+      const bvid = parseBvid(digest.url);
+      if (bvid) {
+        const info = await this.bili.view(bvid);
+        const list = await this.bili.comments(info.aid, 3);
+        return list.map((c) => `${c.author}：${c.text}`);
+      }
+      const dyn = parseDynamicId(digest.url);
+      if (dyn) {
+        const d = await this.bili.dynamic(dyn);
+        if (!d.oid) return [];
+        const list = await this.bili.replyList(d.commentType, d.oid, 3);
+        return list.map((c) => `${c.author}：${c.text}`);
+      }
     } catch {
       return [];
     }
+    return [];
   }
 
   async watchStatus() {
@@ -703,21 +742,67 @@ export class StrollWorld {
 
   /**
    * 在面板里直接回一条「谁找你」里的评论。
-   * 视频评论能精确定位到楼（root/parent 都从消息里带），动态的楼中楼接口还没接，先如实说。
+   * 视频、动态、专栏走同一套：先确认评论区在哪，再带 root/parent 回楼中楼。
    */
   async replyToMessage(id, text) {
     const item = (this.inboxCache ?? []).find((x) => String(x.id) === String(id));
     if (!item) return { ok: false, error: '这条消息已经刷新掉了，点「刷新消息」再来。' };
     if (!text) return { ok: false, error: '回复要有正文。' };
-    if (item.type !== 'video' || !item.bvid) {
-      return { ok: false, error: '动态/专栏的楼中楼还没接上；点「去看看」在网页里回她。' };
+    if (!item.rpid || item.rpid === '0') {
+      return { ok: false, error: '这条消息没带评论 ID，去网页里回。' };
     }
-    const check = this.policy.check('reply', 'bilibili', item.bvid, { userInitiated: true, quotaAction: 'comment' });
-    if (!check.ok) return { ok: false, error: check.message ?? '今天额度不够。' };
+
+    let kind = '';
+    if (item.type === 'video' && item.bvid) kind = 'video';
+    else if (item.type === 'opus' && item.dynamicId) kind = 'opus';
+    else if (item.type === 'article' && item.cvid) kind = 'article';
+    if (!kind) return { ok: false, error: '这条落在页面里，没有可回复的评论接口；点「去看看」在网页里回。' };
+
+    let target = '';
+    let oid = '';
+    let commentType = 1;
+    let dynamicId = '';
+    let articleId = '';
+    try {
+      if (kind === 'video') {
+        target = item.bvid;
+        const v = await this.bili.view(target);
+        oid = v.aid;
+      } else if (kind === 'opus') {
+        dynamicId = item.dynamicId;
+        target = `dyn:${dynamicId}`;
+        const d = await this.bili.dynamic(dynamicId);
+        if (!d.oid) return { ok: false, error: '这条动态没开评论区。' };
+        oid = d.oid;
+        commentType = d.commentType;
+      } else {
+        articleId = item.cvid;
+        target = `cv:${articleId}`;
+        oid = articleId;
+        commentType = 12;
+      }
+    } catch (error) {
+      return { ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) };
+    }
+
+    const dedupeKey = `bilibili:reply:${target}:r${item.rpid}`;
+    const check = this.policy.check('reply', 'bilibili', target, {
+      userInitiated: true,
+      quotaAction: 'comment',
+      dedupeKey,
+    });
+    if (!check.ok) return { ok: false, code: check.code, error: check.message ?? '今天额度不够。' };
+
     const plan = {
       action: 'reply',
       platform: 'bilibili',
-      target: item.bvid,
+      target,
+      kind,
+      dynamicId,
+      articleId,
+      oid,
+      commentType,
+      dedupeKey,
       text,
       root: item.rootRpid && item.rootRpid !== '0' ? item.rootRpid : item.rpid,
       parent: item.rpid,
@@ -729,6 +814,76 @@ export class StrollWorld {
       this.inboxCache = this.inboxCache.map((x) => (String(x.id) === String(id) ? { ...x, replied: true, fresh: false } : x));
     }
     return receipt;
+  }
+
+  /**
+   * 面板「看评论」弹层里，直接回某一条。
+   * url 可以是视频 / 动态 / 专栏；rpid 是弹层里那条评论。
+   */
+  async replyComment(url, rpid, text) {
+    const raw = String(url ?? '').trim();
+    if (!raw) return { ok: false, error: '没有可回复的链接。' };
+    const bvid = parseBvid(raw);
+    const dynId = bvid ? null : parseDynamicId(raw);
+    const cvid = bvid || dynId ? null : parseCvid(raw);
+    if (!bvid && !dynId && !cvid) return { ok: false, error: '这个链接不是 B站视频/动态/专栏。' };
+
+    let kind = 'video';
+    let id = bvid;
+    let oid = '';
+    let commentType = 1;
+    try {
+      if (bvid) {
+        const v = await this.bili.view(bvid);
+        oid = v.aid;
+        id = v.bvid;
+      } else if (dynId) {
+        const d = await this.bili.dynamic(dynId);
+        if (!d.oid) return { ok: false, error: '这条动态没开评论区。' };
+        kind = 'opus';
+        id = d.id;
+        oid = d.oid;
+        commentType = d.commentType;
+      } else {
+        const a = await this.bili.article(cvid);
+        kind = 'article';
+        id = a.id;
+        oid = a.oid;
+        commentType = 12;
+      }
+    } catch (error) {
+      return { ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) };
+    }
+
+    const target = kind === 'video' ? id : kind === 'opus' ? `dyn:${id}` : `cv:${id}`;
+    const dynamicId = kind === 'opus' ? id : '';
+    const articleId = kind === 'article' ? id : '';
+    const found = await this.bili.findReply(commentType, oid, rpid);
+    if (!found) return { ok: false, error: '评论区里找不到这条了，刷新一下再试。' };
+    const dedupeKey = `bilibili:reply:${target}:r${rpid}`;
+    const check = this.policy.check('reply', 'bilibili', target, {
+      userInitiated: true,
+      quotaAction: 'comment',
+      dedupeKey,
+    });
+    if (!check.ok) return { ok: false, code: check.code, error: check.message };
+    return this.executePlan(
+      {
+        action: 'reply',
+        platform: 'bilibili',
+        target,
+        kind,
+        dynamicId,
+        articleId,
+        oid,
+        commentType,
+        dedupeKey,
+        text,
+        root: found.root && found.root !== '0' ? found.root : found.rpid,
+        parent: found.rpid,
+      },
+      'operator',
+    );
   }
 
   /* ---------------- write planning ---------------- */
@@ -773,9 +928,15 @@ export class StrollWorld {
         target = /^\d{1,20}$/.test(targetRaw) ? targetRaw : '';
         if (!target) {
           const bvid = parseBvid(targetRaw);
-          if (!bvid) return { ok: false, error: '关注要给对方 UID 或视频链接。' };
-          const v = await this.bili.view(bvid);
-          target = v.authorId;
+          if (bvid) {
+            const v = await this.bili.view(bvid);
+            target = v.authorId;
+          } else {
+            const dynId = parseDynamicId(targetRaw);
+            if (!dynId) return { ok: false, error: '关注要给对方 UID、视频链接或动态链接。' };
+            const d = await this.bili.dynamic(dynId);
+            target = d.authorId;
+          }
         }
         if (!target) return { ok: false, error: '拿不到对方 UID。' };
       } else {
@@ -815,23 +976,53 @@ export class StrollWorld {
         return { ok: true, action, platform, target, text, mentionOwner };
       }
 
+      let kind = 'video';
       target = parseBvid(targetRaw);
-      if (!target) return { ok: false, error: '给个 BV 号/链接。' };
+      let dynamicId = '';
+      let articleId = '';
+      if (!target) {
+        dynamicId = parseDynamicId(targetRaw) ?? '';
+        articleId = dynamicId ? '' : (parseCvid(targetRaw) ?? '');
+        if (dynamicId) {
+          kind = 'opus';
+          target = `dyn:${dynamicId}`;
+        } else if (articleId) {
+          kind = 'article';
+          target = `cv:${articleId}`;
+        }
+      }
+      if (!target) return { ok: false, error: '给个视频 / 动态 / 专栏链接。' };
+
+      let oid = '';
+      let commentType = kind === 'article' ? 12 : 1;
+      if (kind === 'opus') {
+        const d = await this.bili.dynamic(dynamicId);
+        if (!d.oid) return { ok: false, error: '这条动态没开评论区。' };
+        oid = d.oid;
+        commentType = d.commentType;
+      } else if (kind === 'article') {
+        oid = articleId;
+      } else {
+        const v = await this.bili.view(target);
+        oid = v.aid;
+      }
+
       let root = '';
       let parent = '';
+      let dedupeKey = '';
       if (action === 'reply') {
         const rpid = String(args.reply_to ?? '').trim();
         if (!rpid) return { ok: false, error: '回复要给 reply_to（评论 ID）。' };
-        const v = await this.bili.view(target);
-        const list = await this.bili.comments(v.aid, 50);
-        const found = list.find((c) => c.rpid === rpid);
-        if (!found) return { ok: false, error: '在热评里没找到这条评论；换一条或先读评论。' };
+        const found = await this.bili.findReply(commentType, oid, rpid);
+        if (!found) return { ok: false, error: '在评论区里没找到这条评论；可能删了，或再往前翻一页。' };
         root = found.root && found.root !== '0' ? found.root : found.rpid;
         parent = found.rpid;
+        // 一条评论只回一次；同一内容下的不同评论互不影响
+        dedupeKey = `${platform}:${action}:${target}:r${rpid}`;
       }
-      const check = this.policy.check(action, platform, target, { quotaAction: 'comment' });
+      const check = this.policy.check(action, platform, target, { quotaAction: 'comment', dedupeKey });
       if (!check.ok) return check;
-      return { ok: true, action, platform, target, text, mentionOwner, root, parent };
+      return { ok: true, action, platform, target, text, mentionOwner, root, parent, kind, dynamicId, articleId, oid, commentType, dedupeKey };
     }
 
     if (action === 'post') {
@@ -872,6 +1063,12 @@ export class StrollWorld {
       action: plan.action,
       platform: plan.platform,
       target: plan.target,
+      kind: plan.kind ?? '',
+      dynamicId: plan.dynamicId ?? '',
+      articleId: plan.articleId ?? '',
+      oid: plan.oid ?? '',
+      commentType: plan.commentType ?? 0,
+      dedupeKey: plan.dedupeKey ?? '',
       text: plan.text ?? '',
       mentionOwner: !!plan.mentionOwner,
       root: plan.root ?? '',
@@ -882,7 +1079,19 @@ export class StrollWorld {
   previewText(draft) {
     const p = PLATFORM_NAMES[draft.platform] ?? draft.platform;
     const a = ACTION_NAMES[draft.action] ?? draft.action;
-    const target = draft.action === 'post' ? '动态' : draft.action === 'dm' ? `给 ${draft.target}` : draft.target;
+    const known = this.titleOf(draft.platform, draft.target);
+    const target =
+      draft.action === 'post'
+        ? '动态'
+        : draft.action === 'dm'
+          ? `给 ${draft.target}`
+          : known
+            ? `《${truncate(known, 24)}》`
+            : draft.kind === 'opus'
+              ? '一条动态'
+              : draft.kind === 'article'
+                ? '一篇专栏'
+                : draft.target;
     const body = draft.text ? `：${truncate(draft.text, 80)}` : '';
     return `【${p}·${a}】${target}${body}${draft.mentionOwner ? '（@主人）' : ''}`;
   }
@@ -891,7 +1100,11 @@ export class StrollWorld {
   async approveDraft(id, source = 'operator') {
     const draft = this.store.draft(id);
     if (!draft || draft.status !== 'pending') return { ok: false, error: '这条草稿不在了或已处理。' };
-    const check = this.policy.check(draft.action, draft.platform, draft.target, { userInitiated: true, quotaAction: this.capAction(draft.action) });
+    const check = this.policy.check(draft.action, draft.platform, draft.target, {
+      userInitiated: true,
+      quotaAction: this.capAction(draft.action),
+      dedupeKey: draft.dedupeKey,
+    });
     if (!check.ok) {
       this.store.closeDraft(id, 'rejected', { reason: check.message });
       this.store.save();
@@ -904,6 +1117,12 @@ export class StrollWorld {
       action: draft.action,
       platform: draft.platform,
       target: draft.target,
+      kind: draft.kind,
+      dynamicId: draft.dynamicId,
+      articleId: draft.articleId,
+      oid: draft.oid,
+      commentType: draft.commentType,
+      dedupeKey: draft.dedupeKey,
       text: draft.text,
       mentionOwner: draft.mentionOwner,
       root: draft.root,
@@ -940,7 +1159,11 @@ export class StrollWorld {
       } else if (action === 'comment' || action === 'reply') {
         result = platform === 'bilibili'
           ? await this.bili.comment({
-              bvid: target,
+              bvid: plan.kind === 'video' || !plan.kind ? target : '',
+              dynamicId: plan.kind === 'opus' ? plan.dynamicId : '',
+              articleId: plan.kind === 'article' ? plan.articleId : '',
+              oid: plan.oid,
+              replyType: plan.commentType,
               text,
               root: plan.root,
               parent: plan.parent,
@@ -957,8 +1180,10 @@ export class StrollWorld {
 
       this.policy.consume(action, platform, target, {
         quotaAction: this.capAction(action),
+        dedupeKey: plan.dedupeKey,
         text,
         title: this.titleOf(platform, target),
+        kind: plan.kind ?? result?.kind,
         result: 'ok',
         extra: result,
         tags: plan.mentionOwner ? [] : [],
@@ -996,7 +1221,10 @@ export class StrollWorld {
       if (platform === 'douyin' && result?.queued) return '抖音 评论发出去了，评论区暂时没刷出来，可能审核中';
     }
     if (action === 'comment' || action === 'reply') {
-      const bits = [`${p} 评论发出去了`];
+      const verb = action === 'reply' ? '回复' : '评论';
+      const bits = [`${p} ${verb}发出去了`];
+      if (result?.kind === 'opus') bits.push('动态');
+      if (result?.kind === 'article') bits.push('专栏');
       if (result.rpid) bits.push(`rpid ${result.rpid}`);
       if (result.mentioned === true) bits.push('@ 已生效');
       if (result.mentioned === false) bits.push('@ 没生效');
@@ -1117,7 +1345,7 @@ export class StrollWorld {
         return { ok: true, background: on };
       }
       if (method === 'set_auto') {
-        const n = clamp(Number(args[0] ?? 0), 0, 3);
+        const n = clamp(Number(args[0] ?? 0), 0, 10);
         this.persist({ autoSessionsPerDay: n });
         return { ok: true, autoSessionsPerDay: n };
       }
@@ -1191,6 +1419,21 @@ export class StrollWorld {
         const id = String(args[0] ?? '');
         const text = clampText(String(args[1] ?? ''), Number(this.cfg.commentMaxChars ?? 120));
         return await this.replyToMessage(id, text);
+      }
+      if (method === 'comments') {
+        const url = String(args[0] ?? '').trim();
+        if (!url) return { ok: false, error: '没有可看的链接。' };
+        const n = clamp(Number(args[1] ?? 10), 1, 20);
+        const data = await this.bili.commentsOf(url, n);
+        return { ok: true, ...data };
+      }
+      if (method === 'reply_comment') {
+        const url = String(args[0] ?? '').trim();
+        const rpid = String(args[1] ?? '').trim();
+        const text = clampText(String(args[2] ?? ''), Number(this.cfg.commentMaxChars ?? 120));
+        if (!rpid) return { ok: false, error: '没指定要回哪一条评论。' };
+        if (!text) return { ok: false, error: '回复要有正文。' };
+        return await this.replyComment(url, rpid, text);
       }
       if (method === 'save_toview') {
         const url = String(args[0] ?? this.lastOpen?.url ?? '').trim();
@@ -1280,8 +1523,9 @@ export class StrollWorld {
 
   /** 这条动作针对的内容叫什么；老记录没有标题，就从「看过」里补。 */
   titleOf(platform, target) {
-    const id = String(target ?? '');
-    if (!id) return '';
+    const raw = String(target ?? '');
+    if (!raw) return '';
+    const id = raw.replace(/^(dyn|cv):/i, '');
     if (this.lastOpen && this.lastOpen.platform === platform && String(this.lastOpen.id) === id) {
       return this.lastOpen.title || '';
     }
@@ -1294,6 +1538,7 @@ export class StrollWorld {
     return {
       action: entry.action,
       platform: entry.platform,
+      kind: entry.kind || kindOfTarget(entry.target),
       target: entry.target ?? '',
       text: entry.text ?? '',
       title: entry.title || this.titleOf(entry.platform, entry.target),
@@ -1335,6 +1580,13 @@ export class StrollWorld {
     const day = dayKey(new Date(), this.timeZone);
     this.store.data.usage[day] = {};
     this.store.data.lastWriteAt = 0;
+    // 顺带清掉「今天做过了」的去重键，不然清零后还是评不了同一条
+    const keep = {};
+    for (const [key, at] of Object.entries(this.store.data.seen ?? {})) {
+      if (/^(bilibili|douyin):(like|unlike|comment|reply|follow|unfollow|post|dm|save):/.test(key)) continue;
+      keep[key] = at;
+    }
+    this.store.data.seen = keep;
     this.store.save();
     return { ok: true, day, usage: this.policy.snapshot().usage };
   }
@@ -1431,14 +1683,26 @@ function clamp(n, min, max) {
   return Math.min(max, Math.max(min, Math.round(v)));
 }
 
-/** 把动作记录里的 target（BV 号 / 抖音 ID / UID）还原成能打开的网页。 */
+/** 把动作记录里的 target（BV 号 / 动态 ID / 专栏 ID / 抖音 ID / UID）还原成能打开的网页。 */
 function actionUrl(entry) {
   const target = String(entry?.target ?? '').trim();
   if (!target) return '';
+  const kind = entry.kind || kindOfTarget(target);
+  const bare = target.replace(/^(dyn|cv):/i, '');
   if (entry.platform === 'bilibili') {
+    if (kind === 'opus') return `https://t.bilibili.com/${bare}`;
+    if (kind === 'article') return `https://www.bilibili.com/read/cv${bare}`;
     if (/^(BV[0-9A-Za-z]{10}|av\d+)$/i.test(target)) return `https://www.bilibili.com/video/${target}`;
     if (/^\d{5,20}$/.test(target)) return `https://space.bilibili.com/${target}`;
   }
   if (entry.platform === 'douyin' && /^\d{10,24}$/.test(target)) return `https://www.douyin.com/video/${target}`;
   return '';
+}
+
+/** 从 target 前缀猜它是视频、动态还是专栏；老记录没有 kind 时用。 */
+function kindOfTarget(target) {
+  const text = String(target ?? '');
+  if (/^dyn:/i.test(text)) return 'opus';
+  if (/^cv:/i.test(text)) return 'article';
+  return 'video';
 }

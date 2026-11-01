@@ -1769,6 +1769,65 @@
   flex-direction: column;
   gap: 8px;
 }
+
+/* ---------------- 评论区 ---------------- */
+.stroll-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stroll-comment {
+  padding: 10px 12px 11px;
+  border: 1px solid var(--s-line);
+  border-radius: 12px;
+  background: var(--s-surface);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.stroll-comment.replied {
+  border-color: color-mix(in srgb, var(--s-ok) 36%, var(--s-line));
+  background: color-mix(in srgb, var(--s-ok) 6%, var(--s-surface));
+}
+.stroll-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+.stroll-comment-head .stroll-msguser {
+  font-weight: 600;
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-comment-like {
+  margin-left: auto;
+  flex: none;
+  font-size: 10.5px;
+  opacity: 0.45;
+}
+.stroll-comment-text {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.stroll-comment-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+.stroll-comment-acts .stroll-btn {
+  padding: 2px 9px;
+  font-size: 11px;
+}
+.stroll-comment-reply {
+  margin-top: 8px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--s-line-soft);
+}
 .stroll-detail {
   position: relative;
   padding: 10px 12px 11px;

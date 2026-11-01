@@ -1,0 +1,77 @@
+{
+  "name": "cortico-world-mosey",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "摸鱼（Mosey）：让 Coopanion 的桌宠自己去抖音和 B站逛一圈。按额度点赞、评论、关注、发动态、私信；指定视频可自己开窗看。三把工具、少 token、默认人审。",
+  "license": "MIT",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "coopanion",
+    "mosey",
+    "douyin",
+    "bilibili",
+    "desktop-pet",
+    "ai-companion",
+    "playwright",
+    "automation"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "author": "liqin1018",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liqin1018/cortico-world-mosey.git"
+  },
+  "homepage": "https://github.com/liqin1018/cortico-world-mosey#readme",
+  "bugs": {
+    "url": "https://github.com/liqin1018/cortico-world-mosey/issues"
+  },
+  "main": "./src/index.js",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "摸鱼",
+    "describe": "describe.json",
+    "webUiClient": "webui/client.js",
+    "webUiStyle": "webui/style.css",
+    "icon": "assets/icon.png",
+    "tags": [
+      "social",
+      "video",
+      "browser",
+      "internet",
+      "unofficial-api",
+      "experimental",
+      "sensitive-data"
+    ],
+    "locales": {
+      "zh": {
+        "displayName": "摸鱼",
+        "description": "让她自己去抖音/B站逛：刷候选、看指定视频、点赞、评论、关注、发动态、@你、私信你。公开动作有硬额度，默认先出草稿等你批准；三把工具，token 花得少。"
+      },
+      "en": {
+        "displayName": "Mosey",
+        "description": "Let her browse Douyin and Bilibili: feed, open a video, like, comment, follow, post, mention or DM you. Hard caps and owner approval by default; only three tools to keep token use low."
+      }
+    }
+  },
+  "files": [
+    "src",
+    "webui",
+    "assets",
+    "docs",
+    "README.md",
+    "DESIGN.md",
+    "NOTICE.md",
+    "describe.json"
+  ],
+  "dependencies": {
+    "playwright-core": "^1.64.1"
+  },
+  "scripts": {
+    "describe": "node scripts/build-describe.mjs",
+    "check": "node scripts/smoke.mjs"
+  }
+}

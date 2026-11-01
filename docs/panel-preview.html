@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>摸鱼 面板预览</title>
+<link rel="stylesheet" href="../webui/style.css">
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0;
+    padding: 26px 30px 40px;
+    background: #fff;
+    color: #1f2328;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .wrap { max-width: 1010px; margin: 0 auto; }
+  .fake-tabs {
+    display: flex; align-items: center; gap: 18px;
+    padding: 14px 0 12px; border-bottom: 1px solid #eceff3; margin-bottom: 4px;
+    font-size: 13px; color: #6b7280;
+  }
+  .fake-tabs b { color: #1f2328; font-weight: 600; }
+  .fake-tabs b::after {
+    content: ''; display: block; height: 2px; width: 20px; margin-top: 8px;
+    background: #3b82f6; border-radius: 2px;
+  }
+  .fake-badges { display: flex; gap: 8px; margin-left: 4px; }
+  .fake-badges span {
+    border: 1px solid #e5e7eb; border-radius: 999px; padding: 2px 9px; font-size: 11px; color: #6b7280;
+  }
+  body.dark { background: #1b1c1f; color: #e8e8ea; }
+  body.dark .fake-tabs { border-color: #2c2d31; color: #9a9ba0; }
+  body.dark .fake-tabs b { color: #e8e8ea; }
+  body.dark .fake-badges span { border-color: #34353a; color: #9a9ba0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="fake-tabs">
+    <b>摸鱼</b><span>配置</span><span>摸鱼 · 环境提示词</span>
+    <span class="fake-badges"><span>今日赞 2/4</span><span>评 1/1</span><span>待批 1</span></span>
+  </div>
+  <div id="root"></div>
+</div>
+<script type="module">
+import panel from '../webui/client.js';
+
+if (new URLSearchParams(location.search).get('theme') === 'dark') {
+  document.body.classList.add('dark');
+}
+
+const now = Date.now();
+const viewed = [
+  {
+    platform: 'bilibili',
+    id: 'BV1Mm4y1771E',
+    title: '全是干货！5分钟大幅度提高你的对枪水平！【瓦罗兰特/无畏契约】',
+    author: '徐桑',
+    dur: '5:59',
+    at: new Date(now - 12 * 60000).toISOString(),
+    url: 'https://www.bilibili.com/video/BV1Mm4y1771E',
+  },
+  {
+    platform: 'douyin',
+    id: '7695080446131981622',
+    title: '无畏契约康康真正主力皮肤',
+    author: '康康',
+    dur: '1:24',
+    at: new Date(now - 46 * 60000).toISOString(),
+    url: 'https://www.douyin.com/video/7695080446131981622',
+  },
+  {
+    platform: 'bilibili',
+    id: 'BV1pzxw6yEMH',
+    title: '《此弟不宜久留》',
+    author: '某UP',
+    dur: '2:04',
+    at: new Date(now - 3 * 3600000).toISOString(),
+    url: 'https://www.bilibili.com/video/BV1pzxw6yEMH',
+  },
+];
+
+const inbox = [
+  {
+    kind: 'reply',
+    platform: 'bilibili',
+    type: 'video',
+    id: 'm1',
+    user: '布鲁斯皮特的皮ii',
+    mid: '38419935',
+    text: '回复 @穹和黑助 ：我勒个去，现在还有真萌新啊，，难得难得，',
+    quote: '我也卡在这个词上……是说储备站那几栋按国际象棋叫的、马的那栋吗？一直没认准。',
+    where: '看不懂，。因为萌新根本不知道啥叫黑马楼。。',
+    at: Math.floor(now / 1000) - 600,
+    url: 'https://www.bilibili.com/video/BV1b3411S7Ww#reply222731744112',
+    bvid: 'BV1b3411S7Ww',
+    rpid: '322477810928',
+    rootRpid: '222731744112',
+    fresh: true,
+  },
+  {
+    kind: 'reply',
+    platform: 'bilibili',
+    type: 'opus',
+    id: 'm2',
+    user: '时雨留痕',
+    mid: '2068905947',
+    text: '你在等空吗',
+    quote: '',
+    where: '阴天 新画的一张。阴天，窗台，外面云压得很低，田里也没什么动静。',
+    at: Math.floor(now / 1000) - 3600 * 6,
+    url: 'https://www.bilibili.com/opus/1264890047932399639#reply322347814112',
+    rpid: '322347814112',
+    rootRpid: '0',
+    fresh: true,
+  },
+  {
+    kind: 'reply',
+    platform: 'bilibili',
+    type: 'video',
+    id: 'm3',
+    user: '超绝捣蛋鬼',
+    mid: '11223344',
+    text: '回复 @穹和黑助 ：同意，最后那句才是要命的。',
+    quote: '这个补充说得对，被敲的人回一句就清零，那前面攒的全白搭。',
+    where: '敲屏幕那段可爱。不过提醒一直没人看',
+    at: Math.floor(now / 1000) - 3600 * 20,
+    url: 'https://www.bilibili.com/video/BV1dTnd6qEAq#reply321947798592',
+    bvid: 'BV1dTnd6qEAq',
+    rpid: '318527619217',
+    rootRpid: '321947798592',
+    replied: true,
+  },
+  {
+    kind: 'at',
+    platform: 'bilibili',
+    type: 'video',
+    id: 'm4',
+    user: '路过的A',
+    mid: '44556677',
+    text: '@穹和黑助 这个视频里说的就是你吧',
+    quote: '',
+    where: '打游戏最怕遇到这种队友',
+    at: Math.floor(now / 1000) - 3600 * 26,
+    url: 'https://www.bilibili.com/video/BV1pzxw6yEMH#reply321000000001',
+    bvid: 'BV1pzxw6yEMH',
+    rpid: '321000000001',
+    rootRpid: '0',
+  },
+  {
+    kind: 'reply',
+    platform: 'bilibili',
+    type: 'video',
+    id: 'm5',
+    user: '信研xy',
+    mid: '55667788',
+    text: '回复 @穹和黑助 ：同一件事各撞了一回，这个概率真的离谱。',
+    quote: '撞得这么准，我都怀疑是不是同一套算法在推。',
+    where: '这一年我看过的三百个视频',
+    at: Math.floor(now / 1000) - 3600 * 40,
+    url: 'https://www.bilibili.com/video/BV1XYxg6DEyf#reply322185884848',
+    bvid: 'BV1XYxg6DEyf',
+    rpid: '322213591392',
+    rootRpid: '322185884848',
+  },
+  {
+    kind: 'reply',
+    platform: 'bilibili',
+    type: 'video',
+    id: 'm6',
+    user: '橘子汽水',
+    mid: '66778899',
+    text: '说得挺好，不过我还是觉得那段节奏太慢了。',
+    quote: '',
+    where: '深夜听歌指南',
+    at: Math.floor(now / 1000) - 3600 * 52,
+    url: 'https://www.bilibili.com/video/BV1SVsd6MEGZ#reply320111222333',
+    bvid: 'BV1SVsd6MEGZ',
+    rpid: '320111222333',
+    rootRpid: '0',
+  },
+];
+
+const searchItems = [
+  {
+    id: 'BV1Mm4y1771E',
+    title: '全是干货！5分钟大幅度提高你的对枪水平！',
+    author: '徐桑',
+    dur: '5:59',
+    stat: '5.6万赞 230.5万播',
+    url: 'https://www.bilibili.com/video/BV1Mm4y1771E',
+  },
+  {
+    id: 'BV1NpaW6tED1',
+    title: '笑了两个小时才舍得发出来',
+    author: '开心果-瓦瓦下饭菜',
+    dur: '2:17',
+    stat: '4.5万赞 114.8万播',
+    url: 'https://www.bilibili.com/video/BV1NpaW6tED1',
+  },
+  {
+    id: 'BV1SVsd6MEGZ',
+    title: '这个转场我能看一百遍',
+    author: '剪辑小能手',
+    dur: '1:02',
+    stat: '1.2万赞 30.1万播',
+    url: 'https://www.bilibili.com/video/BV1SVsd6MEGZ',
+  },
+];
+
+const fake = {
+  root: document.getElementById('root'),
+  language: 'zh',
+  interval: () => ({}),
+  invoke: async (method, args) => {
+    if (method === 'inbox') {
+      return {
+        ok: true,
+        items: inbox,
+        counts: { all: inbox.length, reply: inbox.filter((x) => x.kind === 'reply').length, at: inbox.filter((x) => x.kind === 'at').length },
+        unread: inbox.filter((x) => x.fresh).length,
+      };
+    }
+    if (method === 'mark_seen') return { ok: true, marked: 1 };
+    if (method === 'presence') {
+      return {
+        ok: true,
+        presence: {
+          platform: 'bilibili',
+          id: 'BV1Mm4y1771E',
+          title: '全是干货！5分钟大幅度提高你的对枪水平！【瓦罗兰特/无畏契约】',
+          author: '徐桑',
+          url: 'https://www.bilibili.com/video/BV1Mm4y1771E',
+          phase: 'reading',
+          startedAt: Date.now() - 74 * 1000,
+          duration: 359,
+        },
+      };
+    }
+    if (method === 'presence_dismiss') return { ok: true };
+    if (method === 'set_ramp') return { ok: true, newAccountRamp: false };
+    if (method === 'set_activity') {
+      return {
+        ok: true,
+        activity: String(args?.[0] ?? 'lively'),
+        label: '活跃',
+        dailyLikes: 16,
+        dailyComments: 6,
+        dailySessionsPerDay: 3,
+        autoSessionsPerDay: 3,
+      };
+    }
+    if (method === 'open_external') return { ok: true, url: String(args?.[0] ?? '') };
+    if (method === 'reply_to_comment') return { ok: true, receipt: 'B站 评论发出去了，rpid 330000000001，公开可见（预览数据）' };
+    if (method === 'save_toview') return { ok: true, receipt: '已加到 B站稍后再看（预览数据）' };
+    if (method === 'search') return { ok: true, query: String(args?.[0] ?? ''), items: searchItems };
+    if (method === 'list') {
+      const kind = String(args?.[0] ?? '');
+      if (kind === 'toview') {
+        return {
+          ok: true,
+          items: [
+            {
+              id: 'BV1b3411S7Ww',
+              title: '这个转场我能看一百遍',
+              author: '剪辑小能手',
+              dur: '1:02',
+              progress: 31,
+              url: 'https://www.bilibili.com/video/BV1b3411S7Ww',
+            },
+          ],
+        };
+      }
+      if (kind === 'popular') {
+        return {
+          ok: true,
+          items: [
+            {
+              id: 'BV16nxy6oE85',
+              title: '【大鸣王潮1566】他们不会察觉',
+              author: '寞桀緣才',
+              dur: '3:42',
+              stat: '1.8万赞 40.2万播',
+              url: 'https://www.bilibili.com/video/BV16nxy6oE85',
+            },
+            {
+              id: 'BV1WRxy6eEwA',
+              title: '歌剧老师锐评韩娱 Aespa、SEVENTEEN、NMIXX',
+              author: '铁豆钢蛋',
+              dur: '1:16:06',
+              stat: '2.3万赞 66.1万播',
+              url: 'https://www.bilibili.com/video/BV1WRxy6eEwA',
+            },
+          ],
+        };
+      }
+      return { ok: true, items: [] };
+    }
+    if (method !== 'status') return { ok: true, receipt: '预览模式：这里会显示真实回执。' };
+    return {
+      ok: true,
+      status: {
+        bili: { loggedIn: true, name: '穹和黑助', uid: '3747575836446062', ok: true },
+        douyin: { loggedIn: true, running: false, headless: true, ok: true },
+        policy: {
+          day: '2026-11-01',
+          usage: { like: 2, comment: 1, follow: 0, post: 0, dm: 0, save: 1 },
+          caps: { like: 4, comment: 1, follow: 1, post: 1, dm: 1, save: 2 },
+          quiet: false,
+          paused: { paused: false },
+          ramp: 0.4,
+          approval: 'confirm',
+          summary: '今日 赞2/4 评1/1 关0/1 发0/1 私0/1 存1/2',
+        },
+        owner: { uid: '32842111', name: '' },
+      },
+      drafts: [
+        {
+          id: 'draft_1',
+          action: 'comment',
+          platform: 'bilibili',
+          preview: '这个转场接得真准，第二段鼓点一进来整个人都醒了。',
+          ageSec: 42,
+        },
+      ],
+      recent: [
+        { platform: 'bilibili', action: 'comment', result: 'ok', text: '这个转场接得真准', at: new Date(now - 5 * 60000).toISOString(), url: 'https://www.bilibili.com/video/BV1Mm4y1771E' },
+        { platform: 'douyin', action: 'like', result: 'ok', text: '无畏契约康康真正主力皮肤', at: new Date(now - 40 * 60000).toISOString(), url: 'https://www.douyin.com/video/7695080446131981622' },
+        { platform: 'bilibili', action: 'open', result: 'ok', text: '《此弟不宜久留》', at: new Date(now - 52 * 60000).toISOString(), url: 'https://www.bilibili.com/video/BV1pzxw6yEMH' },
+        { platform: 'system', action: 'risk', result: 'paused', text: '抖音要求短信验证', at: new Date(now - 86400000).toISOString(), url: '' },
+      ],
+      inboxUnread: 2,
+      inboxCount: 6,
+      presence: {
+        platform: 'bilibili',
+        id: 'BV1Mm4y1771E',
+        title: '全是干货！5分钟大幅度提高你的对枪水平！【瓦罗兰特/无畏契约】',
+        author: '徐桑',
+        url: 'https://www.bilibili.com/video/BV1Mm4y1771E',
+        phase: 'reading',
+        startedAt: now - 74 * 1000,
+        endsAt: now + 100000,
+        duration: 359,
+        elapsed: 74,
+      },
+      activity: 'lively',
+      watchNotify: 'panel',
+      lastOpen: {
+        platform: 'bilibili',
+        id: 'BV1Mm4y1771E',
+        title: '全是干货！5分钟大幅度提高你的对枪水平！',
+        url: 'https://www.bilibili.com/video/BV1Mm4y1771E',
+        at: now - 12 * 60000,
+      },
+      watch: {
+        watching: true,
+        platform: 'bilibili',
+        title: '《此弟不宜久留》',
+        url: 'https://www.bilibili.com/video/BV1pzxw6yEMH',
+        time: 42,
+        duration: 124,
+      },
+      viewed,
+      todayReads: 3,
+      autoSessions: 0,
+      week: [
+        { day: '10-26', weekday: '一', actions: 1, reads: 2 },
+        { day: '10-27', weekday: '二', actions: 2, reads: 1 },
+        { day: '10-28', weekday: '三', actions: 0, reads: 0 },
+        { day: '10-29', weekday: '四', actions: 3, reads: 2 },
+        { day: '10-30', weekday: '五', actions: 1, reads: 4 },
+        { day: '10-31', weekday: '六', actions: 4, reads: 2 },
+        { day: '11-01', weekday: '日', actions: 2, reads: 3, today: true },
+      ],
+      config: {
+        background: true,
+        approval: 'confirm',
+        autoSessionsPerDay: 3,
+        dailyLikes: 16,
+        dailyComments: 6,
+        dailyFollows: 3,
+        dailyPosts: 2,
+        dailyDms: 3,
+        dailySaves: 8,
+        watchSpeakSec: 60,
+        tokenDailyBudget: 6000,
+        commentMaxChars: 120,
+        newAccountRamp: true,
+      },
+    };
+  },
+};
+
+panel.panels.stroll.mount(fake);
+</script>
+</body>
+</html>

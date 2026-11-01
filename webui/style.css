@@ -1,0 +1,1650 @@
+/*
+ * 遛弯面板样式。
+ * 颜色全部从 currentColor 混合，浅色/深色主题都能用，不依赖宿主是否定义变量。
+ */
+
+.stroll-panel {
+  --s-accent: #3b82f6;
+  --s-accent-2: #60a5fa;
+  --s-pink: #fb7299;
+  --s-douyin: #fe2c55;
+  --s-ok: #16a34a;
+  --s-warn: #d97706;
+  --s-bad: #dc2626;
+  --s-line: color-mix(in srgb, currentColor 13%, transparent);
+  --s-line-soft: color-mix(in srgb, currentColor 7%, transparent);
+  --s-surface: color-mix(in srgb, currentColor 3.5%, transparent);
+  --s-surface-2: color-mix(in srgb, currentColor 6%, transparent);
+  --s-radius: 16px;
+  box-sizing: border-box;
+  container-type: inline-size;
+  max-width: 960px;
+  padding: 2px 2px 28px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: inherit;
+}
+.stroll-panel *,
+.stroll-panel *::before,
+.stroll-panel *::after {
+  box-sizing: border-box;
+}
+
+/* ---------------- 概览 ---------------- */
+.stroll-hero {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 24px;
+  border: 1px solid var(--s-line);
+  border-radius: 20px;
+  background:
+    radial-gradient(120% 150% at 0% 100%, color-mix(in srgb, var(--s-accent) 10%, transparent), transparent 58%),
+    radial-gradient(120% 150% at 100% 0%, color-mix(in srgb, var(--s-pink) 9%, transparent), transparent 60%),
+    var(--s-surface);
+  overflow: hidden;
+}
+.stroll-hero::before {
+  content: '';
+  position: absolute;
+  right: -70px;
+  top: -90px;
+  width: 260px;
+  height: 260px;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--s-accent) 16%, transparent), transparent 70%);
+  pointer-events: none;
+}
+.stroll-hero-text {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+.stroll-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  opacity: 0.5;
+}
+.stroll-kicker i {
+  position: relative;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  color: var(--s-ok);
+  flex: none;
+}
+.stroll-kicker i::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  opacity: 0;
+  animation: stroll-pulse 2.8s ease-out infinite;
+}
+.stroll-kicker i.warn { color: var(--s-warn); }
+.stroll-kicker i.bad { color: var(--s-bad); }
+@keyframes stroll-pulse {
+  0% { opacity: 0.5; transform: scale(0.7); }
+  70% { opacity: 0; transform: scale(1.5); }
+  100% { opacity: 0; transform: scale(1.5); }
+}
+.stroll-hero h2 {
+  margin: 6px 0 4px;
+  font-size: 23px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  line-height: 1.25;
+}
+.stroll-lede {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.6;
+  max-width: 560px;
+}
+.stroll-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+.stroll-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--s-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 2%, transparent);
+  font-size: 11px;
+  opacity: 0.78;
+  white-space: nowrap;
+}
+.stroll-chip i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  flex: none;
+}
+.stroll-chip.ok i {
+  background: var(--s-ok);
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-ok) 14%, transparent);
+}
+.stroll-chip.warn i {
+  background: var(--s-warn);
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-warn) 14%, transparent);
+}
+.stroll-chip.bad i {
+  background: var(--s-bad);
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-bad) 14%, transparent);
+}
+.stroll-chip.live i {
+  background: var(--s-douyin);
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-douyin) 14%, transparent);
+}
+.stroll-hero-side {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.stroll-ring {
+  position: relative;
+  width: 96px;
+  height: 96px;
+}
+.stroll-ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  display: block;
+}
+.stroll-ring-track {
+  fill: none;
+  stroke: color-mix(in srgb, currentColor 11%, transparent);
+  stroke-width: 7;
+}
+.stroll-ring-fill {
+  fill: none;
+  stroke: var(--s-accent);
+  stroke-width: 7;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.55s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.stroll-ring.is-paused .stroll-ring-fill { stroke: var(--s-bad); }
+.stroll-ring-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  pointer-events: none;
+}
+.stroll-ring-center strong {
+  font-size: 21px;
+  font-weight: 650;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.stroll-ring-center span {
+  font-size: 9.5px;
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- 提示 ---------------- */
+.stroll-msg {
+  min-height: 0;
+  max-height: 0;
+  overflow: hidden;
+  margin: 0;
+  padding: 0 4px;
+  font-size: 11.5px;
+  color: var(--s-accent);
+  opacity: 0;
+  transition: max-height 0.2s ease, opacity 0.2s ease, margin 0.2s ease;
+}
+.stroll-msg.show {
+  max-height: 60px;
+  margin-top: 10px;
+  opacity: 1;
+}
+.stroll-msg.bad { color: var(--s-bad); }
+
+/* ---------------- 打开链接 ---------------- */
+.stroll-barwrap { margin-top: 14px; }
+.stroll-openbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 0;
+  padding: 7px 8px 7px 11px;
+  border: 1px solid var(--s-line);
+  border-radius: 14px;
+  background: var(--s-surface);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.stroll-openbar:focus-within {
+  border-color: color-mix(in srgb, var(--s-accent) 45%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-accent) 10%, transparent);
+}
+.stroll-openbar-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 9px;
+  flex: none;
+  color: var(--s-accent);
+  background: color-mix(in srgb, var(--s-accent) 11%, transparent);
+}
+.stroll-openbar-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+.stroll-openbar-input::placeholder { opacity: 0.38; }
+.stroll-mode {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 6%, transparent);
+  flex: none;
+}
+.stroll-mode button {
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.55;
+  white-space: nowrap;
+}
+.stroll-mode button:hover { opacity: 0.9; }
+.stroll-mode button.on {
+  color: var(--s-accent);
+  background: color-mix(in srgb, var(--s-accent) 14%, transparent);
+  opacity: 1;
+}
+.stroll-results {
+  margin-top: 8px;
+  border: 1px solid var(--s-line);
+  border-radius: 14px;
+  background: var(--s-surface);
+  overflow: hidden;
+}
+.stroll-results-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 7px 12px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--s-line-soft);
+}
+.stroll-results-head > span:first-child { font-weight: 650; }
+.stroll-results-count {
+  margin-left: auto;
+  font-size: 10px;
+  opacity: 0.45;
+}
+.stroll-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-top: 1px solid var(--s-line-soft);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.stroll-result:first-of-type { border-top: 0; }
+.stroll-result:hover { background: color-mix(in srgb, var(--s-accent) 6%, transparent); }
+.stroll-result-main { flex: 1; min-width: 0; }
+.stroll-result-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-result-meta {
+  margin-top: 1px;
+  font-size: 10.5px;
+  opacity: 0.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-result-go {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  flex: none;
+  color: var(--s-accent);
+  background: color-mix(in srgb, var(--s-accent) 10%, transparent);
+}
+
+/* ---------------- 区块 ---------------- */
+.stroll-sec { margin-top: 24px; }
+.stroll-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.stroll-sec-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+.stroll-sec-head h3::before {
+  content: '';
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--s-accent), color-mix(in srgb, var(--s-accent) 30%, transparent));
+  flex: none;
+}
+.stroll-sec-hint {
+  font-size: 10.5px;
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+}
+.stroll-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  opacity: 0.55;
+}
+.stroll-count.on {
+  background: var(--s-accent);
+  color: #fff;
+  opacity: 1;
+}
+.stroll-muted {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  opacity: 0.55;
+}
+
+/* ---------------- 正在看 ---------------- */
+.stroll-live {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 12px 14px 15px;
+  border: 1px solid color-mix(in srgb, var(--s-pink) 34%, var(--s-line));
+  border-radius: 15px;
+  background:
+    radial-gradient(120% 170% at 0% 0%, color-mix(in srgb, var(--s-pink) 13%, transparent), transparent 62%),
+    var(--s-surface);
+  overflow: hidden;
+  animation: stroll-live-in 0.35s ease;
+}
+.stroll-live.cowatch {
+  border-color: color-mix(in srgb, var(--s-accent) 36%, var(--s-line));
+  background:
+    radial-gradient(120% 170% at 0% 0%, color-mix(in srgb, var(--s-accent) 13%, transparent), transparent 62%),
+    var(--s-surface);
+}
+.stroll-live-main { flex: 1; min-width: 0; }
+.stroll-live-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10.5px;
+}
+.stroll-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--s-pink);
+  animation: stroll-pulse 1.9s ease-out infinite;
+}
+.stroll-live.cowatch .stroll-live-dot { background: var(--s-accent); animation-name: stroll-pulse-accent; }
+.stroll-live-label { font-weight: 700; letter-spacing: 0.05em; }
+.stroll-live-plat {
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--s-pink);
+  flex: none;
+}
+.stroll-live-plat.douyin {
+  background: #1f1f24;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+.stroll-live-elapsed {
+  margin-left: auto;
+  font-size: 10.5px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.stroll-live-title {
+  margin-top: 3px;
+  font-size: 13.5px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-live-meta {
+  margin-top: 1px;
+  font-size: 10.5px;
+  opacity: 0.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-live-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.stroll-live-actions .stroll-btn { padding: 4px 10px; font-size: 11.5px; }
+.stroll-live-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+}
+.stroll-live-track i {
+  display: block;
+  height: 100%;
+  width: 12%;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(90deg, var(--s-pink), color-mix(in srgb, var(--s-pink) 35%, transparent));
+  transition: width 0.5s ease;
+}
+.stroll-live-track i.shimmer {
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--s-pink) 75%, transparent), transparent);
+  background-size: 45% 100%;
+  background-repeat: no-repeat;
+  animation: stroll-shimmer 1.8s linear infinite;
+}
+.stroll-live.cowatch .stroll-live-track i {
+  background: linear-gradient(90deg, var(--s-accent), var(--s-accent-2));
+}
+.stroll-live.cowatch .stroll-live-track i.shimmer { animation: none; }
+@keyframes stroll-live-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes stroll-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--s-pink) 48%, transparent); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes stroll-pulse-accent {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--s-accent) 48%, transparent); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes stroll-shimmer {
+  0% { background-position: -45% 0; }
+  100% { background-position: 145% 0; }
+}
+.stroll-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 360px;
+  padding: 10px 15px 10px 13px;
+  border: 1px solid var(--s-line);
+  border-left: 3px solid var(--s-pink);
+  border-radius: 12px;
+  background: color-mix(in srgb, Canvas 92%, transparent);
+  backdrop-filter: blur(14px) saturate(1.15);
+  color: inherit;
+  font-size: 12px;
+  box-shadow: 0 14px 36px color-mix(in srgb, #000 16%, transparent);
+  opacity: 0;
+  transform: translateY(10px) scale(0.98);
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.stroll-toast.show { opacity: 1; transform: none; }
+.stroll-toast svg { color: var(--s-pink); flex: none; }
+.stroll-toast.douyin svg { color: var(--s-douyin); }
+.stroll-toast.douyin { border-left-color: var(--s-douyin); }
+.stroll-toast b { font-weight: 650; white-space: nowrap; }
+.stroll-toast span {
+  opacity: 0.58;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- 活跃度 ---------------- */
+.stroll-activity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 2px 0 10px;
+}
+.stroll-activity-label { font-size: 11px; opacity: 0.5; }
+.stroll-activity-seg button { padding: 3px 11px; font-size: 11.5px; }
+.stroll-activity-seg button.on {
+  color: #fff;
+  background: var(--s-accent);
+  opacity: 1;
+}
+.stroll-activity .stroll-token { margin-left: auto; }
+.stroll-ramp {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 7px 11px;
+  border: 1px solid color-mix(in srgb, var(--s-warn) 26%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--s-warn) 8%, transparent);
+  color: var(--s-warn);
+  font-size: 11px;
+}
+.stroll-ramp .stroll-btn { margin-left: auto; }
+
+/* ---------------- 额度 ---------------- */
+.stroll-meters {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+.stroll-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 11px 9px;
+  border: 1px solid var(--s-line);
+  border-radius: 13px;
+  background: var(--s-surface);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.stroll-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+.stroll-meter-label {
+  font-size: 11px;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.stroll-meter-num {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+  font-size: 11px;
+  opacity: 0.4;
+  font-variant-numeric: tabular-nums;
+}
+.stroll-meter-num strong {
+  font-size: 17px;
+  font-weight: 650;
+  opacity: 1;
+  color: inherit;
+}
+.stroll-meter-track {
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  overflow: hidden;
+}
+.stroll-meter-track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--s-accent-2), var(--s-accent));
+  transition: width 0.45s ease;
+}
+.stroll-meter.warn .stroll-meter-track i {
+  background: linear-gradient(90deg, #fbbf24, #f59e0b);
+}
+.stroll-meter.full {
+  border-color: color-mix(in srgb, var(--s-bad) 26%, transparent);
+  background: color-mix(in srgb, var(--s-bad) 5%, var(--s-surface));
+}
+.stroll-meter.full .stroll-meter-track i {
+  background: linear-gradient(90deg, #f87171, var(--s-bad));
+}
+.stroll-meter-foot {
+  font-size: 10px;
+  opacity: 0.42;
+  white-space: nowrap;
+}
+
+/* ---------------- 双卡 ---------------- */
+.stroll-duo {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+.stroll-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 16px 12px;
+  border: 1px solid var(--s-line);
+  border-radius: var(--s-radius);
+  background: var(--s-surface);
+  overflow: hidden;
+}
+.stroll-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--s-accent) 55%, transparent), transparent 65%);
+}
+.stroll-card-watch::before {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--s-pink) 60%, transparent), transparent 65%);
+}
+.stroll-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.stroll-card-head h4 {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+.stroll-en {
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  opacity: 0.35;
+}
+.stroll-state {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--s-line);
+  font-size: 10px;
+  opacity: 0.65;
+  white-space: nowrap;
+}
+.stroll-state.on {
+  color: var(--s-ok);
+  border-color: color-mix(in srgb, var(--s-ok) 38%, transparent);
+  background: color-mix(in srgb, var(--s-ok) 9%, transparent);
+  opacity: 1;
+}
+.stroll-state.live {
+  color: var(--s-douyin);
+  border-color: color-mix(in srgb, var(--s-douyin) 38%, transparent);
+  background: color-mix(in srgb, var(--s-douyin) 8%, transparent);
+  opacity: 1;
+}
+.stroll-card-desc {
+  margin: 7px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  opacity: 0.55;
+}
+.stroll-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+.stroll-token {
+  font-size: 10px;
+  opacity: 0.4;
+  white-space: nowrap;
+}
+
+/* 开关 */
+.stroll-switch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.stroll-switch {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  border-radius: 999px;
+  border: 1px solid var(--s-line);
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  transition: background 0.18s ease, border-color 0.18s ease;
+  flex: none;
+}
+.stroll-switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: left 0.18s ease;
+}
+.stroll-switch.on {
+  background: var(--s-accent);
+  border-color: transparent;
+}
+.stroll-switch.on i { left: 17px; }
+.stroll-switch-row + .stroll-switch-row { margin-top: 9px; }
+
+/* 指标 */
+.stroll-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--s-line);
+}
+.stroll-stat > span {
+  display: block;
+  font-size: 10px;
+  opacity: 0.45;
+  white-space: nowrap;
+}
+.stroll-stat-line {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  margin-top: 2px;
+}
+.stroll-stat-line strong {
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.stroll-stat-line em {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.42;
+  white-space: nowrap;
+}
+
+/* 一起看 */
+.stroll-watch-body { margin-top: 10px; }
+.stroll-watch-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-progress {
+  height: 6px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  overflow: hidden;
+}
+.stroll-progress i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--s-pink), var(--s-douyin));
+  transition: width 0.5s ease;
+}
+.stroll-watch-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 10px;
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- 输入 / 按钮 ---------------- */
+.stroll-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.stroll-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--s-line);
+  border-radius: 9px;
+  background: color-mix(in srgb, currentColor 2%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+}
+.stroll-input::placeholder { opacity: 0.38; }
+.stroll-input:focus {
+  outline: 2px solid color-mix(in srgb, var(--s-accent) 30%, transparent);
+  outline-offset: 0;
+  border-color: transparent;
+}
+.stroll-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  appearance: none;
+  padding: 5px 12px;
+  border: 1px solid var(--s-line);
+  border-radius: 9px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+.stroll-btn:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+.stroll-btn.primary {
+  color: var(--s-accent);
+  border-color: color-mix(in srgb, var(--s-accent) 42%, transparent);
+  background: color-mix(in srgb, var(--s-accent) 9%, transparent);
+}
+.stroll-btn.primary:hover { background: color-mix(in srgb, var(--s-accent) 15%, transparent); }
+.stroll-btn.solid {
+  color: #fff;
+  border-color: transparent;
+  background: var(--s-accent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--s-accent) 30%, transparent);
+}
+.stroll-btn.solid:hover { filter: brightness(1.06); background: var(--s-accent); }
+.stroll-btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  opacity: 0.7;
+}
+.stroll-btn.ghost:hover { opacity: 1; background: color-mix(in srgb, currentColor 6%, transparent); }
+.stroll-btn.xs {
+  padding: 3px 9px;
+  font-size: 11px;
+  border-radius: 7px;
+}
+.stroll-btn:disabled { opacity: 0.45; cursor: default; }
+.stroll-btn:disabled:hover { filter: none; }
+
+.stroll-chipbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border: 1px solid var(--s-line);
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.stroll-chipbtn:hover {
+  background: color-mix(in srgb, var(--s-accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--s-accent) 35%, transparent);
+  color: var(--s-accent);
+}
+
+/* ---------------- 账号 ---------------- */
+.stroll-accounts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.stroll-account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--s-line);
+  border-radius: 13px;
+  background: var(--s-surface);
+  min-width: 0;
+}
+.stroll-avatar {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+.stroll-avatar.bili { background: linear-gradient(135deg, #fb7299, #e05a83); }
+.stroll-avatar.dy { background: linear-gradient(135deg, #2f2f36, #111114); }
+.stroll-account-body {
+  flex: 1;
+  min-width: 0;
+}
+.stroll-account-body strong {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.stroll-account-body span {
+  display: block;
+  font-size: 10.5px;
+  opacity: 0.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- 待批 ---------------- */
+.stroll-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--s-line);
+  border-radius: 9px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+}
+.stroll-tabs button {
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.55;
+  white-space: nowrap;
+}
+.stroll-tabs button:hover { opacity: 0.9; }
+.stroll-tabs button.on {
+  color: var(--s-accent);
+  background: color-mix(in srgb, var(--s-accent) 13%, transparent);
+  opacity: 1;
+}
+.stroll-seg {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--s-line);
+  border-radius: 9px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  gap: 2px;
+}
+.stroll-seg button {
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+}
+.stroll-seg button:hover { opacity: 0.9; }
+.stroll-seg button.on {
+  color: var(--s-accent);
+  background: color-mix(in srgb, var(--s-accent) 13%, transparent);
+  opacity: 1;
+}
+.stroll-drafts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stroll-draft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 13px;
+  border: 1px solid var(--s-line);
+  border-radius: 13px;
+  background: var(--s-surface);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.stroll-draft:hover {
+  border-color: color-mix(in srgb, var(--s-accent) 30%, transparent);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+}
+.stroll-draft-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--tone, var(--s-accent));
+  background: color-mix(in srgb, var(--tone, var(--s-accent)) 14%, transparent);
+}
+.stroll-draft-body {
+  flex: 1;
+  min-width: 0;
+}
+.stroll-draft-body p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.stroll-draft-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  opacity: 0.45;
+}
+.stroll-draft-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+/* ---------------- 这一条 ---------------- */
+.stroll-now {
+  padding: 13px 14px;
+  border: 1px solid var(--s-line);
+  border-radius: 14px;
+  background: var(--s-surface);
+}
+.stroll-now-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.stroll-badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+.stroll-badge.bilibili { background: linear-gradient(135deg, #fb7299, #e8608a); }
+.stroll-badge.douyin {
+  background: linear-gradient(135deg, #33333a, #16161a);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+}
+.stroll-now-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-now-time {
+  flex: none;
+  font-size: 10px;
+  opacity: 0.4;
+  font-variant-numeric: tabular-nums;
+}
+.stroll-now-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 11px;
+}
+
+/* ---------------- 空态 ---------------- */
+.stroll-empty {
+  padding: 18px 14px;
+  border: 1px dashed var(--s-line);
+  border-radius: 13px;
+  text-align: center;
+  background: color-mix(in srgb, currentColor 1.5%, transparent);
+}
+.stroll-empty.soft {
+  padding: 13px 12px;
+  margin: 2px 0 0;
+}
+.stroll-empty > span:not(.stroll-empty-icon) {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  opacity: 0.42;
+}
+.stroll-empty strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.7;
+}
+.stroll-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin: 0 auto 6px;
+  border-radius: 50%;
+  color: var(--s-ok);
+  background: color-mix(in srgb, var(--s-ok) 12%, transparent);
+}
+
+/* ---------------- 看过 / 消息 ---------------- */
+.stroll-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.stroll-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--s-line);
+  border-radius: 12px;
+  background: var(--s-surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.stroll-item:hover {
+  border-color: color-mix(in srgb, var(--s-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--s-accent) 4%, var(--s-surface));
+}
+.stroll-item.live {
+  border-color: color-mix(in srgb, var(--s-pink) 42%, var(--s-line));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--s-pink) 8%, transparent), transparent 55%), var(--s-surface);
+}
+.stroll-item.live .stroll-dot {
+  animation: stroll-pulse 1.9s ease-out infinite;
+  background: var(--s-pink);
+}
+.stroll-item:disabled { cursor: default; opacity: 0.7; }
+.stroll-item.disabled { cursor: default; opacity: 0.72; }
+.stroll-item.disabled:hover { border-color: var(--s-line); background: var(--s-surface); }
+.stroll-item-ext {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--s-line);
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.45;
+  cursor: pointer;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.stroll-item-ext:hover {
+  opacity: 1;
+  color: var(--s-accent);
+  border-color: color-mix(in srgb, var(--s-accent) 40%, transparent);
+}
+.stroll-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.stroll-dot.bilibili { background: var(--s-pink); }
+.stroll-dot.douyin {
+  background: #1f1f24;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+.stroll-item-main { flex: 1; min-width: 0; }
+.stroll-item-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-item-meta {
+  margin-top: 1px;
+  font-size: 10.5px;
+  opacity: 0.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-item-go { color: var(--s-accent); opacity: 0.7; flex: none; }
+.stroll-inbox {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.stroll-inbox-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.stroll-inbox-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.stroll-inbox-tabs { margin-bottom: 10px; }
+.stroll-inbox-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.stroll-inbox-tabs button b {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+.stroll-inbox-tabs button.on b {
+  background: color-mix(in srgb, var(--s-accent) 18%, transparent);
+  opacity: 1;
+}
+.stroll-inbox-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.stroll-inbox-more .stroll-btn { padding: 4px 12px; font-size: 11.5px; }
+.stroll-msgcard {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--s-line);
+  border-radius: 13px;
+  background: var(--s-surface);
+  overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.stroll-msgcard:hover {
+  border-color: color-mix(in srgb, var(--s-accent) 30%, transparent);
+}
+.stroll-msgcard.fresh {
+  border-color: color-mix(in srgb, var(--s-accent) 34%, var(--s-line));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--s-accent) 6%, transparent), transparent 46%),
+    var(--s-surface);
+}
+.stroll-msgcard-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 11px 12px 7px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.stroll-msgcard-main:hover { background: color-mix(in srgb, var(--s-accent) 5%, transparent); }
+.stroll-msgcard-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+}
+.stroll-msgavatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--tone, var(--s-accent));
+  background: color-mix(in srgb, var(--tone, var(--s-accent)) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone, var(--s-accent)) 26%, transparent);
+}
+.stroll-msgkind {
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-weight: 600;
+  color: var(--s-accent);
+  background: color-mix(in srgb, var(--s-accent) 12%, transparent);
+  flex: none;
+}
+.stroll-msguser {
+  font-weight: 600;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+.stroll-msgtime { margin-left: auto; font-size: 10px; opacity: 0.4; flex: none; }
+.stroll-msgnew {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--s-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-accent) 15%, transparent);
+}
+.stroll-msgtext {
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.stroll-msgquote {
+  font-size: 10.5px;
+  opacity: 0.5;
+  padding-left: 8px;
+  border-left: 2px solid color-mix(in srgb, currentColor 16%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-msgwhere {
+  font-size: 10px;
+  opacity: 0.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-msgdone {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--s-ok);
+}
+.stroll-msgacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+.stroll-msgacts .stroll-chipbtn {
+  padding: 3px 9px;
+  font-size: 11px;
+  border-radius: 8px;
+}
+.stroll-msgacts .stroll-chipbtn.on {
+  color: var(--s-accent);
+  border-color: color-mix(in srgb, var(--s-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--s-accent) 10%, transparent);
+}
+.stroll-msgreply {
+  padding: 0 12px 11px;
+}
+.stroll-msgreply .stroll-inline { gap: 6px; }
+.stroll-msgreply .stroll-input { font-size: 11.5px; padding: 5px 9px; }
+.stroll-msgreply .stroll-token { display: block; margin-top: 4px; line-height: 1.4; }
+
+/* ---------------- 最近 / 维护 ---------------- */
+.stroll-split {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  gap: 16px;
+  margin-top: 24px;
+}
+.stroll-split .stroll-sec { margin-top: 0; }
+.stroll-col {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.stroll-chartcard {
+  padding: 12px 14px 10px;
+  border: 1px solid var(--s-line);
+  border-radius: 14px;
+  background: var(--s-surface);
+}
+.stroll-chartcard .stroll-chart { padding: 2px 0 0; }
+.stroll-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 0 2px 10px;
+}
+.stroll-chart-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  height: 66px;
+  text-align: center;
+}
+.stroll-chart-empty strong {
+  font-size: 11.5px;
+  font-weight: 600;
+  opacity: 0.55;
+}
+.stroll-chart-empty span {
+  font-size: 10px;
+  opacity: 0.35;
+}
+.stroll-bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.stroll-bar b {
+  height: 12px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 12px;
+  opacity: 0.42;
+  font-variant-numeric: tabular-nums;
+}
+.stroll-bar-track {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  max-width: 30px;
+  height: 42px;
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  overflow: hidden;
+}
+.stroll-bar-track i {
+  display: block;
+  width: 100%;
+  min-height: 2px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, var(--s-accent-2), color-mix(in srgb, var(--s-accent) 55%, transparent));
+  transition: height 0.4s ease;
+}
+.stroll-bar.today .stroll-bar-track i {
+  background: linear-gradient(180deg, var(--s-pink), var(--s-douyin));
+}
+.stroll-bar span {
+  font-size: 9px;
+  opacity: 0.35;
+}
+.stroll-timeline {
+  display: flex;
+  flex-direction: column;
+}
+.stroll-tl {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding: 7px 0;
+}
+.stroll-tl:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 21px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--s-line);
+}
+.stroll-tl i {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--s-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-accent) 12%, transparent);
+}
+.stroll-tl.bad i {
+  background: var(--s-bad);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-bad) 12%, transparent);
+}
+.stroll-tl-body { min-width: 0; }
+.stroll-tl-body p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.stroll-tl-body span {
+  display: block;
+  margin-top: 1px;
+  font-size: 10px;
+  opacity: 0.4;
+}
+.stroll-tl.clickable { cursor: pointer; border-radius: 8px; }
+.stroll-tl.clickable:hover { background: color-mix(in srgb, var(--s-accent) 5%, transparent); }
+.stroll-tl .stroll-item-go { margin-left: auto; opacity: 0.45; }
+.stroll-tl.clickable:hover .stroll-item-go { opacity: 1; }
+.stroll-toolcard {
+  padding: 14px;
+  border: 1px solid var(--s-line);
+  border-radius: 14px;
+  background: var(--s-surface);
+}
+.stroll-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.stroll-tools .stroll-btn { width: 100%; }
+.stroll-toolcard .stroll-muted {
+  margin-top: 10px;
+  font-size: 10.5px;
+  opacity: 0.42;
+}
+
+.stroll-foot {
+  margin: 22px 0 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  opacity: 0.38;
+}
+
+/* ---------------- 窄屏：按面板自身宽度，而不是窗口宽度 ---------------- */
+@container (max-width: 700px) {
+  .stroll-meters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@container (max-width: 620px) {
+  .stroll-duo { grid-template-columns: 1fr; }
+  .stroll-inbox { grid-template-columns: 1fr; }
+  .stroll-split { grid-template-columns: 1fr; }
+  .stroll-accounts { grid-template-columns: 1fr; }
+}
+@container (max-width: 520px) {
+  .stroll-hero { flex-direction: column; align-items: flex-start; }
+  .stroll-hero-side {
+    flex-direction: row;
+    align-self: stretch;
+    justify-content: space-between;
+  }
+  .stroll-ring { width: 76px; height: 76px; }
+  .stroll-draft { flex-wrap: wrap; }
+  .stroll-draft-actions { width: 100%; justify-content: flex-end; }
+  .stroll-stats { grid-template-columns: 1fr 1fr; }
+}
+@container (max-width: 380px) {
+  .stroll-meters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stroll-panel *,
+  .stroll-panel *::before,
+  .stroll-panel *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -472,7 +472,10 @@ export default {
         const biliSub = el('span', '未登录');
         biliBody.append(biliName, biliSub);
         const biliBtn = button('登录 B站', () => login('bilibili'), 'ghost xs');
-        biliTile.append(biliAvatar, biliBody, biliBtn);
+        const biliOut = button('退出登录', () => logoutAccount('bilibili'), 'ghost xs');
+        const biliActions = el('div', undefined, 'stroll-account-actions');
+        biliActions.append(biliOut, biliBtn);
+        biliTile.append(biliAvatar, biliBody, biliActions);
 
         const dyTile = el('div', undefined, 'stroll-account');
         const dyAvatar = el('div', '抖', 'stroll-avatar dy');
@@ -481,7 +484,10 @@ export default {
         const dySub = el('span', '未登录');
         dyBody.append(dyName, dySub);
         const dyBtn = button('登录 / 验证', () => login('douyin'), 'ghost xs');
-        dyTile.append(dyAvatar, dyBody, dyBtn);
+        const dyOut = button('退出登录', () => logoutAccount('douyin'), 'ghost xs');
+        const dyActions = el('div', undefined, 'stroll-account-actions');
+        dyActions.append(dyOut, dyBtn);
+        dyTile.append(dyAvatar, dyBody, dyActions);
 
         accounts.append(biliTile, dyTile);
         accountSec.append(accounts);
@@ -881,6 +887,7 @@ export default {
           biliName.textContent = bili.loggedIn ? bili.name || '已登录' : 'B站';
           biliSub.textContent = bili.loggedIn ? `UID ${bili.uid || '—'} · 写动作可用` : '未登录 · 能看不能赞';
           biliBtn.textContent = bili.loggedIn ? '重新登录' : '登录 B站';
+          biliOut.style.display = bili.loggedIn ? '' : 'none';
           dyName.textContent = dy.loggedIn ? '抖音' : '抖音';
           dySub.textContent = dy.loggedIn
             ? dy.running
@@ -890,6 +897,7 @@ export default {
               : '已登录 · 后台待命'
             : '未登录：扫码 / 过验证';
           dyBtn.textContent = dy.loggedIn ? '重新登录' : '登录 / 验证';
+          dyOut.style.display = dy.loggedIn ? '' : 'none';
 
           // 待批
           const drafts = data?.drafts ?? [];
@@ -2065,6 +2073,18 @@ export default {
               result?.message || (result?.ok ? '窗口开了，去登录吧。' : result?.error || '没成功'),
               result?.ok === false,
             );
+            await refresh();
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+          }
+        }
+
+        async function logoutAccount(platform) {
+          const label = platform === 'bilibili' ? 'B站' : '抖音';
+          msgSet(`正在退出 ${label}…`);
+          try {
+            const result = await ctx.invoke(platform === 'bilibili' ? 'logout_bili' : 'logout_douyin');
+            msgSet(result?.message || (result?.ok ? `${label} 已退出登录。` : result?.error || '没成功'), result?.ok === false);
             await refresh();
           } catch (error) {
             msgSet(error.message || String(error), true);

@@ -1008,6 +1008,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.stroll-account-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
 
 /* ---------------- 待批 ---------------- */
 .stroll-tabs {

@@ -341,6 +341,33 @@ export class DouyinBrowser {
     return ok;
   }
 
+  /** 只清某个域名的 cookie，其它站点的原样留着。窗口没开时返回 cleared:0。 */
+  async clearCookiesMatching(pattern) {
+    if (!this.context) return { ok: false, cleared: 0, reason: 'no-window' };
+    const all = await this.context.cookies().catch(() => []);
+    const hit = (c) => pattern.test(String(c.domain ?? ''));
+    const drop = all.filter(hit);
+    if (!drop.length) return { ok: true, cleared: 0 };
+    await this.context.clearCookies().catch(() => {});
+    const keep = all.filter((c) => !hit(c));
+    if (keep.length) await this.context.addCookies(keep).catch(() => {});
+    return { ok: true, cleared: drop.length };
+  }
+
+  /** 退出登录：清 cookie、关窗、删掉登录标记，之后当没登录处理。 */
+  async logout() {
+    if (!this.context) await this.launch({ headless: true }).catch(() => {});
+    const res = await this.clearCookiesMatching(/(^|\.)douyin\.com$|(^|\.)bytedance\.com$/i).catch(() => null);
+    await this.close().catch(() => {});
+    try {
+      fs.unlinkSync(this.loginFile);
+    } catch {
+      // 本来就没存
+    }
+    this.lastLogin = null;
+    return { ok: true, cleared: res?.cleared ?? 0 };
+  }
+
   /** v.douyin.com 短链要在服务端展开；不打开浏览器也能拿到视频 id。 */
   async resolveShort(value) {
     const text = String(value ?? '');

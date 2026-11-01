@@ -153,12 +153,41 @@ export class Bilibili {
     this.wbi = null;
   }
 
+  /** 点过「退出登录」后，插件自己的和共用的凭据都不再读，直到重新登录。 */
+  isLoggedOut() {
+    return !!this.store?.data?.biliLoggedOut;
+  }
+
+  markLoggedOut(on = true) {
+    if (!this.store?.data) return;
+    this.store.data.biliLoggedOut = !!on;
+    this.store.save?.();
+  }
+
+  /** 退出登录：删掉自己存的那份 cookie，并让 readCredentials 不再兜底去读共用凭据。 */
+  logout() {
+    this.credentialsOverride = null;
+    this.navCache = null;
+    this.wbi = null;
+    this.cache.clear();
+    try {
+      fs.unlinkSync(path.join(this.dataDir, 'stroll', 'bilibili.json'));
+    } catch {
+      // 本来就没存过
+    }
+    this.markLoggedOut(true);
+    return { ok: true, loggedOut: true };
+  }
+
   /**
    * 从 摸鱼 自己的浏览器窗口里收 B站 cookie。
    * 只在主人主动登录、或面板刷新时调用；不会去碰系统浏览器的资料。
    * 返回带 stage 的结果，方便上层说清楚卡在哪一步（没窗口 / 没 cookie / 校验没过）。
    */
   async importFromContext(context) {
+    if (this.isLoggedOut()) {
+      return { ok: false, stage: 'logged-out', error: '已经退出登录了，先点「登录 B站」。' };
+    }
     if (!context) {
       return { ok: false, stage: 'no-window', error: '还没有打开的浏览器窗口，先点「登录 B站」。' };
     }
@@ -195,6 +224,7 @@ export class Bilibili {
   }
 
   readCredentials() {
+    if (this.isLoggedOut()) return null;
     if (this.credentialsOverride) return this.credentialsOverride;
     const candidates = [];
     // 自己在 摸鱼 窗口登录的那份优先；没有再复用应用共用的那份

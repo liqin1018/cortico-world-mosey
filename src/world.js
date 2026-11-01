@@ -524,18 +524,11 @@ export class StrollWorld {
 
   async login(platform) {
     if (platform === 'bilibili') {
-      // 窗口已经开着并且有 B站登录态，就先直接收，不再多开一个窗
-      if (this.douyin.context) {
-        const quick = await this.bili.importFromContext(this.douyin.context).catch(() => null);
-        if (quick?.ok) {
-          this.lastImportAt = Date.now();
-          return {
-            ok: true,
-            name: quick.name,
-            uid: quick.uid,
-            message: `B站已经是登录状态：${quick.name || quick.uid || ''}。`,
-          };
-        }
+      // 之前点过「退出登录」：先把窗口里残留的 cookie 清干净，保证这次是干净的二维码
+      if (this.bili.isLoggedOut()) {
+        if (!this.douyin.context) await this.douyin.launch({ headless: true }).catch(() => {});
+        await this.douyin.clearCookiesMatching(/bilibili\.com$/i).catch(() => null);
+        this.bili.markLoggedOut(false);
       }
       let info;
       try {
@@ -574,6 +567,28 @@ export class StrollWorld {
       };
     }
     return this.douyin.login();
+  }
+
+  /** 退出 B站：删掉插件存的 cookie，并把窗口里的 B站 cookie 一起清掉。 */
+  async logoutBili() {
+    this.bili.logout();
+    const res = await this.douyin.clearCookiesMatching(/bilibili\.com$/i).catch(() => null);
+    this.lastStatus = null;
+    this.lastImportAt = 0;
+    return {
+      ok: true,
+      windowOpen: !!this.douyin.context,
+      cleared: res?.cleared ?? 0,
+      message: res?.ok
+        ? `B站已退出登录，清掉了 ${res.cleared} 个 cookie。`
+        : 'B站已退出登录；浏览器没开着，下次登录时会先清干净。',
+    };
+  }
+
+  async logoutDouyin() {
+    const res = await this.douyin.logout();
+    this.lastStatus = null;
+    return { ok: true, ...res, message: '抖音已退出登录，窗口已关。' };
   }
 
   history() {
@@ -1793,6 +1808,8 @@ export class StrollWorld {
       }
       if (method === 'quick_follow') return await this.quickAct('follow', '', String(args[0] ?? ''));
       if (method === 'login') return await this.login(String(args[0] ?? 'douyin'));
+      if (method === 'logout_bili') return await this.logoutBili();
+      if (method === 'logout_douyin') return await this.logoutDouyin();
       if (method === 'refreshBili') {
         return await this.bili.importFromContext(this.douyin.context);
       }

@@ -74,6 +74,8 @@
   },
   "scripts": {
     "describe": "node scripts/build-describe.mjs",
-    "check": "node scripts/smoke.mjs"
+    "check": "node scripts/smoke.mjs",
+    "release:check": "node scripts/release-check.mjs",
+    "deploy:local": "node scripts/deploy-local.mjs"
   }
 }

@@ -4,6 +4,7 @@
  */
 
 .stroll-panel {
+  position: relative;
   --s-accent: #3b82f6;
   --s-accent-2: #60a5fa;
   --s-pink: #fb7299;
@@ -1647,4 +1648,215 @@
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* ---------------- 明细弹层 ---------------- */
+.stroll-sheet {
+  --s-accent: #3b82f6;
+  --s-accent-2: #60a5fa;
+  --s-pink: #fb7299;
+  --s-douyin: #fe2c55;
+  --s-ok: #16a34a;
+  --s-warn: #d97706;
+  --s-bad: #dc2626;
+  --s-line: color-mix(in srgb, currentColor 14%, transparent);
+  --s-line-soft: color-mix(in srgb, currentColor 7%, transparent);
+  --s-surface: color-mix(in srgb, currentColor 4%, transparent);
+  --s-surface-2: color-mix(in srgb, currentColor 7%, transparent);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px 20px;
+  background: color-mix(in srgb, #05070d 46%, transparent);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  box-sizing: border-box;
+  font-size: 13px;
+  line-height: 1.55;
+  color: inherit;
+  /* 浅色主题的卡片底色；深色由 .dark 覆盖，JS 按面板文字色自动判断 */
+  --s-card-bg: #fbfbfc;
+  --s-card-fg: #17181c;
+}
+.stroll-sheet.dark {
+  --s-card-bg: #1b1c21;
+  --s-card-fg: #e9ebf0;
+}
+.stroll-sheet[hidden] { display: none; }
+.stroll-sheet.show { opacity: 1; }
+.stroll-sheet *,
+.stroll-sheet *::before,
+.stroll-sheet *::after { box-sizing: border-box; }
+.stroll-sheet-card {
+  display: flex;
+  flex-direction: column;
+  width: min(780px, 100%);
+  max-height: min(84vh, 760px);
+  border: 1px solid var(--s-line);
+  border-radius: 18px;
+  background: var(--s-card-bg);
+  color: var(--s-card-fg);
+  box-shadow: 0 28px 70px color-mix(in srgb, #05070d 34%, transparent);
+  overflow: hidden;
+  transform: translateY(8px) scale(0.99);
+  transition: transform 0.2s cubic-bezier(0.22, 0.68, 0.3, 1);
+}
+.stroll-sheet.show .stroll-sheet-card { transform: none; }
+.stroll-sheet-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 15px 18px 12px;
+  border-bottom: 1px solid var(--s-line-soft);
+}
+.stroll-sheet-titles { min-width: 0; flex: 1; }
+.stroll-sheet-titles h3 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+.stroll-sheet-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.45;
+}
+.stroll-sheet-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 27px;
+  flex: none;
+  border: 1px solid var(--s-line);
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.stroll-sheet-x:hover { opacity: 1; background: color-mix(in srgb, currentColor 6%, transparent); }
+.stroll-sheet-tabs {
+  margin: 11px 18px 0;
+  align-self: flex-start;
+}
+.stroll-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 18px 18px;
+}
+.stroll-sheet-body::-webkit-scrollbar { width: 9px; }
+.stroll-sheet-body::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  background-clip: content-box;
+}
+.stroll-detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stroll-detail {
+  position: relative;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--s-line);
+  border-radius: 12px;
+  background: var(--s-surface);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.stroll-detail.clickable { cursor: pointer; padding-right: 34px; }
+.stroll-detail.clickable:hover {
+  border-color: color-mix(in srgb, var(--s-accent) 34%, var(--s-line));
+  background: color-mix(in srgb, var(--s-accent) 5%, var(--s-surface));
+}
+.stroll-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10.5px;
+}
+.stroll-detail-kind {
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-weight: 600;
+  color: var(--s-accent);
+  background: color-mix(in srgb, var(--s-accent) 12%, transparent);
+  flex: none;
+  white-space: nowrap;
+}
+.stroll-detail.bad .stroll-detail-kind {
+  color: var(--s-bad);
+  background: color-mix(in srgb, var(--s-bad) 12%, transparent);
+}
+.stroll-detail-plat { opacity: 0.5; flex: none; }
+.stroll-detail-time {
+  margin-left: auto;
+  font-size: 10px;
+  opacity: 0.4;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.stroll-detail-text {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.stroll-detail-where {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  font-size: 11px;
+  opacity: 0.48;
+  min-width: 0;
+}
+.stroll-detail-where svg { flex: none; }
+.stroll-detail-where span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stroll-detail-go {
+  position: absolute;
+  right: 11px;
+  bottom: 11px;
+  display: inline-flex;
+  opacity: 0.3;
+}
+.stroll-detail.clickable:hover .stroll-detail-go { opacity: 0.85; }
+.stroll-sheet-body .stroll-inbox { margin-top: 0; }
+.stroll-sec-more {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+.stroll-meter {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+}
+.stroll-meter:hover {
+  border-color: color-mix(in srgb, var(--s-accent) 34%, var(--s-line));
+  background: color-mix(in srgb, var(--s-accent) 5%, var(--s-surface));
+}
+.stroll-meter:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--s-accent) 45%, transparent);
+  outline-offset: 1px;
 }

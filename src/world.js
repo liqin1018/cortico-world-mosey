@@ -31,15 +31,22 @@ const ACTION_NAMES = {
 
 const PLATFORM_NAMES = { bilibili: 'B站', douyin: '抖音' };
 
-/** 两次自动出门之间至少隔这么久，和主人手动互动无关。 */
-const AUTO_GAP_MS = 2 * 3600 * 1000;
+/** 额度档位对应的动作名，面板点开「今天做了什么」时用。 */
+const METER_ACTIONS = {
+  like: ['like', 'unlike'],
+  comment: ['comment', 'reply'],
+  follow: ['follow', 'unfollow'],
+  post: ['post'],
+  dm: ['dm'],
+  save: ['save'],
+};
 
-/** 活跃度档位：一键改额度 + 自己出门次数，省得一项项调。 */
+/** 活跃度档位：一键改额度 + 自己出门次数 + 出门间隔，省得一项项调。 */
 const ACTIVITY_PRESETS = {
-  quiet: { label: '安静', dailyLikes: 4, dailyComments: 1, dailyFollows: 0, dailyPosts: 0, dailyDms: 1, dailySaves: 2, autoSessionsPerDay: 0, tokenDailyBudget: 3000 },
-  normal: { label: '日常', dailyLikes: 10, dailyComments: 4, dailyFollows: 2, dailyPosts: 1, dailyDms: 2, dailySaves: 5, autoSessionsPerDay: 2, tokenDailyBudget: 6000 },
-  lively: { label: '活跃', dailyLikes: 16, dailyComments: 6, dailyFollows: 3, dailyPosts: 2, dailyDms: 3, dailySaves: 8, autoSessionsPerDay: 3, tokenDailyBudget: 9000 },
-  chatty: { label: '话痨', dailyLikes: 24, dailyComments: 10, dailyFollows: 5, dailyPosts: 3, dailyDms: 4, dailySaves: 10, autoSessionsPerDay: 5, tokenDailyBudget: 15000 },
+  quiet: { label: '安静', dailyLikes: 4, dailyComments: 1, dailyFollows: 0, dailyPosts: 0, dailyDms: 1, dailySaves: 2, autoSessionsPerDay: 1, autoGapMinutes: 300, tokenDailyBudget: 3000 },
+  normal: { label: '日常', dailyLikes: 10, dailyComments: 4, dailyFollows: 2, dailyPosts: 1, dailyDms: 2, dailySaves: 5, autoSessionsPerDay: 3, autoGapMinutes: 150, tokenDailyBudget: 6000 },
+  lively: { label: '活跃', dailyLikes: 16, dailyComments: 6, dailyFollows: 3, dailyPosts: 2, dailyDms: 3, dailySaves: 8, autoSessionsPerDay: 5, autoGapMinutes: 90, tokenDailyBudget: 9000 },
+  chatty: { label: '话痨', dailyLikes: 24, dailyComments: 10, dailyFollows: 5, dailyPosts: 3, dailyDms: 4, dailySaves: 10, autoSessionsPerDay: 8, autoGapMinutes: 60, tokenDailyBudget: 15000 },
 };
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
@@ -107,7 +114,7 @@ export class StrollWorld {
     if (used >= cap) return;
     // 用 lastAutoAt 而不是 lastSessionAt：主人手动让她看东西，不该把自动出门往后推
     const lastAuto = Number(this.store.data.lastAutoAt ?? this.store.data.lastSessionAt ?? 0);
-    if (Date.now() - lastAuto < AUTO_GAP_MS) return;
+    if (Date.now() - lastAuto < this.autoGapMs()) return;
     if (Math.random() > 0.6) return;
     this.store.data.lastAutoAt = Date.now();
     this.store.data.autoSessions[day] = used + 1;
@@ -951,6 +958,7 @@ export class StrollWorld {
       this.policy.consume(action, platform, target, {
         quotaAction: this.capAction(action),
         text,
+        title: this.titleOf(platform, target),
         result: 'ok',
         extra: result,
         tags: plan.mentionOwner ? [] : [],
@@ -1199,6 +1207,8 @@ export class StrollWorld {
         return { ok: true, activity: key, label: preset.label, ...fields };
       }
       if (method === 'presence') return { ok: true, presence: this.presenceView(), watching: !!this.watch };
+      if (method === 'usage_detail') return this.usageDetail(String(args[0] ?? ''));
+      if (method === 'timeline') return { ok: true, items: this.timelineItems(args[0]) };
       if (method === 'set_ramp') {
         const on = args[0] !== false && args[0] !== 'false';
         this.persist({ newAccountRamp: on });
@@ -1259,7 +1269,56 @@ export class StrollWorld {
     const used = Number(this.store.data.autoSessions[day] ?? 0);
     if (used >= cap) return { done: true, used, cap };
     const last = Number(this.store.data.lastAutoAt ?? this.store.data.lastSessionAt ?? 0);
-    return { done: false, used, cap, at: last ? last + AUTO_GAP_MS : Date.now() + 90 * 1000 };
+    const gap = this.autoGapMs();
+    return { done: false, used, cap, gapMinutes: Math.round(gap / 60000), at: last ? last + gap : Date.now() + 90 * 1000 };
+  }
+
+  /** 两次自动出门之间的最小间隔（毫秒）。 */
+  autoGapMs() {
+    return clamp(Number(this.cfg.autoGapMinutes ?? 90), 30, 360) * 60 * 1000;
+  }
+
+  /** 这条动作针对的内容叫什么；老记录没有标题，就从「看过」里补。 */
+  titleOf(platform, target) {
+    const id = String(target ?? '');
+    if (!id) return '';
+    if (this.lastOpen && this.lastOpen.platform === platform && String(this.lastOpen.id) === id) {
+      return this.lastOpen.title || '';
+    }
+    const hit = (this.store.data.viewed ?? []).find((v) => v.platform === platform && String(v.id) === id);
+    return hit?.title || '';
+  }
+
+  /** 把一条动作记录补成面板能直接渲染的样子。 */
+  describeAction(entry) {
+    return {
+      action: entry.action,
+      platform: entry.platform,
+      target: entry.target ?? '',
+      text: entry.text ?? '',
+      title: entry.title || this.titleOf(entry.platform, entry.target),
+      result: entry.result ?? 'ok',
+      at: entry.at,
+      url: actionUrl(entry),
+    };
+  }
+
+  /** 今天某个额度项下具体做了什么：评论原文、点赞/稍后再看的视频名、关注了谁。 */
+  usageDetail(key) {
+    const wanted = METER_ACTIONS[key] ?? [key];
+    const today = dayKey(new Date(), this.timeZone);
+    const items = this.store.data.actions
+      .filter((a) => wanted.includes(a.action) && dayKey(new Date(a.at), this.timeZone) === today)
+      .slice(-60)
+      .reverse()
+      .map((a) => this.describeAction(a));
+    const cap = this.policy.cap(key)?.daily ?? 0;
+    return { ok: true, key, label: ACTION_NAMES[key] ?? key, items, day: today, cap };
+  }
+
+  /** 全部动作；面板「最近」点开看全部时用。 */
+  timelineItems(n = 60) {
+    return this.store.lastActions(clamp(Number(n) || 60, 6, 120)).map((a) => this.describeAction(a));
   }
 
   /** 当前额度最接近哪一档；都不像就是 custom。 */
@@ -1311,7 +1370,8 @@ export class StrollWorld {
         preview: this.previewText(d),
         ageSec: d.ageSec,
       })),
-      recent: this.store.lastActions(6).map((x) => ({ ...x, url: actionUrl(x) })),
+      recent: this.store.lastActions(10).map((x) => this.describeAction(x)),
+      recentTotal: this.store.data.actions.length,
       risk: this.store.data.risk,
       policy: this.policyView(),
       lastOpen: this.lastOpen,

@@ -246,9 +246,38 @@ const fake = {
         label: '活跃',
         dailyLikes: 16,
         dailyComments: 6,
-        dailySessionsPerDay: 3,
-        autoSessionsPerDay: 3,
+        dailySessionsPerDay: 5,
+        autoSessionsPerDay: 5,
+        autoGapMinutes: 90,
       };
+    }
+    if (method === 'usage_detail') {
+      const key = String(args?.[0] ?? '');
+      const all = [
+        { action: 'comment', platform: 'bilibili', target: 'BV1b3411S7Ww', title: '【肥鱼修仙传01】我去！大肥鱼彻底怒了！？', text: '大肥鱼一怒，两分钟就这么没了。看完只想知道它怒气是攒了多久。', result: 'ok', at: Date.now() - 43 * 60 * 1000, url: 'https://www.bilibili.com/video/BV1b3411S7Ww' },
+        { action: 'like', platform: 'douyin', target: '728391029381023', title: '无畏契约康康真正主力皮肤', text: '', result: 'ok', at: Date.now() - 96 * 60 * 1000, url: 'https://www.douyin.com/video/728391029381023' },
+        { action: 'like', platform: 'bilibili', target: 'BV1pzxw6yEMH', title: '打游戏最怕遇到这种队友', text: '', result: 'ok', at: Date.now() - 2 * 3600 * 1000, url: 'https://www.bilibili.com/video/BV1pzxw6yEMH' },
+        { action: 'save', platform: 'bilibili', target: 'BV1b3411S7Ww', title: '【肥鱼修仙传01】我去！大肥鱼彻底怒了！？', text: '', result: 'ok', at: Date.now() - 3 * 3600 * 1000, url: 'https://www.bilibili.com/video/BV1b3411S7Ww' },
+        { action: 'follow', platform: 'bilibili', target: '3747575836446062', title: '', text: '', result: 'ok', at: Date.now() - 4 * 3600 * 1000, url: 'https://space.bilibili.com/3747575836446062' },
+        { action: 'post', platform: 'bilibili', target: '', title: '', text: '今天看了三条关于对枪的视频，手有点痒。', result: 'ok', at: Date.now() - 5 * 3600 * 1000, url: '' },
+        { action: 'dm', platform: 'bilibili', target: '32842111', title: '', text: '主人，今天在首页看到个特别像你的头像。', result: 'ok', at: Date.now() - 6 * 3600 * 1000, url: 'https://space.bilibili.com/32842111' },
+      ];
+      const map = { like: ['like', 'unlike'], comment: ['comment', 'reply'], follow: ['follow', 'unfollow'], post: ['post'], dm: ['dm'], save: ['save'] };
+      const wanted = map[key] ?? [key];
+      const items = all.filter((x) => wanted.includes(x.action));
+      return { ok: true, key, items, cap: { like: 16, comment: 6, follow: 3, post: 2, dm: 3, save: 8 }[key] ?? 0 };
+    }
+    if (method === 'timeline') {
+      const base = [
+        { action: 'comment', platform: 'bilibili', target: 'BV1b3411S7Ww', title: '【肥鱼修仙传01】我去！大肥鱼彻底怒了！？', text: '大肥鱼一怒，两分钟就这么没了。看完只想知道它怒气是攒了多久。', result: 'ok', at: Date.now() - 43 * 60 * 1000, url: 'https://www.bilibili.com/video/BV1b3411S7Ww' },
+        { action: 'unlike', platform: 'douyin', target: '728391029381023', title: '无畏契约康康真正主力皮肤', text: '', result: 'ok', at: Date.now() - 52 * 60 * 1000, url: 'https://www.douyin.com/video/728391029381023' },
+        { action: 'like', platform: 'douyin', target: '728391029381023', title: '无畏契约康康真正主力皮肤', text: '', result: 'ok', at: Date.now() - 96 * 60 * 1000, url: 'https://www.douyin.com/video/728391029381023' },
+        { action: 'like', platform: 'bilibili', target: 'BV1pzxw6yEMH', title: '打游戏最怕遇到这种队友', text: '', result: 'ok', at: Date.now() - 2 * 3600 * 1000, url: 'https://www.bilibili.com/video/BV1pzxw6yEMH' },
+        { action: 'save', platform: 'bilibili', target: 'BV1b3411S7Ww', title: '【肥鱼修仙传01】我去！大肥鱼彻底怒了！？', text: '', result: 'ok', at: Date.now() - 3 * 3600 * 1000, url: 'https://www.bilibili.com/video/BV1b3411S7Ww' },
+        { action: 'follow', platform: 'bilibili', target: '3747575836446062', title: '', text: '', result: 'ok', at: Date.now() - 4 * 3600 * 1000, url: 'https://space.bilibili.com/3747575836446062' },
+        { action: 'risk', platform: 'system', target: '', title: '', text: '抖音要求短信验证', result: 'paused', at: Date.now() - 26 * 3600 * 1000, url: '' },
+      ];
+      return { ok: true, items: base };
     }
     if (method === 'open_external') return { ok: true, url: String(args?.[0] ?? '') };
     if (method === 'reply_to_comment') return { ok: true, receipt: 'B站 评论发出去了，rpid 330000000001，公开可见（预览数据）' };
@@ -304,13 +333,13 @@ const fake = {
         douyin: { loggedIn: true, running: false, headless: true, ok: true },
         policy: {
           day: '2026-11-01',
-          usage: { like: 2, comment: 1, follow: 0, post: 0, dm: 0, save: 1 },
-          caps: { like: 4, comment: 1, follow: 1, post: 1, dm: 1, save: 2 },
+          usage: { like: 7, comment: 3, follow: 1, post: 0, dm: 1, save: 2 },
+          caps: { like: 16, comment: 6, follow: 3, post: 2, dm: 3, save: 8 },
           quiet: false,
           paused: { paused: false },
-          ramp: 0.4,
+          ramp: 1,
           approval: 'confirm',
-          summary: '今日 赞2/4 评1/1 关0/1 发0/1 私0/1 存1/2',
+          summary: '今日 赞2/16 评1/6 关0/3 发0/2 私0/3 存1/8',
         },
         owner: { uid: '32842111', name: '' },
       },
@@ -328,7 +357,12 @@ const fake = {
         { platform: 'douyin', action: 'like', result: 'ok', text: '无畏契约康康真正主力皮肤', at: new Date(now - 40 * 60000).toISOString(), url: 'https://www.douyin.com/video/7695080446131981622' },
         { platform: 'bilibili', action: 'open', result: 'ok', text: '《此弟不宜久留》', at: new Date(now - 52 * 60000).toISOString(), url: 'https://www.bilibili.com/video/BV1pzxw6yEMH' },
         { platform: 'system', action: 'risk', result: 'paused', text: '抖音要求短信验证', at: new Date(now - 86400000).toISOString(), url: '' },
+        { platform: 'bilibili', action: 'save', result: 'ok', title: '【肥鱼修仙传01】我去！大肥鱼彻底怒了！？', text: '', at: new Date(now - 5 * 3600000).toISOString(), url: 'https://www.bilibili.com/video/BV1b3411S7Ww' },
+        { platform: 'bilibili', action: 'follow', result: 'ok', target: '3747575836446062', text: '', at: new Date(now - 6 * 3600000).toISOString(), url: 'https://space.bilibili.com/3747575836446062' },
+        { platform: 'douyin', action: 'unlike', result: 'ok', title: '无畏契约康康真正主力皮肤', text: '', at: new Date(now - 8 * 3600000).toISOString(), url: 'https://www.douyin.com/video/7695080446131981622' },
+        { platform: 'bilibili', action: 'open', result: 'ok', title: '全是干货！5分钟大幅度提高你的对枪水平！', text: '', at: new Date(now - 9 * 3600000).toISOString(), url: 'https://www.bilibili.com/video/BV1Mm4y1771E' },
       ],
+      recentTotal: 47,
       inboxUnread: 2,
       inboxCount: 6,
       presence: {
@@ -376,7 +410,8 @@ const fake = {
       config: {
         background: true,
         approval: 'confirm',
-        autoSessionsPerDay: 3,
+        autoSessionsPerDay: 5,
+        autoGapMinutes: 90,
         dailyLikes: 16,
         dailyComments: 6,
         dailyFollows: 3,
@@ -384,9 +419,9 @@ const fake = {
         dailyDms: 3,
         dailySaves: 8,
         watchSpeakSec: 60,
-        tokenDailyBudget: 6000,
+        tokenDailyBudget: 9000,
         commentMaxChars: 120,
-        newAccountRamp: true,
+        newAccountRamp: false,
       },
     };
   },

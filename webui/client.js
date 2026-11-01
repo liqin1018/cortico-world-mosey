@@ -21,6 +21,7 @@ const ICONS = {
   bookmark: 'M4.2 2.6h7.6v10.8L8 10.6l-3.8 2.8V2.6Z',
   down: 'M3.6 6.2 8 10.6l4.4-4.4',
   up: 'M3.6 9.8 8 5.4l4.4 4.4',
+  close: 'M4 4l8 8M12 4l-8 8',
 };
 
 function icon(name, size = 14) {
@@ -68,11 +69,12 @@ function chip(text, tone = '') {
   return node;
 }
 
-function sectionHead(title, hint) {
+function sectionHead(title, hint, right) {
   const head = el('div', undefined, 'stroll-sec-head');
   const h = el('h3', title);
   head.append(h);
   if (hint) head.append(el('span', hint, 'stroll-sec-hint'));
+  if (right) head.append(right);
   return head;
 }
 
@@ -226,6 +228,34 @@ export default {
         const toast = el('div', undefined, 'stroll-toast');
         root.append(toast);
 
+        /* ---------------- 明细弹层 ---------------- */
+        const sheet = el('div', undefined, 'stroll-sheet');
+        sheet.hidden = true;
+        const sheetCard = el('div', undefined, 'stroll-sheet-card');
+        const sheetHead = el('div', undefined, 'stroll-sheet-head');
+        const sheetTitle = el('h3');
+        const sheetHint = el('span', undefined, 'stroll-sheet-hint');
+        const sheetClose = el('button', undefined, 'stroll-sheet-x');
+        sheetClose.type = 'button';
+        sheetClose.title = '关闭';
+        sheetClose.append(icon('close', 13));
+        const sheetTitles = el('div', undefined, 'stroll-sheet-titles');
+        sheetTitles.append(sheetTitle, sheetHint);
+        sheetHead.append(sheetTitles, sheetClose);
+        const sheetTabs = el('div', undefined, 'stroll-tabs stroll-sheet-tabs');
+        sheetTabs.style.display = 'none';
+        const sheetBody = el('div', undefined, 'stroll-sheet-body');
+        sheetCard.append(sheetHead, sheetTabs, sheetBody);
+        sheet.append(sheetCard);
+        root.append(sheet);
+        sheetClose.addEventListener('click', () => closeSheet());
+        sheet.addEventListener('click', (e) => {
+          if (e.target === sheet) closeSheet();
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape' && !sheet.hidden) closeSheet();
+        });
+
         const barWrap = el('div', undefined, 'stroll-barwrap');
         const openBar = el('div', undefined, 'stroll-openbar');
         const modeSeg = el('div', undefined, 'stroll-mode');
@@ -272,10 +302,10 @@ export default {
           const b = el('button', label);
           b.type = 'button';
           b.title = {
-            quiet: '几乎不互动，只看看',
-            normal: '一天逛 2 次，偶尔评一句',
-            lively: '一天逛 3 次，看到喜欢的就评一句',
-            chatty: '一天逛 5 次，评论额度最多',
+            quiet: '一天 1 次，几乎不互动，只看看',
+            normal: '一天 3 次，偶尔评一句',
+            lively: '一天 5 次（约 90 分钟一次），看到喜欢的就评一句',
+            chatty: '一天 8 次（约 60 分钟一次），评论额度最多',
           }[key];
           b.addEventListener('click', () => setActivity(key));
           activityBtns.set(key, b);
@@ -512,7 +542,14 @@ export default {
         const split = el('div', undefined, 'stroll-split');
 
         const recentSec = el('section', undefined, 'stroll-sec');
-        recentSec.append(sectionHead('最近'));
+        const recentMore = button('查看全部', () => openTimeline(), 'ghost xs');
+        recentMore.append(icon('link', 11));
+        const recentRight = el('div', undefined, 'stroll-sec-more');
+        recentRight.append(recentMore);
+        const recentHint = el('span', undefined, 'stroll-sec-hint');
+        const recentHead = sectionHead('最近', null, recentRight);
+        recentHead.insertBefore(recentHint, recentRight);
+        recentSec.append(recentHead);
         const timeline = el('div', undefined, 'stroll-timeline');
         recentSec.append(timeline);
 
@@ -646,10 +683,13 @@ export default {
           for (const [key, b] of activityBtns) b.classList.toggle('on', key === activityKey);
           const rawLike = Number(cfg.dailyLikes ?? caps.like);
           const rawComment = Number(cfg.dailyComments ?? caps.comment);
+          const rawAuto = Number(cfg.autoSessionsPerDay ?? 0);
+          const rawGap = Number(cfg.autoGapMinutes ?? 90);
+          const tail = rawAuto > 0 ? ` · 自己出门 ${rawAuto} 次（每 ${rawGap} 分钟一次）` : ' · 不自己出门';
           activityNote.textContent =
             activityKey === 'custom'
-              ? `自定义：每天 ${rawLike} 赞 / ${rawComment} 评 / 出门 ${Number(cfg.autoSessionsPerDay ?? 0)} 次`
-              : `每天 ${rawLike} 赞 · ${rawComment} 评 · 自己出门 ${Number(cfg.autoSessionsPerDay ?? 0)} 次`;
+              ? `自定义：每天 ${rawLike} 赞 / ${rawComment} 评${tail}`
+              : `每天 ${rawLike} 赞 · ${rawComment} 评${tail}`;
           const ramp = Number(p.ramp ?? 1);
           rampRow.style.display = ramp < 1 ? '' : 'none';
           rampText.textContent = `新号保护生效中：额度 ×${Math.round(ramp * 100)}%，前 7 天逐步放开`;
@@ -663,7 +703,10 @@ export default {
             const cap = Number(caps[m.key] ?? 0);
             const u = Number(usage[m.key] ?? 0);
             const ratio = cap > 0 ? Math.min(1, u / cap) : 0;
-            const item = el('div', undefined, 'stroll-meter');
+            const item = el('button', undefined, 'stroll-meter');
+            item.type = 'button';
+            item.title = `看今天${m.label}的具体内容`;
+            item.addEventListener('click', () => openUsage(m.key, m.label));
             if (cap > 0 && u >= cap) item.classList.add('full');
             else if (ratio >= 0.7) item.classList.add('warn');
             const head = el('div', undefined, 'stroll-meter-head');
@@ -677,7 +720,7 @@ export default {
             track.append(bar);
             const foot = el(
               'div',
-              cap === 0 ? '今天关着' : left(m.key) > 0 ? `还能 ${left(m.key)} 次` : '今天用完了',
+              cap === 0 ? '今天关着' : left(m.key) > 0 ? `还能 ${left(m.key)} 次 · 点开看` : '今天用完了 · 点开看',
               'stroll-meter-foot',
             );
             item.append(head, track, foot);
@@ -808,17 +851,21 @@ export default {
 
           // 最近
           const recent = data?.recent ?? [];
+          const recentTotal = Number(data?.recentTotal ?? recent.length);
+          recentHint.textContent = recentTotal > recent.length ? `共 ${recentTotal} 条` : '';
+          recentMore.style.display = recentTotal > 3 ? '' : 'none';
           timeline.replaceChildren();
           if (!recent.length) {
             timeline.append(el('p', '还没出过门。', 'stroll-muted'));
           } else {
-            for (const item of recent.slice(0, 6)) {
+            for (const item of recent.slice(0, 10)) {
               const row = el('div', undefined, 'stroll-tl');
               if (item.result && item.result !== 'ok') row.classList.add('bad');
               row.append(el('i'));
               const body = el('div', undefined, 'stroll-tl-body');
               const label = ACTION_LABEL[item.action] ?? item.action ?? '动作';
-              body.append(el('p', item.text ? `${label}：${cut(item.text, 40)}` : label));
+              const line = item.title ? `《${cut(item.title, 26)}》` : '';
+              body.append(el('p', item.text ? `${label}：${cut(item.text, 60)}` : line || label));
               body.append(
                 el(
                   'span',
@@ -837,6 +884,195 @@ export default {
               timeline.append(row);
             }
           }
+        }
+
+        /* ---------------- 明细弹层 ---------------- */
+
+        let sheetFilter = 'all';
+
+        /** 面板自带 container-type，fixed 会相对面板；所以按可视区域算出局部坐标。 */
+        function placeSheet() {
+          // 按面板文字颜色判断深浅主题：浅色主题下文字是深色，深色主题下反过来
+          const rgb = getComputedStyle(root).color.match(/\d+(\.\d+)?/g);
+          if (rgb && rgb.length >= 3) {
+            const lum = 0.299 * Number(rgb[0]) + 0.587 * Number(rgb[1]) + 0.114 * Number(rgb[2]);
+            sheet.classList.toggle('dark', lum > 150);
+          }
+          const rect = root.getBoundingClientRect();
+          const visibleTop = Math.max(0, rect.top);
+          const visibleBottom = Math.min(window.innerHeight, rect.bottom);
+          sheet.style.left = '0px';
+          sheet.style.width = `${Math.round(rect.width)}px`;
+          sheet.style.top = `${Math.round(visibleTop - rect.top)}px`;
+          sheet.style.height = `${Math.round(Math.max(280, visibleBottom - visibleTop))}px`;
+        }
+
+        window.addEventListener('resize', () => {
+          if (!sheet.hidden) placeSheet();
+        });
+        window.addEventListener(
+          'scroll',
+          () => {
+            if (!sheet.hidden) placeSheet();
+          },
+          { passive: true },
+        );
+        document.addEventListener(
+          'wheel',
+          (e) => {
+            if (!sheet.hidden && e.target === sheet) e.preventDefault();
+          },
+          { passive: false },
+        );
+
+        function openSheet({ title, hint = '', tabs = [], active = '', onTab = null, render }) {
+          sheetTitle.textContent = title;
+          sheetHint.textContent = hint;
+          sheetTabs.replaceChildren();
+          if (tabs.length) {
+            sheetTabs.style.display = '';
+            for (const t of tabs) {
+              const b = el('button', undefined, '');
+              b.type = 'button';
+              b.append(el('span', t.label), el('b', String(t.count ?? '')));
+              b.classList.toggle('on', t.key === active);
+              b.addEventListener('click', () => onTab?.(t.key));
+              sheetTabs.append(b);
+            }
+          } else {
+            sheetTabs.style.display = 'none';
+          }
+          sheetBody.replaceChildren();
+          render(sheetBody);
+          sheetBody.scrollTop = 0;
+          sheet.hidden = false;
+          placeSheet();
+          requestAnimationFrame(() => sheet.classList.add('show'));
+        }
+
+        function closeSheet() {
+          sheet.classList.remove('show');
+          sheet.hidden = true;
+        }
+
+        /** 一条动作的完整样子：谁、什么时候、原文、在哪条内容上。 */
+        /** 今天只给时间，更早的带上日期，免得看不出来是哪天的。 */
+        function actionTime(at) {
+          if (!at) return '';
+          const d = new Date(at);
+          if (Number.isNaN(d.getTime())) return '';
+          if (d.toDateString() === new Date().toDateString()) return hhmm(at);
+          return `${d.getMonth() + 1}-${d.getDate()} ${hhmm(at)}`;
+        }
+
+        function detailRow(item) {
+          const row = el('div', undefined, 'stroll-detail');
+          if (item.result && item.result !== 'ok') row.classList.add('bad');
+          if (item.url) row.classList.add('clickable');
+
+          const head = el('div', undefined, 'stroll-detail-head');
+          head.append(el('span', ACTION_LABEL[item.action] ?? item.action ?? '动作', 'stroll-detail-kind'));
+          head.append(el('span', PLATFORM_LABEL[item.platform] ?? item.platform ?? '', 'stroll-detail-plat'));
+          head.append(el('span', actionTime(item.at), 'stroll-detail-time'));
+          row.append(head);
+
+          if (item.text) row.append(el('p', item.text, 'stroll-detail-text'));
+
+          const target = String(item.target ?? '');
+          let where = item.title || '';
+          if (!where && target) where = /^follow|unfollow$/.test(item.action ?? '') ? `UID ${target}` : target;
+          if (where) {
+            const line = el('div', undefined, 'stroll-detail-where');
+            line.append(icon('play', 11), el('span', where.length > 34 ? `${cut(where, 34)}…` : where));
+            row.append(line);
+          }
+
+          if (item.url) {
+            row.title = '在你的浏览器里打开';
+            const go = el('span', undefined, 'stroll-detail-go');
+            go.append(icon('link', 11));
+            row.append(go);
+            row.addEventListener('click', () => openExternal(item.url, where || '这一条'));
+          }
+          return row;
+        }
+
+        function renderDetailList(body, items, emptyTitle, emptyHint) {
+          if (!items.length) {
+            const empty = el('div', undefined, 'stroll-empty soft');
+            empty.append(el('strong', emptyTitle), el('span', emptyHint));
+            body.append(empty);
+            return;
+          }
+          const list = el('div', undefined, 'stroll-detail-list');
+          for (const item of items) list.append(detailRow(item));
+          body.append(list);
+        }
+
+        async function openUsage(key, label) {
+          let data = null;
+          try {
+            data = await ctx.invoke('usage_detail', [key]);
+          } catch {
+            // 读不到就当空的
+          }
+          const items = Array.isArray(data?.items) ? data.items : [];
+          const cap = Number(data?.cap ?? 0);
+          openSheet({
+            title: `${label} · 今天`,
+            hint: cap ? `${items.length} 条 / 额度 ${cap}` : `${items.length} 条`,
+            render: (body) =>
+              renderDetailList(
+                body,
+                items,
+                `今天还没有${label}`,
+                key === 'comment' ? '她看到想说的才会留一句。' : '等她出门，或者在上面那一行直接让她做。',
+              ),
+          });
+        }
+
+        async function openTimeline() {
+          let data = null;
+          try {
+            data = await ctx.invoke('timeline', [60]);
+          } catch {
+            // 读不到就退回面板上那几条
+          }
+          const items = Array.isArray(data?.items) ? data.items : (lastData?.recent ?? []);
+          openSheet({
+            title: '最近做过什么',
+            hint: `${items.length} 条${Number(lastData?.recentTotal ?? items.length) > items.length ? `（更早的已折叠）` : ''}`,
+            render: (body) => renderDetailList(body, items, '还没出过门', '等她自己出门，或者在上面贴个链接。'),
+          });
+        }
+
+        function openInboxSheet(filter = sheetFilter) {
+          sheetFilter = filter;
+          const count = (k) => (k === 'all' ? inboxItems.length : inboxItems.filter((x) => x.kind === k).length);
+          const tabs = [
+            { key: 'all', label: '全部', count: count('all') },
+            { key: 'reply', label: '评论', count: count('reply') },
+          ];
+          if (count('at')) tabs.push({ key: 'at', label: '@ 我', count: count('at') });
+          const list = filter === 'all' ? inboxItems : inboxItems.filter((x) => x.kind === filter);
+          openSheet({
+            title: '谁找你',
+            hint: `${inboxItems.length} 条 · 在框内滚动，不撑长页面`,
+            tabs,
+            active: filter,
+            onTab: (k) => openInboxSheet(k),
+            render: (body) => {
+              if (!list.length) {
+                const empty = el('div', undefined, 'stroll-empty soft');
+                empty.append(el('strong', '这一类还没有消息'), el('span', '换个分类，或者过一会儿再刷新。'));
+                body.append(empty);
+                return;
+              }
+              const wrap = el('div', undefined, 'stroll-inbox');
+              for (const item of list) wrap.append(inboxCard(item));
+              body.append(wrap);
+            },
+          });
         }
 
         /* ---------------- 正在看 / 活跃度 ---------------- */
@@ -1211,7 +1447,6 @@ export default {
         let inboxAt = 0;
         let inboxCounts = { all: 0, reply: 0, at: 0 };
         let inboxFilter = 'all';
-        let inboxExpanded = false;
         const INBOX_FOLD = 4;
         const INBOX_TYPES = { video: '视频', opus: '动态', article: '专栏', other: '页面' };
 
@@ -1267,14 +1502,13 @@ export default {
             tab.addEventListener('click', () => {
               if (inboxFilter === key) return;
               inboxFilter = key;
-              inboxExpanded = false;
               renderInbox();
             });
             inboxTabs.append(tab);
           }
 
           const list = inboxFiltered();
-          const shown = inboxExpanded ? list : list.slice(0, INBOX_FOLD);
+          const shown = list.slice(0, INBOX_FOLD);
           inboxList.replaceChildren();
           if (!list.length) {
             const empty = el('div', undefined, 'stroll-empty soft');
@@ -1287,12 +1521,9 @@ export default {
           inboxMore.replaceChildren();
           if (list.length > INBOX_FOLD) {
             const rest = list.length - INBOX_FOLD;
-            const moreBtn = button(inboxExpanded ? '收起' : `展开剩下 ${rest} 条`, () => {
-              inboxExpanded = !inboxExpanded;
-              renderInbox();
-            }, 'ghost xs');
-            moreBtn.append(icon(inboxExpanded ? 'up' : 'down', 11));
-            inboxMore.append(moreBtn, el('span', `共 ${list.length} 条`, 'stroll-token'));
+            const moreBtn = button(`查看全部 ${list.length} 条`, () => openInboxSheet(inboxFilter), 'ghost xs');
+            moreBtn.append(icon('link', 11));
+            inboxMore.append(moreBtn, el('span', `还有 ${rest} 条，点开在弹层里看`, 'stroll-token'));
           }
         }
 

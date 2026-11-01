@@ -120,6 +120,7 @@ export class Policy {
       platform,
       action,
       target: String(target ?? '').slice(0, 200),
+      title: String(detail.title ?? '').slice(0, 160),
       text: String(detail.text ?? '').slice(0, 300),
       result: detail.result ?? 'ok',
       extra: detail.extra ?? undefined,

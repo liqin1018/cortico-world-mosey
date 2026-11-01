@@ -32,8 +32,10 @@ export const DEFAULTS = {
   quietTo: 8,
   minGapSeconds: 90,
 
-  /** 0 = 不自己出门；默认一天三次，比较像会自己刷手机的人。 */
-  autoSessionsPerDay: 3,
+  /** 0 = 不自己出门；默认一天五次，比较像会自己刷手机的人。 */
+  autoSessionsPerDay: 5,
+  /** 两次自动出门之间至少隔多少分钟；和主人手动互动无关。 */
+  autoGapMinutes: 90,
   sessionMaxItems: 8,
 
   /** 兴趣词，逗号分隔；本地打分用，不额外调模型。 */
@@ -106,10 +108,19 @@ const BASIC = {
       [P + 'autoSessionsPerDay']: {
         type: 'integer',
         title: '每天自己出门',
-        description: '0 = 只在你叫的时候去；3 次像正常人刷手机，活跃但不是刷量。',
+        description: '0 = 只在你叫的时候去；5 次像正常人刷手机，活跃但不是刷量。',
         minimum: 0,
-        maximum: 6,
+        maximum: 10,
         'x-suffix': ' 次/天',
+        'x-hot': true,
+      },
+      [P + 'autoGapMinutes']: {
+        type: 'integer',
+        title: '两次出门至少隔',
+        description: '太密容易撞平台风控。90 分钟 ≈ 一天能出去 5 次；想更勤就调到 60。',
+        minimum: 30,
+        maximum: 360,
+        'x-suffix': ' 分钟',
         'x-hot': true,
       },
       [P + 'ownerUid']: {
@@ -374,7 +385,8 @@ export const POLICY_FIELDS = {
   quietFrom: { type: 'int', min: 0, max: 23 },
   quietTo: { type: 'int', min: 0, max: 23 },
   minGapSeconds: { type: 'int', min: 30, max: 600 },
-  autoSessionsPerDay: { type: 'int', min: 0, max: 6 },
+  autoSessionsPerDay: { type: 'int', min: 0, max: 10 },
+  autoGapMinutes: { type: 'int', min: 30, max: 360 },
   sessionMaxItems: { type: 'int', min: 3, max: 12 },
   interests: { type: 'string', max: 300 },
   avoid: { type: 'string', max: 300 },

@@ -19,7 +19,7 @@
   "engines": {
     "node": ">=22"
   },
-  "author": "liqin1018",
+  "author": "lutsing <1940008084@qq.com> (https://github.com/liqin1018)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/liqin1018/cortico-world-mosey.git"

@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-mosey",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "description": "摸鱼（Mosey）：让 Coopanion 的桌宠自己去抖音和 B站逛一圈。按额度点赞、评论、关注、发动态、私信；指定视频可自己开窗看。三把工具、少 token、默认人审。",
   "license": "MIT",
@@ -37,6 +37,10 @@
     "webUiClient": "webui/client.js",
     "webUiStyle": "webui/style.css",
     "icon": "assets/icon.png",
+    "screenshots": [
+      "docs/panel-preview.png",
+      "docs/detail-sheet.png"
+    ],
     "tags": [
       "video",
       "browser",

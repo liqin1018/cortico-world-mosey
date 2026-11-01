@@ -4,7 +4,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll',
     description:
-      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；open 后台看指定视频/动态/专栏（B站链接都行）；comments 只读评论区；inbox 看谁回了你；search 搜 B站；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
+      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站链接都行）；comments 只读评论区；inbox 看谁回了你；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
     tags: ['read'],
     parameters: {
       type: 'object',
@@ -12,14 +12,18 @@ export const TOOL_DECLS = [
       properties: {
         action: {
           type: 'string',
-          enum: ['status', 'brief', 'feed', 'open', 'comments', 'inbox', 'search', 'login', 'history', 'whoami', 'watch'],
+          enum: ['status', 'brief', 'feed', 'following', 'open', 'comments', 'inbox', 'search', 'weekly', 'books', 'read', 'note', 'login', 'history', 'whoami', 'watch'],
           description: '要做什么。',
         },
         platform: { type: 'string', enum: ['bilibili', 'douyin'], description: '去哪个平台；open 会从链接自动判断。' },
         url: { type: 'string', description: '视频 / 动态 / 专栏链接（open 用）。' },
         id: { type: 'string', description: 'BV 号、av 号、动态 ID、cv 号或抖音视频 ID（open 用）。' },
         query: { type: 'string', description: '搜索词（search 用）。' },
-        n: { type: 'integer', minimum: 1, maximum: 8, description: '要几条，默认 6。' },
+        n: { type: 'integer', minimum: 1, maximum: 20, description: '要几条，默认 6。' },
+        days: { type: 'integer', minimum: 1, maximum: 30, description: 'weekly 看最近几天，默认 7。' },
+        book: { type: 'string', description: 'read 用：书名（不带后缀也行）；不填就接着上次那本。' },
+        chars: { type: 'integer', minimum: 200, maximum: 2000, description: 'read 一次读多少字，默认 900。' },
+        text: { type: 'string', description: 'note 用：要记下来的那句摘抄。' },
         frames: { type: 'integer', minimum: 0, maximum: 3, description: '抖音抽几帧；默认 0，最省 token。' },
         watch_action: {
           type: 'string',

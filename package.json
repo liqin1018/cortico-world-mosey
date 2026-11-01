@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-mosey",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "type": "module",
-  "description": "摸鱼（Mosey）：让 Coopanion 的桌宠自己去抖音和 B站逛一圈。视频、动态、专栏都能看能评；按额度点赞、评论、关注、发动态、私信；默认人审，三把工具、少 token。",
+  "description": "摸鱼（Mosey）：让 Coopanion 的桌宠自己去抖音和 B站逛一圈。关注流、周报、本地书库；视频、动态、专栏都能看能评；按额度点赞、评论、关注、发动态、私信；默认人审，三把工具、少 token。",
   "license": "MIT",
   "keywords": [
     "cortico-world",
@@ -39,6 +39,7 @@
     "icon": "assets/icon.png",
     "screenshots": [
       "docs/panel-preview.png",
+      "docs/life-section.png",
       "docs/detail-sheet.png",
       "docs/comments-sheet.png"
     ],
@@ -55,11 +56,11 @@
     "locales": {
       "zh": {
         "displayName": "摸鱼",
-        "description": "让她自己去抖音/B站逛：刷候选、看视频/动态/专栏、点赞、评论、回复楼中楼、关注、发动态、@你、私信你。公开动作有硬额度，默认先出草稿等你批准；三把工具，token 花得少。"
+        "description": "让她自己去抖音/B站逛：刷候选、看关注流、看视频/动态/专栏、点赞、评论、回复楼中楼、关注、发动态、私信；还带周报和本地书库。公开动作有硬额度，默认先出草稿等你批准；三把工具，token 花得少。"
       },
       "en": {
         "displayName": "Mosey",
-        "description": "Let her browse Douyin and Bilibili: feed, videos, dynamics and articles; like, comment, reply in threads, follow, post, mention or DM you. Hard caps and owner approval by default; only three tools to keep token use low."
+        "description": "Let her browse Douyin and Bilibili: feeds, following updates, videos, dynamics and articles; like, comment, reply in threads, follow, post, DM. Plus weekly recap and a local book library. Hard caps and owner approval by default; only three tools."
       }
     }
   },

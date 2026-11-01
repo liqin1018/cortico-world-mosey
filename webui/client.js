@@ -142,6 +142,15 @@ function hhmm(iso) {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+/** 关注流里的时间：今天给几点，更早给月-日。 */
+function whenShort(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return hhmm(ts);
+  return `${d.getMonth() + 1}-${d.getDate()}`;
+}
+
 function ago(sec) {
   const n = Math.max(0, Number(sec) || 0);
   if (n < 60) return `${Math.floor(n)} 秒前`;
@@ -410,6 +419,47 @@ export default {
         duo.append(browse, watch);
         root.append(duo);
 
+        /* ---------------- 她的生活：关注流 / 在读 / 这周 ---------------- */
+        const lifeSec = el('section', undefined, 'stroll-sec');
+        lifeSec.append(sectionHead('她的生活', '关注流 · 在读 · 这周'));
+
+        const followCard = el('article', undefined, 'stroll-life-card');
+        const followHead = el('div', undefined, 'stroll-life-head');
+        followHead.append(el('h4', '关注的人在发什么'), el('span', '', 'stroll-token'));
+        const followCount = followHead.lastChild;
+        const followEmpty = el('p', '还没有关注流；她自己逛的时候会顺手拉一份。', 'stroll-muted');
+        const followList = el('div', undefined, 'stroll-life-list');
+        followCard.append(followHead, followEmpty, followList);
+
+        const bookCard = el('article', undefined, 'stroll-life-card');
+        const bookHead = el('div', undefined, 'stroll-life-head');
+        bookHead.append(el('h4', '在读'), el('span', '', 'stroll-token'));
+        const bookPct = bookHead.lastChild;
+        const bookTitle = el('p', undefined, 'stroll-life-title');
+        const bookBarWrap = el('div', undefined, 'stroll-life-bar');
+        const bookBar = el('i');
+        bookBarWrap.append(bookBar);
+        const bookMeta = el('span', '', 'stroll-token');
+        const bookHint = el('p', '把 txt 放进书库，她就会一段一段地读。', 'stroll-muted');
+        bookCard.append(bookHead, bookTitle, bookBarWrap, bookMeta, bookHint);
+
+        const weekCard = el('article', undefined, 'stroll-life-card');
+        const weekHead = el('div', undefined, 'stroll-life-head');
+        weekHead.append(el('h4', '这周'), el('span', '', 'stroll-token'));
+        const weekRange = weekHead.lastChild;
+        const weekLine = el('p', undefined, 'stroll-life-title');
+        const weekStats = el('div', undefined, 'stroll-life-stats');
+        const weekOut = statBlock('出门');
+        const weekComment = statBlock('评论');
+        const weekRead = statBlock('看书');
+        weekStats.append(weekOut.root, weekComment.root, weekRead.root);
+        weekCard.append(weekHead, weekLine, weekStats);
+
+        const lifeGrid = el('div', undefined, 'stroll-life');
+        lifeGrid.append(followCard, bookCard, weekCard);
+        lifeSec.append(lifeGrid);
+        root.append(lifeSec);
+
         /* ---------------- 账号 ---------------- */
         const accountSec = el('section', undefined, 'stroll-sec');
         accountSec.append(sectionHead('账号'));
@@ -421,7 +471,7 @@ export default {
         const biliName = el('strong', 'B站');
         const biliSub = el('span', '未登录');
         biliBody.append(biliName, biliSub);
-        const biliBtn = button('刷新登录态', () => refreshBili(), 'ghost xs');
+        const biliBtn = button('登录 B站', () => login('bilibili'), 'ghost xs');
         biliTile.append(biliAvatar, biliBody, biliBtn);
 
         const dyTile = el('div', undefined, 'stroll-account');
@@ -778,9 +828,59 @@ export default {
           liveWatch = watching ? data.watch : null;
           applyPresence(data?.presence);
 
+          // 她的生活
+          const following = data?.following;
+          followList.replaceChildren();
+          if (following?.items?.length) {
+            followEmpty.style.display = 'none';
+            followCount.textContent = `${following.total} 条`;
+            for (const item of following.items) {
+              const isDy = item.platform === 'douyin';
+              const row = el('button', undefined, 'stroll-life-row');
+              row.type = 'button';
+              row.title = item.title || '';
+              row.append(el('span', isDy ? '抖' : 'B', `stroll-life-dot ${isDy ? 'dy' : 'bili'}`));
+              const body = el('span', undefined, 'stroll-life-body');
+              body.append(el('b', cut(item.author || (isDy ? '抖音' : 'B站'), 10)), el('span', cut(item.title || '', 34)));
+              row.append(body);
+              if (item.at) row.append(el('span', whenShort(item.at), 'stroll-token'));
+              row.addEventListener('click', () => openExternal(item.url, cut(item.title || '这一条', 16)));
+              followList.append(row);
+            }
+          } else {
+            followEmpty.style.display = '';
+            followCount.textContent = '';
+          }
+
+          const books = data?.books;
+          if (books?.current) {
+            bookTitle.textContent = String(books.current.name).replace(/\.(txt|md|markdown)$/i, '');
+            bookPct.textContent = `${books.current.percent}%`;
+            bookBar.style.width = `${books.current.percent}%`;
+            const lastNote = books.current.notes?.[0];
+            bookMeta.textContent = `${Math.max(1, Math.round(books.current.offset / 1000))}k / ${Math.max(1, Math.round(books.current.total / 1000))}k 字`;
+            bookHint.textContent = lastNote ? `摘：「${cut(lastNote.text, 24)}」` : `书库 ${books.total} 本`;
+          } else {
+            bookTitle.textContent = '书库还是空的';
+            bookPct.textContent = '';
+            bookBar.style.width = '0%';
+            bookMeta.textContent = '';
+            bookHint.textContent = books?.dir ? `把 txt 放进 ${books.dir}` : '把 txt 放进书库目录';
+          }
+
+          const weekly = data?.weekly;
+          if (weekly) {
+            weekRange.textContent = weekly.range ? `${weekly.range.from.slice(5)} – ${weekly.range.to.slice(5)}` : '';
+            weekLine.textContent = weekly.headline || '';
+            weekOut.set(weekly.totalActions ?? 0);
+            weekComment.set((weekly.actions?.comment ?? 0) + (weekly.actions?.reply ?? 0));
+            weekRead.set(weekly.reads ?? 0);
+          }
+
           // 账号
           biliName.textContent = bili.loggedIn ? bili.name || '已登录' : 'B站';
-          biliSub.textContent = bili.loggedIn ? `UID ${bili.uid || '—'} · 写动作可用` : bili.note || '未登录';
+          biliSub.textContent = bili.loggedIn ? `UID ${bili.uid || '—'} · 写动作可用` : '未登录 · 能看不能赞';
+          biliBtn.textContent = bili.loggedIn ? '重新登录' : '登录 B站';
           dyName.textContent = dy.loggedIn ? '抖音' : '抖音';
           dySub.textContent = dy.loggedIn
             ? dy.running
@@ -1976,20 +2076,6 @@ export default {
           try {
             const result = await ctx.invoke('reset_usage');
             msgSet(result?.ok ? `今天（${result.day}）的计数已清零。` : result?.error || '没成功', result?.ok === false);
-            await refresh();
-          } catch (error) {
-            msgSet(error.message || String(error), true);
-          }
-        }
-
-        async function refreshBili() {
-          msgSet('正在从窗口收 B站登录态…');
-          try {
-            const result = await ctx.invoke('refreshBili');
-            msgSet(
-              result?.ok ? `B站登录态已更新：${result.name || result.uid || ''}` : '窗口里还没 B站登录态；先点「登录 B站」扫码。',
-              !result?.ok,
-            );
             await refresh();
           } catch (error) {
             msgSet(error.message || String(error), true);

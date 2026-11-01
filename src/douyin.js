@@ -125,6 +125,7 @@ export class DouyinBrowser {
     this.page = null;
     this.queue = Promise.resolve();
     this.closeTimer = null;
+    this.holdOpen = false;
     this.launching = null;
     this.lastAction = '';
     this.lastError = '';
@@ -385,6 +386,35 @@ export class DouyinBrowser {
     });
   }
 
+  /** 关注流：读 /follow 页。没登录时返回空数组，由上层给提示。 */
+  async following(limit = 6) {
+    return this.serialize(async () => {
+      const page = await this.getPage();
+      await this.goto(page, `${ORIGIN}/follow`);
+      if (!(await this.isLoggedIn())) return [];
+      for (let i = 0; i < Math.max(1, Math.ceil(limit / 6)); i++) {
+        await page.mouse.wheel(0, 900 + Math.floor(Math.random() * 400));
+        await humanPause(1200, 2000);
+      }
+      const raw = await page.evaluate(feedScript(Math.min(20, Math.max(limit, 6))));
+      this.scheduleClose(45);
+      this.lastAction = `following ${raw.length}`;
+      return raw.slice(0, limit).map((item) => ({
+        platform: 'douyin',
+        kind: 'video',
+        id: String(item.id),
+        bvid: '',
+        title: truncate(item.title, 70),
+        author: truncate(item.author, 18),
+        authorId: '',
+        at: 0,
+        url: item.url,
+        stat: item.like ? `${item.like} 赞` : '',
+        cover: item.cover,
+      }));
+    });
+  }
+
   mapCard(item) {
     const tags = this.matchTags(`${item.title} ${item.author}`);
     const durSec = this.durationOf(item.duration);
@@ -490,6 +520,8 @@ export class DouyinBrowser {
   }
 
   scheduleClose(seconds) {
+    // 登录窗开着时不自动关页：扫码可能要好几十秒
+    if (this.holdOpen) return;
     if (this.closeTimer) clearTimeout(this.closeTimer);
     if (!seconds || seconds <= 0) {
       this.closeTimer = setTimeout(() => this.closePage().catch(() => {}), 1500);
@@ -756,6 +788,28 @@ export class DouyinBrowser {
     });
   }
 
+  /**
+   * 专门用来登录的窗口：开一个有头窗口停在登录页，期间不自动关页。
+   * 不复用「一起看」，免得扫码扫到一半被 scheduleClose 关掉。
+   */
+  async loginWindow(url) {
+    return this.serialize(async () => {
+      await this.launch({ headless: false, force: true });
+      this.holdOpen = true;
+      if (this.closeTimer) clearTimeout(this.closeTimer);
+      this.closeTimer = null;
+      const page = await this.getPage();
+      if (url) await this.goto(page, url, 2200);
+      return { ok: true, url: page.url() };
+    });
+  }
+
+  async loginWindowClose() {
+    this.holdOpen = false;
+    await this.close().catch(() => {});
+    return { ok: true };
+  }
+
   /** 一起看：开一个有头窗口，主人可以自己在这个窗口里翻页，桌宠读同一个页面。 */
   async watchStart(url) {
     return this.serialize(async () => {
@@ -800,6 +854,7 @@ export class DouyinBrowser {
   async close() {
     if (this.closeTimer) clearTimeout(this.closeTimer);
     this.closeTimer = null;
+    this.holdOpen = false;
     await this.page?.close().catch(() => {});
     this.page = null;
     await this.context?.close().catch(() => {});

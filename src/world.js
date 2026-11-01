@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from './store.js';
@@ -171,9 +172,15 @@ export class StrollWorld {
             ? '日常：看 1-2 条，偶尔评一句'
             : '安静：只看看，不主动评论';
     const present = this.presenceView();
+    const book = this.bookView();
     return {
       'stroll.summary': this.policy.summary(),
       'stroll.activity': activity,
+      'stroll.books': book.current
+        ? `在读《${truncate(book.current.name.replace(/\.(txt|md|markdown)$/i, ''), 30)}》，已读 ${book.current.percent}%`
+        : book.empty
+          ? '书库是空的（把 txt 放进面板上显示的那个目录）'
+          : '书库有书，但还没开始读',
       'stroll.presence': present
         ? `正在${present.platform === 'douyin' ? '抖音' : 'B站'}看《${truncate(present.title || present.url, 40)}》`
         : '现在没在看',
@@ -246,6 +253,11 @@ export class StrollWorld {
       return JSON.stringify(await this.watchStatus());
     }
     if (action === 'login') return JSON.stringify(await this.login(args.platform));
+    if (action === 'following') return JSON.stringify(await this.followingFeed(args.platform, args.n));
+    if (action === 'weekly') return JSON.stringify(this.weeklyReport(args.days));
+    if (action === 'books') return JSON.stringify(this.listBooks());
+    if (action === 'read') return JSON.stringify(this.readBook({ name: args.book, chars: args.chars }));
+    if (action === 'note') return JSON.stringify(this.noteBook(args.text));
     if (action === 'history') return JSON.stringify(this.history());
     return JSON.stringify({ ok: false, error: `不认识的动作：${action}` });
   }
@@ -512,26 +524,52 @@ export class StrollWorld {
 
   async login(platform) {
     if (platform === 'bilibili') {
-      const info = await this.douyin.watchStart('https://passport.bilibili.com/login');
+      // 窗口已经开着并且有 B站登录态，就先直接收，不再多开一个窗
+      if (this.douyin.context) {
+        const quick = await this.bili.importFromContext(this.douyin.context).catch(() => null);
+        if (quick?.ok) {
+          this.lastImportAt = Date.now();
+          return {
+            ok: true,
+            name: quick.name,
+            uid: quick.uid,
+            message: `B站已经是登录状态：${quick.name || quick.uid || ''}。`,
+          };
+        }
+      }
+      let info;
+      try {
+        info = await this.douyin.loginWindow('https://passport.bilibili.com/login');
+      } catch (error) {
+        return {
+          ok: false,
+          code: error?.code ?? 'BROWSER_LAUNCH',
+          error: `登录窗没打开：${error?.message ?? String(error)}。多半是没装 Edge / Chrome，或者上次的窗口没退干净。`,
+        };
+      }
       // 扫码是异步的：后台轮询，登上了就把 cookie 收回来并关窗
       let tries = 0;
       const timer = setInterval(async () => {
         tries += 1;
+        if (tries > 60 || !this.douyin.context) {
+          clearInterval(timer);
+          return;
+        }
         try {
           const got = await this.bili.importFromContext(this.douyin.context).catch(() => null);
-          if (got) {
+          if (got?.ok) {
             clearInterval(timer);
-            await this.douyin.watchStop().catch(() => {});
+            this.lastImportAt = Date.now();
+            await this.douyin.loginWindowClose().catch(() => {});
             await this.push('stroll.sent', `B站登录成功：${got.name || got.uid || '已登录'}。`, { kind: 'bili-login' }, 'flush');
           }
         } catch {
           // 继续等
         }
-        if (tries > 60) clearInterval(timer);
       }, 3000);
       return {
         ok: true,
-        message: 'B站登录窗口已打开；扫码完成后会自动收回登录态并关窗。',
+        message: 'B站登录窗已经开了；在窗口里扫码，登上后会自动收回登录态并关窗。',
         url: info.url,
       };
     }
@@ -548,6 +586,268 @@ export class StrollWorld {
       risk: this.store.data.risk,
       usage: this.policy.snapshot(),
     };
+  }
+
+  /* ---------------- 关注流 / 周报 / 书 ---------------- */
+
+  /**
+   * 关注的人在发什么。B站走动态流接口，抖音读 /follow 页面。
+   * 结果落一份到本地，面板不用每次都拉。
+   */
+  async followingFeed(platform = 'both', n = 8) {
+    const want = platform === 'douyin' || platform === 'bilibili' ? platform : 'both';
+    const limit = clamp(n ?? 8, 1, 20);
+    const items = [];
+    const errors = [];
+
+    if (want !== 'douyin') {
+      if (!this.cfg.bilibili) errors.push({ platform: 'bilibili', error: 'B站关着' });
+      else if (!this.bili.readCredentials()) errors.push({ platform: 'bilibili', error: 'B站没登录，关注流要登录才看得到' });
+      else {
+        try {
+          items.push(...(await this.bili.followFeed(limit)));
+        } catch (error) {
+          errors.push({ platform: 'bilibili', error: error.message });
+        }
+      }
+    }
+
+    if (want !== 'bilibili') {
+      if (!this.cfg.douyin) errors.push({ platform: 'douyin', error: '抖音关着' });
+      else {
+        try {
+          const got = await this.douyin.following(limit);
+          if (!got.length) errors.push({ platform: 'douyin', error: '抖音关注流读不到（后台页面是空壳）；抖音这边用 feed 刷精选' });
+          items.push(...got);
+        } catch (error) {
+          errors.push({ platform: 'douyin', error: error.message });
+        }
+      }
+    }
+
+    items.sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0));
+    const list = items.slice(0, limit);
+    if (list.length) {
+      this.store.data.followFeed = { at: Date.now(), items: list.slice(0, 12) };
+      this.store.save();
+    }
+    return {
+      ok: list.length > 0,
+      platform: want,
+      items: list,
+      errors: errors.length ? errors : undefined,
+      hint: list.length
+        ? '挑一条真的想看的；不要每条都点开，也不要复述标题。'
+        : '关注流暂时没东西；可以先用 feed 刷候选。',
+    };
+  }
+
+  /** 本地缓存的一份关注流，给面板用。 */
+  followFeedView(n = 5) {
+    const cached = this.store.data.followFeed;
+    if (!cached?.items?.length) return null;
+    return { at: Number(cached.at ?? 0), items: cached.items.slice(0, n), total: cached.items.length };
+  }
+
+  /** 最近 N 天的周报：全本地算，不花 token。 */
+  weeklyReport(days = 7) {
+    const span = clamp(days ?? 7, 1, 30);
+    const tz = this.timeZone;
+    const now = Date.now();
+    const dayKeys = [];
+    for (let i = span - 1; i >= 0; i -= 1) dayKeys.push(dayKey(new Date(now - i * 86400000), tz));
+
+    const usage = this.store.data.usage ?? {};
+    const sum = { like: 0, unlike: 0, comment: 0, reply: 0, follow: 0, unfollow: 0, post: 0, dm: 0, save: 0 };
+    let reads = 0;
+    const perDay = [];
+    for (const key of dayKeys) {
+      const day = usage[key] ?? {};
+      let total = 0;
+      for (const k of Object.keys(sum)) {
+        const v = Number(day[k] ?? 0);
+        sum[k] += v;
+        total += v;
+      }
+      const read = Number(this.store.data.readDays?.[key] ?? 0);
+      reads += read;
+      perDay.push({ day: key.slice(5), actions: total, reads: read });
+    }
+    const totalActions = Object.values(sum).reduce((a, b) => a + b, 0);
+
+    const since = now - span * 86400000;
+    const acts = (this.store.data.actions ?? []).filter((a) => Date.parse(a.at ?? '') >= since);
+    const platformCount = new Map();
+    const hours = new Array(24).fill(0);
+    for (const a of acts) {
+      const p = a.platform === 'douyin' ? '抖音' : 'B站';
+      platformCount.set(p, (platformCount.get(p) ?? 0) + 1);
+      const ts = Date.parse(a.at ?? '');
+      if (Number.isFinite(ts)) hours[new Date(ts + 8 * 3600000).getUTCHours()] += 1;
+    }
+    const busiest = hours.reduce((best, v, i) => (v > hours[best] ? i : best), 0);
+
+    const authors = new Map();
+    const viewed = (this.store.data.viewed ?? []).filter((v) => Date.parse(v.at ?? '') >= since);
+    for (const v of viewed) {
+      const name = String(v.author ?? '').trim();
+      if (name) authors.set(name, (authors.get(name) ?? 0) + 1);
+    }
+    const topAuthors = [...authors.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, count]) => ({ name, count }));
+
+    const activeDays = perDay.filter((d) => d.actions > 0 || d.reads > 0).length;
+    const topPlatform = [...platformCount.entries()].sort((a, b) => b[1] - a[1])[0];
+
+    return {
+      ok: true,
+      days: span,
+      range: { from: dayKeys[0], to: dayKeys[dayKeys.length - 1] },
+      totalActions,
+      actions: sum,
+      reads,
+      views: viewed.length,
+      activeDays,
+      perDay,
+      platforms: [...platformCount.entries()].map(([name, count]) => ({ name, count })),
+      topAuthors,
+      busiestHour: totalActions ? { hour: busiest, count: hours[busiest] } : null,
+      headline: totalActions || reads
+        ? `${span} 天里出门 ${totalActions} 次、看书 ${reads} 段${topPlatform ? `，主要在${topPlatform[0]}` : ''}`
+        : `${span} 天里几乎什么都没做`,
+      hint: '用一两句说这周过得怎么样，不要逐条念数字，也不要编没发生的事。',
+    };
+  }
+
+  /* ---------------- 本地书库 ---------------- */
+
+  bookDir() {
+    return path.join(this.dataDir, 'stroll', 'books');
+  }
+
+  /** 扫本地书库；没有就返回空列表，不报错。 */
+  listBooks() {
+    const dir = this.bookDir();
+    let files = [];
+    try {
+      files = fs.readdirSync(dir).filter((f) => /\.(txt|md|markdown)$/i.test(f));
+    } catch {
+      return { ok: true, dir, books: [], empty: true };
+    }
+    const state = this.store.data.books ?? {};
+    const books = files.slice(0, 40).map((name) => {
+      const prog = state[name] ?? {};
+      const total = Number(prog.total ?? 0);
+      const offset = Number(prog.offset ?? 0);
+      return {
+        name,
+        total,
+        offset,
+        percent: total ? Math.min(100, Math.round((offset / total) * 100)) : 0,
+        updatedAt: Number(prog.updatedAt ?? 0),
+        notes: Array.isArray(prog.notes) ? prog.notes.length : 0,
+      };
+    });
+    return { ok: true, dir, books, empty: books.length === 0 };
+  }
+
+  /** 手头那本：最近读过的优先，没读过就第一本。 */
+  currentBook(list) {
+    const state = this.store.data.books ?? {};
+    const ranked = list
+      .map((b) => ({ ...b, updatedAt: Number(state[b.name]?.updatedAt ?? 0) }))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    return ranked[0] ?? null;
+  }
+
+  /** 面板上的「在读」卡片：只给一本书的信息，不把整本书塞进去。 */
+  bookView() {
+    const info = this.listBooks();
+    const current = this.currentBook(info.books);
+    return {
+      dir: info.dir,
+      empty: info.empty,
+      total: info.books.length,
+      current: current
+        ? {
+            name: current.name,
+            percent: current.percent,
+            offset: current.offset,
+            total: current.total,
+            notes: (this.store.data.books?.[current.name]?.notes ?? []).slice(-2).reverse(),
+          }
+        : null,
+    };
+  }
+
+  /** 读一段，默认 900 字；读不动就明说，不编。 */
+  readBook({ name, chars = 900 } = {}) {
+    const list = this.listBooks().books;
+    if (!list.length) {
+      return { ok: false, error: `书库是空的：把 txt 放进 ${this.bookDir()} 再来。`, dir: this.bookDir() };
+    }
+    const pick = name
+      ? list.find((b) => b.name === name || b.name.replace(/\.(txt|md|markdown)$/i, '') === name)
+      : this.currentBook(list);
+    if (!pick) {
+      return { ok: false, error: '没找到这本书。', books: list.map((b) => b.name) };
+    }
+
+    let text = '';
+    try {
+      text = fs.readFileSync(path.join(this.bookDir(), pick.name), 'utf8');
+    } catch (error) {
+      return { ok: false, error: `读不了 ${pick.name}：${error.message}` };
+    }
+    if (text.slice(0, 200000).includes('\uFFFD')) {
+      return { ok: false, error: `${pick.name} 可能是 GBK 编码，另存成 UTF-8 再放进书库。` };
+    }
+    const clean = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+    if (!clean.trim()) return { ok: false, error: `${pick.name} 是空的。` };
+
+    const size = clamp(Number(chars) || 900, 200, 2000);
+    const start = Math.min(clean.length, Math.max(0, Number(pick.offset) || 0));
+    const chunk = clean.slice(start, start + size);
+    const next = Math.min(clean.length, start + chunk.length);
+    const state = this.store.data.books ?? {};
+    state[pick.name] = {
+      ...(state[pick.name] ?? {}),
+      offset: next,
+      total: clean.length,
+      updatedAt: Date.now(),
+      notes: Array.isArray(state[pick.name]?.notes) ? state[pick.name].notes : [],
+    };
+    this.store.data.books = state;
+    this.store.save();
+
+    return {
+      ok: true,
+      book: pick.name,
+      text: chunk,
+      offset: next,
+      total: clean.length,
+      percent: Math.round((next / clean.length) * 100),
+      done: next >= clean.length,
+      hint: '读完说一句你自己的感受，别复述剧情，别假装读过后面。',
+    };
+  }
+
+  /** 存一句摘抄，跟着这本书走。 */
+  noteBook(text) {
+    const body = truncate(String(text ?? '').trim(), 120);
+    if (!body) return { ok: false, error: '摘抄要有内容。' };
+    const list = this.listBooks().books;
+    const pick = this.currentBook(list);
+    if (!pick) return { ok: false, error: '书库还是空的。' };
+    const state = this.store.data.books ?? {};
+    const prog = state[pick.name] ?? { offset: 0, total: 0, updatedAt: Date.now(), notes: [] };
+    prog.notes = [...(Array.isArray(prog.notes) ? prog.notes : []), { text: body, at: Date.now() }].slice(-20);
+    state[pick.name] = prog;
+    this.store.data.books = state;
+    this.store.save();
+    return { ok: true, book: pick.name, note: body };
   }
 
   /* ---------------- 正在看 ---------------- */
@@ -1309,6 +1609,7 @@ export class StrollWorld {
             { name: 'stroll.interests', description: '兴趣词' },
             { name: 'stroll.last', description: '上次动作' },
             { name: 'stroll.watch', description: '一起看的当前页面' },
+            { name: 'stroll.books', description: '在读哪本书、读到百分之几' },
           ],
         },
       ],
@@ -1493,8 +1794,7 @@ export class StrollWorld {
       if (method === 'quick_follow') return await this.quickAct('follow', '', String(args[0] ?? ''));
       if (method === 'login') return await this.login(String(args[0] ?? 'douyin'));
       if (method === 'refreshBili') {
-        const got = await this.bili.importFromContext(this.douyin.context);
-        return { ok: !!got, ...got };
+        return await this.bili.importFromContext(this.douyin.context);
       }
       return { ok: false, error: `不认识的方法：${method}` };
     } catch (error) {
@@ -1634,6 +1934,9 @@ export class StrollWorld {
       inboxCount: (this.inboxCache ?? []).length,
       todayReads: this.store.readsToday(),
       viewed: this.store.viewedList(6),
+      following: this.followFeedView(4),
+      weekly: this.weeklyReport(7),
+      books: this.bookView(),
       week: this.weekBars(),
       autoSessions: Number(this.store.data.autoSessions[dayKey(new Date(), this.timeZone)] ?? 0),
       autoNext: this.autoNextView(),

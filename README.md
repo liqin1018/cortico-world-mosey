@@ -52,7 +52,17 @@
 - 面板「谁找你」：**点一条就用你自己的浏览器打开，并直接跳到那条评论**（`#reply<rpid>` 深链）；能展开全部 15 条、按「评论 / @ 我」筛选、标已读、顺手回一句
 - **动态/专栏的评论也能回**：视频、动态、专栏用同一套回复逻辑；面板里点「回一句」直接发到楼里，不用再跳网页
 - `search`：B站搜索（WBI 签名）
+- `following`：关注的人在发什么。B站走动态流接口（要登录），带作者、标题、发布时间和链接；抖音那边的关注页在后台是空壳，读不到会直言，不拿热门凑数
+- `weekly`：最近 7 天的周报，全本地算：出门几次、评论几条、看谁最多、最活跃时段、连续几天。不花 token
 - `history`：最近做过什么、草稿、兴趣画像、风控状态
+
+![她的生活：关注流、在读、这周](docs/life-section.png)
+
+### 读（本地书库）
+- 把 `txt` / `md` 放进 `<数据目录>/stroll/books/`，她就能一段一段地读：`books` 看书目、`read` 读一段（默认 900 字）、`note` 存一句摘抄
+- 会记进度、接着上次读、读到结尾会说读完了；文件不是 UTF-8 会提示另存，不硬读乱码
+- **她只读这一段**：不会假装读过后面，也不复述剧情。想让她聊书，先让她读
+- 面板「她的生活 → 在读」显示书名、进度条、已读字数和最近一句摘抄
 
 ### 动（全部有额度）
 - 点赞 / 取消赞
@@ -233,7 +243,12 @@ corepack pnpm install
 {"action":"comments","url":"https://www.bilibili.com/opus/1260000000000000000","n":10}
 {"action":"feed","platform":"douyin","n":4}
 {"action":"inbox","n":5}
+{"action":"following","platform":"bilibili","n":6}
+{"action":"weekly","days":7}
+{"action":"books"}
+{"action":"read","book":"夜航西飞","chars":900}
 {"action":"search","query":"独立游戏"}
+{"action":"note","text":"夜里飞过的地方，白天都不认得。"}
 {"action":"history"}
 ```
 

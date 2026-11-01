@@ -155,14 +155,19 @@ export class Bilibili {
 
   /**
    * 从 摸鱼 自己的浏览器窗口里收 B站 cookie。
-   * 只在主人主动点「登录 B站」后调用；不会去碰系统浏览器的资料。
+   * 只在主人主动登录、或面板刷新时调用；不会去碰系统浏览器的资料。
+   * 返回带 stage 的结果，方便上层说清楚卡在哪一步（没窗口 / 没 cookie / 校验没过）。
    */
   async importFromContext(context) {
-    if (!context) return null;
+    if (!context) {
+      return { ok: false, stage: 'no-window', error: '还没有打开的浏览器窗口，先点「登录 B站」。' };
+    }
     const cookies = await context.cookies('https://www.bilibili.com').catch(() => []);
     const sess = cookies.find((c) => c.name === 'SESSDATA');
     const jct = cookies.find((c) => c.name === 'bili_jct');
-    if (!sess?.value || !jct?.value) return null;
+    if (!sess?.value || !jct?.value) {
+      return { ok: false, stage: 'no-cookie', error: '窗口里还没看到 B站登录 cookie，先在窗口里扫码。' };
+    }
     const cred = {
       sessdata: sess.value,
       bili_jct: jct.value,
@@ -177,7 +182,16 @@ export class Bilibili {
     }
     this.setCredentials(cred);
     const nav = await this.nav(true).catch(() => null);
-    return nav?.isLogin ? { loggedIn: true, uid: String(nav.mid ?? ''), name: nav.uname ?? '' } : null;
+    if (nav?.isLogin) {
+      return { ok: true, stage: 'ok', loggedIn: true, uid: String(nav.mid ?? ''), name: nav.uname ?? '' };
+    }
+    // cookie 已经收下也存好了，只是这次校验没通过（多为风控），别让主人以为白扫了
+    return {
+      ok: false,
+      stage: 'verify-failed',
+      saved: true,
+      error: 'cookie 已经保存，但身份校验没通过（多半是风控）。过一会儿点「重新登录」或刷新面板再试。',
+    };
   }
 
   readCredentials() {
@@ -371,6 +385,40 @@ export class Bilibili {
     const following = await this.following().catch(() => new Set());
     const items = list.map((v) => this.mapVideo(v, following));
     return this.rank(items).slice(0, limit);
+  }
+
+  /**
+   * 关注的人在发什么（动态流）。需要登录；没登录时接口返回空列表，不抛错。
+   */
+  async followFeed(limit = 8) {
+    const data = await this.request(
+      '/x/polymer/web-dynamic/v1/feed/all',
+      { type: 'all', page: 1, timezone_offset: -480 },
+      { cacheMs: 90 * 1000 },
+    );
+    const list = Array.isArray(data.items) ? data.items : [];
+    return list.slice(0, Math.max(1, limit)).map((item) => {
+      const author = item.modules?.module_author ?? {};
+      const major = item.modules?.module_dynamic?.major ?? {};
+      const arch = major.archive;
+      const text = dynamicText(item);
+      const dynId = String(item.id_str ?? '');
+      const bvid = String(arch?.bvid ?? '');
+      const pics = dynamicImages(item).length;
+      return {
+        platform: 'bilibili',
+        kind: bvid ? 'video' : major.article ? 'article' : 'opus',
+        id: dynId,
+        bvid,
+        title: truncate(text || arch?.title || `${author.name ?? ''}发了${pics ? `${pics} 张图` : '一条动态'}`, 70),
+        author: stripTags(author.name ?? ''),
+        authorId: String(author.mid ?? ''),
+        at: Number(author.pub_ts ?? 0) * 1000,
+        url: bvid ? `https://www.bilibili.com/video/${bvid}` : `https://t.bilibili.com/${dynId}`,
+        stat: `${formatCount(Number(item.modules?.module_stat?.comment?.count ?? 0))} 评`,
+        pics,
+      };
+    });
   }
 
   /** 稍后再看。空列表很常见，不当成错误。 */

@@ -524,15 +524,13 @@ export class StrollWorld {
 
   async login(platform) {
     if (platform === 'bilibili') {
-      // 之前点过「退出登录」：先把窗口里残留的 cookie 清干净，保证这次是干净的二维码
-      if (this.bili.isLoggedOut()) {
-        if (!this.douyin.context) await this.douyin.launch({ headless: true }).catch(() => {});
-        await this.douyin.clearCookiesMatching(/bilibili\.com$/i).catch(() => null);
-        this.bili.markLoggedOut(false);
-      }
+      // 之前点过「退出登录」：开窗时顺手把 B站 cookie 清掉，保证这次看到的是干净二维码
+      const wasOut = this.bili.isLoggedOut();
       let info;
       try {
-        info = await this.douyin.loginWindow('https://passport.bilibili.com/login');
+        info = await this.douyin.loginWindow('https://passport.bilibili.com/login', {
+          clearCookies: wasOut ? /bilibili\.com$/i : null,
+        });
       } catch (error) {
         return {
           ok: false,
@@ -540,6 +538,7 @@ export class StrollWorld {
           error: `登录窗没打开：${error?.message ?? String(error)}。多半是没装 Edge / Chrome，或者上次的窗口没退干净。`,
         };
       }
+      if (wasOut) this.bili.markLoggedOut(false);
       // 扫码是异步的：后台轮询，登上了就把 cookie 收回来并关窗
       let tries = 0;
       const timer = setInterval(async () => {

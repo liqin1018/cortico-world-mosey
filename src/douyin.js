@@ -202,6 +202,8 @@ export class DouyinBrowser {
         context = await chromium.launchPersistentContext(this.profileDir, { ...options, channel: 'chrome' });
       }
       context.on('close', () => {
+        // 旧窗口的 close 可能比新窗口的赋值还晚到，只处理自己的那一个
+        if (this.context !== context) return;
         this.context = null;
         this.page = null;
         this.headless = null;
@@ -221,7 +223,8 @@ export class DouyinBrowser {
   }
 
   async getPage() {
-    const context = await this.launch();
+    // 沿用当前的窗口模式：开着的登录窗不能被一次隐式 launch 关掉重开
+    const context = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });
     if (this.page && !this.page.isClosed()) return this.page;
     this.page = await context.newPage();
     this.page.setDefaultTimeout(20000);
@@ -819,15 +822,23 @@ export class DouyinBrowser {
    * 专门用来登录的窗口：开一个有头窗口停在登录页，期间不自动关页。
    * 不复用「一起看」，免得扫码扫到一半被 scheduleClose 关掉。
    */
-  async loginWindow(url) {
+  async loginWindow(url, { clearCookies = null } = {}) {
     return this.serialize(async () => {
-      await this.launch({ headless: false, force: true });
-      this.holdOpen = true;
+      // 先挂住，别让排队中的自动关页把刚开的窗口关掉
       if (this.closeTimer) clearTimeout(this.closeTimer);
       this.closeTimer = null;
-      const page = await this.getPage();
-      if (url) await this.goto(page, url, 2200);
-      return { ok: true, url: page.url() };
+      this.holdOpen = true;
+      try {
+        await this.launch({ headless: false, force: true });
+        // 换号场景：新窗口里先把目标站点的 cookie 清干净，再跳登录页
+        if (clearCookies) await this.clearCookiesMatching(clearCookies);
+        const page = await this.getPage();
+        if (url) await this.goto(page, url, 2200);
+        return { ok: true, url: page.url() };
+      } catch (error) {
+        this.holdOpen = false;
+        throw error;
+      }
     });
   }
 

@@ -362,7 +362,8 @@ const fake = {
       },
       viewed,
       todayReads: 3,
-      autoSessions: 0,
+      autoSessions: 1,
+      autoNext: { done: false, used: 1, cap: 3, at: Date.now() + 83 * 60 * 1000 },
       week: [
         { day: '10-26', weekday: '一', actions: 1, reads: 2 },
         { day: '10-27', weekday: '二', actions: 2, reads: 1 },

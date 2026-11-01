@@ -31,6 +31,9 @@ const ACTION_NAMES = {
 
 const PLATFORM_NAMES = { bilibili: 'B站', douyin: '抖音' };
 
+/** 两次自动出门之间至少隔这么久，和主人手动互动无关。 */
+const AUTO_GAP_MS = 2 * 3600 * 1000;
+
 /** 活跃度档位：一键改额度 + 自己出门次数，省得一项项调。 */
 const ACTIVITY_PRESETS = {
   quiet: { label: '安静', dailyLikes: 4, dailyComments: 1, dailyFollows: 0, dailyPosts: 0, dailyDms: 1, dailySaves: 2, autoSessionsPerDay: 0, tokenDailyBudget: 3000 },
@@ -102,8 +105,11 @@ export class StrollWorld {
     const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? 6000) / 1500));
     const cap = Math.min(Number(this.cfg.autoSessionsPerDay), budgetCap);
     if (used >= cap) return;
-    if (Date.now() - Number(this.store.data.lastSessionAt ?? 0) < 2 * 3600 * 1000) return;
+    // 用 lastAutoAt 而不是 lastSessionAt：主人手动让她看东西，不该把自动出门往后推
+    const lastAuto = Number(this.store.data.lastAutoAt ?? this.store.data.lastSessionAt ?? 0);
+    if (Date.now() - lastAuto < AUTO_GAP_MS) return;
     if (Math.random() > 0.6) return;
+    this.store.data.lastAutoAt = Date.now();
     this.store.data.autoSessions[day] = used + 1;
     this.store.save();
     await this.push(
@@ -395,8 +401,7 @@ export class StrollWorld {
       if (!bvid) return JSON.stringify({ ok: false, error: '不是有效的 B站视频链接/ BV 号。' });
       const detail = await this.bili.open(bvid, { comments: 5 });
       this.store.markSeen(`bilibili:open:${detail.id}`);
-      this.store.data.lastSessionAt = Date.now();
-      this.store.save();
+      this.policy.noteRead('bilibili', { open: true });
       this.lastOpen = { platform: 'bilibili', id: detail.id, title: detail.title, url: detail.url, at: Date.now() };
       this.setPresence({
         platform: 'bilibili',
@@ -446,8 +451,7 @@ export class StrollWorld {
       });
       result.window = '后台看的，没有开网页。要一起看就在面板点「一起看」。';
       this.store.markSeen(`douyin:open:${result.id}`);
-      this.store.data.lastSessionAt = Date.now();
-      this.store.save();
+      this.policy.noteRead('douyin', { open: true });
       const blobs = (result.frames ?? []).map((f, i) => ({
         bytes: f.bytes,
         mime: f.mime,
@@ -1245,6 +1249,19 @@ export class StrollWorld {
     }
   }
 
+  /** 下一次自动出门大概什么时候；今天用完或关着就返回 null。 */
+  autoNextView() {
+    const daily = Number(this.cfg.autoSessionsPerDay ?? 0);
+    if (daily <= 0 || !this.cfg.enabled) return null;
+    const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? 9000) / 1500));
+    const cap = Math.min(daily, budgetCap);
+    const day = dayKey(new Date(), this.timeZone);
+    const used = Number(this.store.data.autoSessions[day] ?? 0);
+    if (used >= cap) return { done: true, used, cap };
+    const last = Number(this.store.data.lastAutoAt ?? this.store.data.lastSessionAt ?? 0);
+    return { done: false, used, cap, at: last ? last + AUTO_GAP_MS : Date.now() + 90 * 1000 };
+  }
+
   /** 当前额度最接近哪一档；都不像就是 custom。 */
   activityKey() {
     for (const [key, preset] of Object.entries(ACTIVITY_PRESETS)) {
@@ -1307,6 +1324,7 @@ export class StrollWorld {
       viewed: this.store.viewedList(6),
       week: this.weekBars(),
       autoSessions: Number(this.store.data.autoSessions[dayKey(new Date(), this.timeZone)] ?? 0),
+      autoNext: this.autoNextView(),
       stats: this.store.data.stats,
       config: {
         background: this.cfg.background !== false,

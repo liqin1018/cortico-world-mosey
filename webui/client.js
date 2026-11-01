@@ -694,7 +694,16 @@ export default {
           const autoCap = Number(cfg.autoSessionsPerDay ?? 0);
           autoTrack.classList.toggle('on', autoCap > 0);
           autoSwitch.setAttribute('aria-checked', String(autoCap > 0));
-          autoLabel.textContent = autoCap > 0 ? `每天自己逛 ${autoCap} 次` : '每天自己逛一次';
+          const autoNext = data?.autoNext;
+          let autoText = autoCap > 0 ? `每天自己逛 ${autoCap} 次` : '每天自己逛一次';
+          if (autoCap > 0) {
+            if (autoNext?.done) autoText += ' · 今天够了';
+            else if (autoNext?.at) {
+              const left = Number(autoNext.at) - Date.now();
+              autoText += left > 5 * 60 * 1000 ? ` · 下次约 ${hhmm(Number(autoNext.at))}` : ' · 快出门了';
+            }
+          }
+          autoLabel.textContent = autoText;
           statReads.set(Number(data?.todayReads ?? 0), ' 条');
           statAuto.set(
             autoCap > 0 ? `${Number(data?.autoSessions ?? 0)}/${autoCap}` : String(Number(data?.autoSessions ?? 0)),

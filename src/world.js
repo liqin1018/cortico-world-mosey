@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Store } from './store.js';
 import { Policy, approvalFor, clampText } from './policy.js';
 import { Bilibili } from './bilibili.js';
-import { DouyinBrowser } from './douyin.js';
+import { DouyinBrowser, secUidOf } from './douyin.js';
 import { TOOL_DECLS, EVENT_DECLS } from './tools.js';
 import { CONFIG_GROUPS, validatePolicyPatch } from './config.js';
 import {
@@ -46,10 +46,10 @@ const METER_ACTIONS = {
 
 /** 活跃度档位：一键改额度 + 自己出门次数 + 出门间隔，省得一项项调。 */
 const ACTIVITY_PRESETS = {
-  quiet: { label: '安静', dailyLikes: 4, dailyComments: 1, dailyFollows: 0, dailyPosts: 0, dailyDms: 1, dailySaves: 2, autoSessionsPerDay: 1, autoGapMinutes: 300, tokenDailyBudget: 3000 },
-  normal: { label: '日常', dailyLikes: 10, dailyComments: 4, dailyFollows: 2, dailyPosts: 1, dailyDms: 2, dailySaves: 5, autoSessionsPerDay: 3, autoGapMinutes: 150, tokenDailyBudget: 6000 },
-  lively: { label: '活跃', dailyLikes: 16, dailyComments: 6, dailyFollows: 3, dailyPosts: 2, dailyDms: 3, dailySaves: 8, autoSessionsPerDay: 5, autoGapMinutes: 90, tokenDailyBudget: 9000 },
-  chatty: { label: '话痨', dailyLikes: 24, dailyComments: 10, dailyFollows: 5, dailyPosts: 3, dailyDms: 4, dailySaves: 10, autoSessionsPerDay: 8, autoGapMinutes: 60, tokenDailyBudget: 15000 },
+  quiet: { label: '安静', dailyLikes: 4, dailyComments: 1, dailyFollows: 0, dailyPosts: 0, dailySaves: 2, autoSessionsPerDay: 1, autoGapMinutes: 300, tokenDailyBudget: 3000 },
+  normal: { label: '日常', dailyLikes: 10, dailyComments: 4, dailyFollows: 2, dailyPosts: 1, dailySaves: 5, autoSessionsPerDay: 3, autoGapMinutes: 150, tokenDailyBudget: 6000 },
+  lively: { label: '活跃', dailyLikes: 16, dailyComments: 6, dailyFollows: 3, dailyPosts: 2, dailySaves: 8, autoSessionsPerDay: 5, autoGapMinutes: 90, tokenDailyBudget: 9000 },
+  chatty: { label: '话痨', dailyLikes: 24, dailyComments: 10, dailyFollows: 5, dailyPosts: 3, dailySaves: 10, autoSessionsPerDay: 8, autoGapMinutes: 60, tokenDailyBudget: 15000 },
 };
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
@@ -67,12 +67,18 @@ export class StrollWorld {
     this.policy = new Policy({ store: this.store, cfg, timeZone: this.timeZone });
     this.bili = new Bilibili({ dataDir, cfg, log, policy: this.policy, store: this.store });
     this.douyin = new DouyinBrowser({ dataDir, cfg, log, policy: this.policy });
+    // 扫码成功后顺手记下「现在登的是哪个抖音号」，面板要显示，也要防「给自己发私信」
+    this.douyin.onSelf = (self) => this.noteDouyinSelf(self);
     this.timer = null;
     this.lastStatus = null;
     this.lastStatusAt = 0;
     this.lastImportAt = 0;
     this.lastOpen = null;
     this.inboxCache = [];
+    this._dyInbox = null;
+    this._dyInboxAt = 0;
+    this._cfgLive = null;
+    this._cfgAt = 0;
     this.presence = null;
     this.lastPresenceNotify = 0;
     this.watch = null;
@@ -152,10 +158,165 @@ export class StrollWorld {
 
   /* ---------------- prompt ---------------- */
 
+  /**
+   * 设置里改的值不一定热更新到运行中的实例——她可能还在读启动时那份 cfg。
+   * 这里兜底读一次磁盘上的 config.json（两秒缓存），改完设置不用重启。
+   */
+  liveConfig() {
+    const now = Date.now();
+    if (this._cfgAt && now - this._cfgAt < 2000) return this._cfgLive;
+    this._cfgAt = now;
+    this._cfgLive = null;
+    try {
+      const file = path.join(this.dataDir, '..', 'config.json');
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const world = parsed?.worlds?.stroll;
+      if (world && typeof world === 'object') this._cfgLive = world;
+    } catch {
+      // 读不到就退回内存里的 cfg
+    }
+    return this._cfgLive;
+  }
+
+  /** 主人的账号：优先读磁盘上最新的那份，读不到再用内存里的。 */
+  ownerId(platform) {
+    const key = platform === 'douyin' ? 'ownerDouyin' : 'ownerUid';
+    const live = this.liveConfig()?.[key];
+    if (live) return String(live).trim();
+    const inline = this.cfg?.[key];
+    return String(inline ?? '').trim();
+  }
+
+  /**
+   * 抖音主人这一栏可以填三种东西：sec_uid、主页链接（分享文案也行）、抖音号。
+   * bound 只有前两种能当场成立；抖音号要解析一次（面板按钮或第一次发私信时）。
+   */
+  douyinOwner() {
+    const raw = this.ownerId('douyin');
+    const secUid = secUidOf(raw);
+    const saved = this.store?.data?.douyinOwner;
+    const self = this.store?.data?.douyinSelf;
+    const selfSecUid = String(self?.secUid ?? '');
+    const selfDouyinId = String(self?.douyinId ?? '');
+    // 填的是抖音号、又正好是桌宠登录的那个号：不用解析也能判断「自己不能发给自己」
+    const sameHandle = !secUid && !!selfDouyinId && raw.replace(/^@/, '').replace(/^抖音号[:：]\s*/, '').trim() === selfDouyinId;
+    return {
+      raw,
+      secUid,
+      name: secUid && saved?.secUid === secUid ? String(saved.name ?? '') : '',
+      bound: !!secUid,
+      selfSecUid,
+      selfName: cleanNick(self?.name) ?? '',
+      selfDouyinId,
+      sameAsSelf: (!!secUid && !!selfSecUid && secUid === selfSecUid) || sameHandle,
+    };
+  }
+
+  noteDouyinSelf(self) {
+    if (!self?.secUid) return;
+    const prev = this.store.data.douyinSelf ?? {};
+    // 页面没渲染完时 h1 会是「未登录」「抖音」这类占位，别把它当昵称存下来
+    const name = cleanNick(self.name) || cleanNick(prev.name) || '';
+    this.store.data.douyinSelf = {
+      secUid: self.secUid,
+      name,
+      douyinId: self.douyinId || prev.douyinId || '',
+      verified: self.verified === true ? true : prev.verified === true,
+      at: Date.now(),
+    };
+    this.store.save();
+  }
+
+  /** 主人绑定情况：两边说法对齐，别让她自己猜。 */
+  ownerLine() {
+    const bili = this.ownerId('bilibili');
+    const dy = this.douyinOwner();
+    const bits = [
+      bili
+        ? `B站主人已绑（UID ${bili}${this.cfg.ownerName ? `，${this.cfg.ownerName}` : ''}）`
+        : 'B站主人没绑（B站 @ 和私信要用）',
+    ];
+    if (dy.bound) {
+      bits.push(
+        `抖音主人已绑（sec_uid …${dy.secUid.slice(-8)}${dy.name ? `，${dy.name}` : ''}）${dy.sameAsSelf ? '；注意：这个号就是她现在登录的抖音号，抖音不能给自己发私信' : ''}`,
+      );
+    } else if (dy.raw) {
+      bits.push(`抖音主人没绑（填的是「${truncate(dy.raw, 20)}」，还不是 sec_uid；面板点「读我的抖音号」换掉）`);
+    } else {
+      bits.push('抖音主人没绑（抖音私信要用）');
+    }
+    return bits.join('；');
+  }
+
+  /**
+   * 确保「主人抖音」是能用的 sec_uid。填的是抖音号/主页链接时，现场解析一次并存回去。
+   * 发私信前调用，所以填抖音号也能用，只是第一次慢一点。
+   */
+  async ensureDouyinOwner() {
+    const raw = this.ownerId('douyin');
+    if (!raw) {
+      return {
+        ok: false,
+        error:
+          '抖音主人没绑：面板「账号」里点「读我的抖音号」，或者把主页链接/抖音号填到「主人抖音」。抖音不能给自己发私信。',
+      };
+    }
+    const direct = secUidOf(raw);
+    if (direct) {
+      if (direct !== raw) this.persist({ ownerDouyin: direct });
+      const saved = this.store.data.douyinOwner;
+      return { ok: true, secUid: direct, name: saved?.secUid === direct ? String(saved.name ?? '') : '' };
+    }
+    if (this.douyinOwner().sameAsSelf) {
+      return {
+        ok: false,
+        error: `「${truncate(raw, 18)}」就是她现在登录的抖音号，抖音不能给自己发私信。给她换一个号登录，或者把你自己另一个号的主页链接填进来。`,
+      };
+    }
+    try {
+      const got = await this.douyin.resolveOwner(raw);
+      this.persist({ ownerDouyin: got.secUid });
+      this.store.data.douyinOwner = { secUid: got.secUid, name: got.name ?? '', at: Date.now() };
+      this.store.save();
+      return { ok: true, secUid: got.secUid, name: got.name ?? '', resolved: true };
+    } catch (error) {
+      return {
+        ok: false,
+        error: `「${truncate(raw, 18)}」不是 sec_uid，自动解析也没成功：${error?.message ?? String(error)}。面板点「读我的抖音号」最稳。`,
+      };
+    }
+  }
+
+  /**
+   * 她现在登录的是哪个抖音号。只读，不改绑定——用来回答「私信为什么发不出去」：
+   * 如果这个号就是主人自己，抖音不允许给自己发私信，换号才有解。
+   */
+  async douyinSelf() {
+    const saved = this.store?.data?.douyinSelf;
+    try {
+      const self = await this.douyin.selfProfile();
+      this.noteDouyinSelf(self);
+      const owner = this.douyinOwner();
+      return {
+        ok: true,
+        ...self,
+        sameAsOwner: owner.sameAsSelf,
+        message: owner.sameAsSelf
+          ? `现在登录的就是「${self.name || '这个号'}」，跟主人绑定的是同一个号——抖音不能给自己发私信。`
+          : `现在登录的是「${self.name || '这个号'}」，和主人不是一个号，私信可以发。`,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        code: error?.code ?? 'ERROR',
+        error: error?.message ?? String(error),
+        lastKnown: saved ?? null,
+      };
+    }
+  }
+
   envPromptVars() {
-    const owner = this.cfg.ownerUid
-      ? `主人 B站 UID ${this.cfg.ownerUid}${this.cfg.ownerName ? `（${this.cfg.ownerName}）` : ''}`
-      : '还没设主人 UID（@ 和私信要它）';
+    const owner = this.ownerLine();
     const identity = this.lastStatus
       ? `B站 ${this.lastStatus.bili?.loggedIn ? this.lastStatus.bili.name || '已登录' : '未登录'}；抖音 ${this.lastStatus.douyin?.loggedIn ? '已登录' : '未登录/未开'}`
       : '还没查登录态';
@@ -333,7 +494,22 @@ export class StrollWorld {
       bili,
       douyin,
       policy: this.policy.snapshot(),
-      owner: { uid: this.cfg.ownerUid || '', name: this.cfg.ownerName || '' },
+      owner: (() => {
+        const uid = this.ownerId('bilibili');
+        const dy = this.douyinOwner();
+        return {
+          uid,
+          name: this.cfg.ownerName || '',
+          douyin: dy.secUid || dy.raw,
+          douyinOk: dy.bound,
+          douyinPending: !!dy.raw && !dy.bound,
+          douyinName: dy.name,
+          douyinSelf: dy.selfSecUid,
+          douyinSelfName: dy.selfName,
+          douyinSelfId: dy.selfDouyinId,
+          douyinSame: dy.sameAsSelf,
+        };
+      })(),
       pending: this.store.pendingDrafts().map((d) => ({ id: d.id, action: d.action, platform: d.platform, preview: this.previewText(d) })),
       last: this.store.lastActions(3),
       interests: this.store.topInterests(6),
@@ -373,6 +549,10 @@ export class StrollWorld {
     }
     try {
       if (this.cfg.bilibili) inbox = await this.bili.inbox(3);
+      // 抖音私信要用浏览器抓，brief 里只用已经热着的缓存，别让主人等十秒
+      if (this.cfg.douyin && this._dyInbox?.length && Date.now() - this._dyInboxAt < 10 * 60 * 1000) {
+        inbox = inbox.concat(this._dyInbox).sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0)).slice(0, 5);
+      }
       if (inbox.length) this.inboxCache = inbox;
     } catch (error) {
       errors.push({ platform: 'bilibili', error: error.message });
@@ -510,6 +690,22 @@ export class StrollWorld {
     return JSON.stringify({ ok: false, error: '只认 B站/抖音链接。' });
   }
 
+  /** 抖音私信要开浏览器，慢；面板每两分钟刷一次，缓存八分钟，别每次都开一遍。 */
+  async douyinInbox() {
+    if (!this.cfg.douyin) return [];
+    const ttl = 8 * 60 * 1000;
+    if (this._dyInbox && Date.now() - this._dyInboxAt < ttl) return this._dyInbox;
+    try {
+      const items = await this.douyin.inbox(5);
+      this._dyInbox = items;
+    } catch (error) {
+      this.log?.warn?.('stroll douyin inbox failed', { message: error?.message });
+      this._dyInbox = this._dyInbox ?? [];
+    }
+    this._dyInboxAt = Date.now();
+    return this._dyInbox;
+  }
+
   async inbox(platform, n) {
     const p = platform === 'douyin' || platform === 'bilibili' ? platform : 'bilibili';
     if (p === 'bilibili') {
@@ -519,7 +715,7 @@ export class StrollWorld {
       return { ok: true, platform: p, items };
     }
     if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
-    return { ok: true, platform: p, items: await this.douyin.inbox(clamp(n ?? 5, 1, 8)) };
+    return { ok: true, platform: p, items: (await this.douyinInbox()).slice(0, clamp(n ?? 5, 1, 8)) };
   }
 
   async login(platform) {
@@ -587,6 +783,9 @@ export class StrollWorld {
   async logoutDouyin() {
     const res = await this.douyin.logout();
     this.lastStatus = null;
+    // 「现在登录的是哪个号」跟着登录态一起清掉，不然面板会拿旧号报「自己给自己发私信」
+    delete this.store.data.douyinSelf;
+    this.store.save();
     return { ok: true, ...res, message: '抖音已退出登录，窗口已关。' };
   }
 
@@ -1062,6 +1261,23 @@ export class StrollWorld {
     const item = (this.inboxCache ?? []).find((x) => String(x.id) === String(id));
     if (!item) return { ok: false, error: '这条消息已经刷新掉了，点「刷新消息」再来。' };
     if (!text) return { ok: false, error: '回复要有正文。' };
+
+    // 私信：直接往这个会话里接着说话，不用管评论那套 root/parent
+    if (item.kind === 'dm') {
+      const receipt = await this.replyDmItem(item, text).catch((error) => ({
+        ok: false,
+        error: error?.message ?? String(error),
+      }));
+      if (receipt?.ok) {
+        this.store.markSeen(`msg:${id}`);
+        this.store.save();
+        this.inboxCache = this.inboxCache.map((x) =>
+          String(x.id) === String(id) ? { ...x, replied: true, fresh: false, unread: 0, text: truncate(text, 140) } : x,
+        );
+      }
+      return receipt;
+    }
+
     if (!item.rpid || item.rpid === '0') {
       return { ok: false, error: '这条消息没带评论 ID，去网页里回。' };
     }
@@ -1128,6 +1344,72 @@ export class StrollWorld {
       this.inboxCache = this.inboxCache.map((x) => (String(x.id) === String(id) ? { ...x, replied: true, fresh: false } : x));
     }
     return receipt;
+  }
+
+  /** 私信回到哪个平台，由消息自己决定。 */
+  async replyDmItem(item, text) {
+    if (item?.platform === 'douyin') return this.replyDouyinDm(item, text);
+    return this.replyDm(item?.mid, text);
+  }
+
+  /** 抖音私信：走页面操作，慢一点，也不占她的额度。 */
+  async replyDouyinDm(item, text) {
+    const body = String(text ?? '').trim();
+    const who = String(item?.user ?? '').trim();
+    if (!body) return { ok: false, error: '回复要有正文。' };
+    if (!who) return { ok: false, error: '这条抖音私信没有昵称，回不了。' };
+    if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
+    try {
+      await this.douyin.replyDm(who, body.slice(0, 300));
+      this.store.addAction({
+        platform: 'douyin',
+        action: 'dm',
+        target: who,
+        title: who,
+        text: body.slice(0, 300),
+        result: 'ok',
+        extra: { by: 'owner' },
+      });
+      this.store.save();
+      this._dyInboxAt = 0;
+      return { ok: true, receipt: '抖音私信发出去了' };
+    } catch (error) {
+      return { ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) };
+    }
+  }
+
+  /**
+   * 面板里回私信：这是主人自己在说话，不占她的社交额度，只记一笔。
+   * 只允许回已经有会话的人；不给陌生人发私信。
+   */
+  async replyDm(talkerId, text) {
+    const uid = String(talkerId ?? '').trim();
+    const body = String(text ?? '').trim();
+    if (!uid || !/^\d+$/.test(uid)) return { ok: false, error: '这条私信没有可回复的 UID。' };
+    if (!body) return { ok: false, error: '回复要有正文。' };
+    if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
+    const known = (this.inboxCache ?? []).some((x) => x.kind === 'dm' && String(x.mid) === uid);
+    if (!known) return { ok: false, error: '只回已经有会话的人；先刷新一次消息。' };
+    try {
+      const sent = await this.bili.dm(uid, body.slice(0, 500));
+      // 回了就说明看过了，顺手把 B站那边的红点清掉
+      const known2 = (this.inboxCache ?? []).find((x) => x.kind === 'dm' && String(x.mid) === uid);
+      if (known2?.ackSeqno) await this.bili.dmAck(uid, known2.ackSeqno).catch(() => false);
+      this.store.data.lastWriteAt = Date.now();
+      this.store.addAction({
+        platform: 'bilibili',
+        action: 'dm',
+        target: uid,
+        title: this.titleOf('bilibili', uid) || '私信',
+        text: body.slice(0, 300),
+        result: 'ok',
+        extra: { by: 'owner', msgKey: sent.msgKey },
+      });
+      this.store.save();
+      return { ok: true, receipt: `私信发出去了（${new Date().toLocaleTimeString('zh-CN', { hour12: false })}）`, msgKey: sent.msgKey };
+    } catch (error) {
+      return { ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) };
+    }
   }
 
   /**
@@ -1354,19 +1636,27 @@ export class StrollWorld {
       if (!text) return { ok: false, error: '私信要有正文。' };
       let target;
       if (platform === 'bilibili') {
-        const owner = String(this.cfg.ownerUid || '').trim();
-        if (!owner) return { ok: false, error: '没设主人 B站 UID；先 stroll_policy set {"ownerUid":"..."}。' };
+        const owner = this.ownerId('bilibili');
+        if (!owner) return { ok: false, error: '没设主人 B站 UID；先到面板设置里填「主人 B站 UID」。' };
         target = String(targetRaw || owner).trim();
         if (target !== owner) return { ok: false, error: '私信只发主人，不发别人。' };
       } else {
-        const owner = String(this.cfg.ownerDouyin || '').trim();
-        if (!owner) return { ok: false, error: '没设主人抖音 sec_uid；先 stroll_policy set {"ownerDouyin":"MS4w..."}。' };
-        target = String(targetRaw || owner).trim();
-        if (target !== owner) return { ok: false, error: '私信只发主人，不发别人。' };
+        const owner = await this.ensureDouyinOwner();
+        if (!owner.ok) return owner;
+        if (this.douyinOwner().sameAsSelf) {
+          return {
+            ok: false,
+            error:
+              '抖音主人绑的就是她现在登录的那个号，抖音不能给自己发私信。要么给桌宠换一个号登录，要么这条私信走面板说。',
+          };
+        }
+        target = String(targetRaw || owner.secUid).trim();
+        if (target !== owner.secUid) return { ok: false, error: '私信只发主人，不发别人。' };
       }
-      const check = this.policy.check('dm', platform, target, { quotaAction: 'dm' });
+      // 只发给主人的私信不限量：不进每日额度，也不受「同一个对象一天一次」限制
+      const check = this.policy.check('dm', platform, target, { quotaAction: 'dm', free: true });
       if (!check.ok) return check;
-      return { ok: true, action, platform, target, text };
+      return { ok: true, action, platform, target, text, free: true };
     }
 
     return { ok: false, error: `不认识的动作：${action}` };
@@ -1398,7 +1688,7 @@ export class StrollWorld {
       draft.action === 'post'
         ? '动态'
         : draft.action === 'dm'
-          ? `给 ${draft.target}`
+          ? `给主人（${draft.platform === 'douyin' ? '抖音' : 'B站'}）`
           : known
             ? `《${truncate(known, 24)}》`
             : draft.kind === 'opus'
@@ -1418,6 +1708,7 @@ export class StrollWorld {
       userInitiated: true,
       quotaAction: this.capAction(draft.action),
       dedupeKey: draft.dedupeKey,
+      free: draft.action === 'dm',
     });
     if (!check.ok) {
       this.store.closeDraft(id, 'rejected', { reason: check.message });
@@ -1428,6 +1719,7 @@ export class StrollWorld {
     draft.startedAt = new Date().toISOString();
     this.store.save();
     const plan = {
+      free: draft.action === 'dm',
       action: draft.action,
       platform: draft.platform,
       target: draft.target,
@@ -1494,7 +1786,8 @@ export class StrollWorld {
 
       this.policy.consume(action, platform, target, {
         quotaAction: this.capAction(action),
-        dedupeKey: plan.dedupeKey,
+        countQuota: !plan.free,
+        dedupeKey: plan.free ? '' : plan.dedupeKey,
         text,
         title: this.titleOf(platform, target),
         kind: plan.kind ?? result?.kind,
@@ -1560,7 +1853,22 @@ export class StrollWorld {
       ok: true,
       enabled: this.cfg.enabled,
       approval: this.cfg.approval,
-      owner: { uid: this.cfg.ownerUid, name: this.cfg.ownerName },
+      owner: (() => {
+        const uid = this.ownerId('bilibili');
+        const dy = this.douyinOwner();
+        return {
+          uid,
+          name: this.cfg.ownerName || '',
+          douyin: dy.secUid || dy.raw,
+          douyinOk: dy.bound,
+          douyinPending: !!dy.raw && !dy.bound,
+          douyinName: dy.name,
+          douyinSelf: dy.selfSecUid,
+          douyinSelfName: dy.selfName,
+          douyinSelfId: dy.selfDouyinId,
+          douyinSame: dy.sameAsSelf,
+        };
+      })(),
       platforms: { bilibili: this.cfg.bilibili, douyin: this.cfg.douyin },
       caps: this.policy.snapshot(),
       quiet: { from: this.cfg.quietFrom, to: this.cfg.quietTo },
@@ -1704,8 +2012,16 @@ export class StrollWorld {
         return { ok: true, items: [] };
       }
       if (method === 'inbox') {
-        if (!this.cfg.bilibili) return { ok: true, items: [], counts: { all: 0, reply: 0, at: 0 }, unread: 0 };
-        const items = await this.bili.inbox(clamp(Number(args[0] ?? 15), 1, 20));
+        const only = args[1] === 'douyin' ? 'douyin' : args[1] === 'bilibili' ? 'bilibili' : '';
+        const limit = clamp(Number(args[0] ?? 15), 1, 20);
+        let items = [];
+        if (only !== 'douyin' && this.cfg.bilibili) items = await this.bili.inbox(limit);
+        if (only !== 'bilibili' && this.cfg.douyin) {
+          const dy = await this.douyinInbox();
+          items = items.concat(dy);
+        }
+        items = items.sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0)).slice(0, limit);
+        // 抖音那边的 at 是「刚读到」的时间，不覆盖更早的评论
         this.inboxCache = items;
         return {
           ok: true,
@@ -1714,6 +2030,7 @@ export class StrollWorld {
             all: items.length,
             reply: items.filter((x) => x.kind === 'reply').length,
             at: items.filter((x) => x.kind === 'at').length,
+            dm: items.filter((x) => x.kind === 'dm').length,
           },
           unread: items.filter((x) => !this.store.seenAt(`msg:${x.id}`)).length,
         };
@@ -1807,8 +2124,87 @@ export class StrollWorld {
       }
       if (method === 'quick_follow') return await this.quickAct('follow', '', String(args[0] ?? ''));
       if (method === 'login') return await this.login(String(args[0] ?? 'douyin'));
+      if (method === 'dm_me') {
+        // 主人自己点的「B站私信我」：不发公开内容、不占额度，就是验证链路通不通
+        const text = String(args[0] ?? '').trim() || '在的，看到这条就说明私信通了。';
+        const platform = String(args[1] ?? 'bilibili') === 'douyin' ? 'douyin' : 'bilibili';
+        if (platform === 'douyin') {
+          if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
+          const owner = await this.ensureDouyinOwner();
+          if (!owner.ok) return owner;
+          if (this.douyinOwner().sameAsSelf) {
+            return {
+              ok: false,
+              error: `你绑的抖音号（${owner.name || `…${owner.secUid.slice(-8)}`}）就是她现在登录的那个号，抖音不能给自己发私信。给她换一个号登录，或者只把她当「面板里能发」用。`,
+            };
+          }
+          try {
+            await this.douyin.dm(owner.secUid, text.slice(0, 300));
+            this.store.addAction({
+              platform: 'douyin',
+              action: 'dm',
+              target: owner.secUid,
+              title: `私信主人${owner.name ? `（${owner.name}）` : ''}`,
+              text: text.slice(0, 300),
+              result: 'ok',
+              extra: { by: 'owner', test: true },
+            });
+            this.store.save();
+            return { ok: true, message: '抖音私信发出去了。去抖音「消息 → 私信」看看收到没有。' };
+          } catch (error) {
+            return { ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) };
+          }
+        }
+        const uid = this.ownerId('bilibili');
+        if (!uid) return { ok: false, error: '先在设置里填主人 B站 UID。' };
+        if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
+        try {
+          const sent = await this.bili.dm(uid, text.slice(0, 200));
+          this.store.addAction({
+            platform: 'bilibili',
+            action: 'dm',
+            target: uid,
+            title: '私信主人',
+            text: text.slice(0, 300),
+            result: 'ok',
+            extra: { by: 'owner', test: true },
+          });
+          this.store.save();
+          return {
+            ok: true,
+            message: `私信发出去了（msg_key ${sent.msgKey || '—'}）。去 B站「消息 → 私信」看看收到没有。`,
+            msgKey: sent.msgKey,
+          };
+        } catch (error) {
+          return { ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) };
+        }
+      }
       if (method === 'logout_bili') return await this.logoutBili();
       if (method === 'logout_douyin') return await this.logoutDouyin();
+      if (method === 'bind_douyin_owner') {
+        // 传内容 = sec_uid / 主页链接 / 抖音号，解析后存回配置
+        const input = String(args[0] ?? '').trim();
+        if (!input) return { ok: false, error: '要绑哪个号？给 sec_uid、主页链接或抖音号。' };
+        try {
+          const got = await this.douyin.resolveOwner(input);
+          this.persist({ ownerDouyin: got.secUid });
+          this.store.data.douyinOwner = { secUid: got.secUid, name: got.name ?? '', at: Date.now(), source: got.source };
+          this.store.save();
+          return {
+            ok: true,
+            secUid: got.secUid,
+            name: got.name ?? '',
+            sameAsSelf: this.douyinOwner().sameAsSelf,
+            unverified: got.unverified === true,
+            message: `已绑定${got.name ? `「${got.name}」` : ''}（sec_uid …${got.secUid.slice(-8)}）。${
+              got.unverified ? '注意：没在主页上核到抖音号，是按同名搜出来的，发私信前最好对一眼是不是本人。' : ''
+            }`,
+          };
+        } catch (error) {
+          return { ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) };
+        }
+      }
+      if (method === 'douyin_self') return await this.douyinSelf();
       if (method === 'refreshBili') {
         return await this.bili.importFromContext(this.douyin.context);
       }
@@ -1965,7 +2361,6 @@ export class StrollWorld {
         dailyComments: Number(this.cfg.dailyComments ?? 0),
         dailyFollows: Number(this.cfg.dailyFollows ?? 0),
         dailyPosts: Number(this.cfg.dailyPosts ?? 0),
-        dailyDms: Number(this.cfg.dailyDms ?? 0),
         dailySaves: Number(this.cfg.dailySaves ?? 0),
         watchSpeakSec: Number(this.cfg.watchSpeakSec ?? 60),
         tokenDailyBudget: Number(this.cfg.tokenDailyBudget ?? 6000),
@@ -1994,6 +2389,14 @@ function clockToSeconds(text) {
     .map((x) => Number(x));
   if (!parts.length || parts.some((n) => !Number.isFinite(n))) return 0;
   return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+/** 昵称的占位值不能当人名：页面没渲染完时 h1 会读到「未登录」「抖音」。 */
+function cleanNick(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return '';
+  if (/^(未登录|登录|抖音|Douyin|验证|加载中)/i.test(s)) return '';
+  return [...s].length > 24 ? [...s].slice(0, 24).join('') : s;
 }
 
 function clamp(n, min, max) {

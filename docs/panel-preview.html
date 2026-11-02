@@ -82,6 +82,40 @@ const viewed = [
 
 const inbox = [
   {
+    kind: 'dm',
+    platform: 'bilibili',
+    type: 'dm',
+    id: 'dm:32842111',
+    user: '小月月还在玩',
+    mid: '32842111',
+    text: '没事我陪着你',
+    quote: '',
+    where: '1 条未读',
+    unread: 1,
+    at: Math.floor(now / 1000) - 180,
+    url: 'https://message.bilibili.com/#/whisper/mid32842111',
+    rpid: '0',
+    rootRpid: '0',
+    fresh: true,
+  },
+  {
+    kind: 'dm',
+    platform: 'douyin',
+    type: 'dm',
+    id: 'dm:douyin:0:小月月一直在玩',
+    user: '小月月一直在玩',
+    text: '你好',
+    quote: '',
+    where: '私信',
+    unread: 0,
+    at: Math.floor(now / 1000) - 660,
+    timeLabel: '11分钟前',
+    url: 'https://www.douyin.com/chat',
+    rpid: '0',
+    rootRpid: '0',
+    fresh: true,
+  },
+  {
     kind: 'reply',
     platform: 'bilibili',
     type: 'video',
@@ -218,7 +252,7 @@ const fake = {
       return {
         ok: true,
         items: inbox,
-        counts: { all: inbox.length, reply: inbox.filter((x) => x.kind === 'reply').length, at: inbox.filter((x) => x.kind === 'at').length },
+        counts: { all: inbox.length, reply: inbox.filter((x) => x.kind === 'reply').length, at: inbox.filter((x) => x.kind === 'at').length, dm: inbox.filter((x) => x.kind === 'dm').length },
         unread: inbox.filter((x) => x.fresh).length,
       };
     }
@@ -351,14 +385,22 @@ const fake = {
         policy: {
           day: '2026-11-01',
           usage: { like: 7, comment: 3, follow: 1, post: 0, dm: 1, save: 2 },
-          caps: { like: 16, comment: 6, follow: 3, post: 2, dm: 3, save: 8 },
+          caps: { like: 16, comment: 6, follow: 3, post: 2, save: 8 },
           quiet: false,
           paused: { paused: false },
           ramp: 1,
           approval: 'confirm',
-          summary: '今日 赞2/16 评1/6 关0/3 发0/2 私0/3 存1/8',
+          summary: '今日 赞2/16 评1/6 关0/3 发0/2 存1/8',
         },
-        owner: { uid: '32842111', name: '' },
+        owner: {
+          uid: '32842111',
+          name: '',
+          douyin: 'MS4wLjABAAAAHfVjI5Ddr5QZZvLj6KDs_EDU2L_ZHWZmSbpr20NdHME',
+          douyinOk: true,
+          douyinName: '月',
+          douyinSelfName: '黑助',
+          douyinSame: false,
+        },
       },
       drafts: [
         {

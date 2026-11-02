@@ -83,7 +83,6 @@ const METERS = [
   { key: 'comment', label: '评论' },
   { key: 'follow', label: '关注' },
   { key: 'post', label: '发动态' },
-  { key: 'dm', label: '私信' },
   { key: 'save', label: '稍后再看' },
 ];
 
@@ -470,7 +469,8 @@ export default {
         const biliBody = el('div', undefined, 'stroll-account-body');
         const biliName = el('strong', 'B站');
         const biliSub = el('span', '未登录');
-        biliBody.append(biliName, biliSub);
+        const biliOwner = el('span', 'B站主人没绑', 'stroll-owner-line');
+        biliBody.append(biliName, biliSub, biliOwner);
         const biliBtn = button('登录 B站', () => login('bilibili'), 'ghost xs');
         const biliOut = button('退出登录', () => logoutAccount('bilibili'), 'ghost xs');
         const biliActions = el('div', undefined, 'stroll-account-actions');
@@ -482,11 +482,16 @@ export default {
         const dyBody = el('div', undefined, 'stroll-account-body');
         const dyName = el('strong', '抖音');
         const dySub = el('span', '未登录');
-        dyBody.append(dyName, dySub);
+        const dyOwner = el('span', '抖音主人没绑', 'stroll-owner-line');
+        dyBody.append(dyName, dySub, dyOwner);
         const dyBtn = button('登录 / 验证', () => login('douyin'), 'ghost xs');
+        const dyBind = button('查登录号', () => checkDouyinSelf(), 'ghost xs');
+        dyBind.title = '查一下桌宠现在登录的是哪个抖音号（昵称 + 抖音号），和主人绑的是不是同一个。抖音不能给自己发私信，所以这两个必须是不同的号。';
+        const dyResolve = button('绑定这个号', () => bindPendingDouyin(), 'ghost xs');
+        dyResolve.style.display = 'none';
         const dyOut = button('退出登录', () => logoutAccount('douyin'), 'ghost xs');
         const dyActions = el('div', undefined, 'stroll-account-actions');
-        dyActions.append(dyOut, dyBtn);
+        dyActions.append(dyOut, dyResolve, dyBind, dyBtn);
         dyTile.append(dyAvatar, dyBody, dyActions);
 
         accounts.append(biliTile, dyTile);
@@ -505,11 +510,14 @@ export default {
         const inboxReadAll = button('全部已读', () => markAllSeen(), 'ghost xs');
         const inboxRefresh = button('刷新', () => loadInbox(true), 'ghost xs');
         inboxRefresh.prepend(icon('refresh', 11));
-        inboxTools.append(inboxReadAll, inboxRefresh);
+        const inboxDmMe = button('B站私信我', () => dmMe('bilibili'), 'ghost xs');
+        const inboxDmDy = button('抖音私信我', () => dmMe('douyin'), 'ghost xs');
+        inboxDmDy.style.display = 'none';
+        inboxTools.append(inboxDmMe, inboxDmDy, inboxReadAll, inboxRefresh);
         const inboxMeta = el('div', undefined, 'stroll-inbox-meta');
         inboxMeta.append(inboxHint, inboxTools);
         inboxHead.append(inboxTitle, inboxMeta);
-        const inboxLead = el('p', '点头像旁边那条，就在你自己的浏览器里打开，并跳到那条评论。', 'stroll-muted');
+        const inboxLead = el('p', '评论能在面板直接回；私信两边都能看，也能在这儿回。点「去看看」会用你的浏览器打开。', 'stroll-muted');
         const inboxTabs = el('div', undefined, 'stroll-tabs stroll-inbox-tabs');
         const inboxList = el('div', undefined, 'stroll-inbox');
         const inboxMore = el('div', undefined, 'stroll-inbox-more');
@@ -712,9 +720,10 @@ export default {
               ),
               chip(paused ? '风控 手刹中' : p.quiet ? '安静时段' : '风控 正常', paused ? 'bad' : p.quiet ? 'warn' : 'ok'),
               chip(`审批 ${APPROVALS.find((a) => a.value === p.approval)?.label ?? '—'}`, 'off'),
+              chip(s.owner?.uid ? 'B站主人 已绑' : 'B站主人 没绑', s.owner?.uid ? 'off' : 'warn'),
               chip(
-                s.owner?.uid ? `主人 ${cut(s.owner.name || s.owner.uid, 10)}` : '主人 未设置',
-                s.owner?.uid ? 'off' : 'warn',
+                s.owner?.douyinOk ? '抖音主人 已绑' : s.owner?.douyinPending ? '抖音主人 待解析' : '抖音主人 没绑',
+                s.owner?.douyinOk ? 'off' : 'warn',
               ),
               data?.watch?.watching ? chip('一起看 进行中', 'live') : null,
               Number(data?.inboxUnread ?? 0) > 0 ? chip(`谁找你 ${data.inboxUnread} 条新`, 'live') : null,
@@ -898,6 +907,38 @@ export default {
             : '未登录：扫码 / 过验证';
           dyBtn.textContent = dy.loggedIn ? '重新登录' : '登录 / 验证';
           dyOut.style.display = dy.loggedIn ? '' : 'none';
+          // 填了抖音号/链接还没解析时，优先给「绑定这个号」；已绑才给「查登录号」
+          const pending = s.owner?.douyinPending === true;
+          dyResolve.style.display = pending ? '' : 'none';
+          dyBind.style.display = !pending && dy.loggedIn ? '' : 'none';
+
+          // 主人绑定：两边说法一致，一眼看出哪边没绑
+          const owner = s.owner ?? {};
+          if (owner.douyinSelfName && dy.loggedIn) dySub.textContent = `${dySub.textContent} · ${owner.douyinSelfName}`;
+          dySub.title = owner.douyinSelfId
+            ? `桌宠现在登录的抖音号：${owner.douyinSelfId}${owner.douyinSelfName ? `（${owner.douyinSelfName}）` : ''}`
+            : '点「查登录号」可以读出她现在登录的是哪个抖音号';
+          biliOwner.textContent = owner.uid ? `B站主人已绑 · UID ${owner.uid}` : 'B站主人没绑';
+          biliOwner.classList.toggle('is-warn', !owner.uid);
+          const dyBound = owner.douyinOk === true;
+          const dyTail = owner.douyinName
+            ? ` · ${owner.douyinName}`
+            : owner.douyin
+              ? ` · …${String(owner.douyin).slice(-6)}`
+              : '';
+          dyOwner.textContent = dyBound
+            ? `抖音主人已绑${dyTail}${owner.douyinSame ? '（就是现在登录的号）' : ''}`
+            : owner.douyinPending
+              ? `抖音主人待解析 · ${cut(owner.douyin, 16)}${owner.douyinSame ? '（就是现在登录的号）' : ''}`
+              : '抖音主人没绑';
+          dyOwner.title = dyBound
+            ? owner.douyinSame
+              ? '这个号就是桌宠现在登录的抖音号，抖音不能给自己发私信'
+              : '抖音私信可用'
+            : owner.douyinPending
+              ? '抖音号在后台常常搜不出结果；点「绑定这个号」会说明，主页链接最稳'
+              : '把 sec_uid、主页链接或抖音号填到设置里的「主人抖音」';          dyOwner.classList.toggle('is-warn', !dyBound);
+          inboxDmDy.style.display = dyBound && !owner.douyinSame ? '' : 'none';
 
           // 待批
           const drafts = data?.drafts ?? [];
@@ -1684,7 +1725,7 @@ export default {
         let inboxCounts = { all: 0, reply: 0, at: 0 };
         let inboxFilter = 'all';
         const INBOX_FOLD = 4;
-        const INBOX_TYPES = { video: '视频', opus: '动态', article: '专栏', other: '页面' };
+        const INBOX_TYPES = { video: '视频', opus: '动态', article: '专栏', dm: '私信', other: '页面' };
 
         async function loadInbox(force = false) {
           if (!force && Date.now() - inboxAt < 2 * 60 * 1000) return;
@@ -1697,6 +1738,7 @@ export default {
               all: inboxItems.length,
               reply: inboxItems.filter((x) => x.kind === 'reply').length,
               at: inboxItems.filter((x) => x.kind === 'at').length,
+              dm: inboxItems.filter((x) => x.kind === 'dm').length,
             };
             renderInbox();
             // 顶部那颗「谁找你 N 条新」跟着消息一起变，不用等下一次 15 秒轮询
@@ -1720,15 +1762,19 @@ export default {
           const unread = inboxItems.filter((x) => x.fresh).length;
           inboxCount.textContent = String(inboxItems.length);
           inboxCount.className = `stroll-count ${unread ? 'on' : ''}`.trim();
-          inboxHint.textContent = `${inboxItems.length} 条 · B站${unread ? ` · ${unread} 条还没点开` : ''}`;
+          const platLabel = inboxItems.some((x) => x.platform === 'douyin') ? 'B站+抖音' : 'B站';
+          inboxHint.textContent = `${inboxItems.length} 条 · ${platLabel}${unread ? ` · ${unread} 条还没点开` : ''}`;
           inboxReadAll.style.display = unread ? '' : 'none';
 
           // 分类：只有真收到 @ 才显示这排，别凭空多两个空标签
           if (inboxFilter === 'at' && !inboxCounts.at) inboxFilter = 'all';
           inboxTabs.replaceChildren();
-          const tabs = [['all', '全部', inboxCounts.all], ['reply', '评论', inboxCounts.reply], ['at', '@ 我', inboxCounts.at]].filter(
-            ([key]) => key !== 'at' || inboxCounts.at > 0,
-          );
+          const tabs = [
+            ['all', '全部', inboxCounts.all],
+            ['dm', '私信', inboxCounts.dm],
+            ['reply', '评论', inboxCounts.reply],
+            ['at', '@ 我', inboxCounts.at],
+          ].filter(([key]) => key === 'all' || key === 'reply' || inboxCounts[key] > 0);
           inboxTabs.style.display = tabs.length > 2 ? '' : 'none';
           for (const [key, label, n] of tabs) {
             const tab = el('button', undefined, '');
@@ -1763,6 +1809,12 @@ export default {
           }
         }
 
+        /** 每条消息都标清楚是哪个平台的，评论和私信都不例外。 */
+        function platformTag(platform) {
+          const dy = platform === 'douyin';
+          return el('span', dy ? '抖音' : 'B站', `stroll-msgplat ${dy ? 'is-dy' : 'is-bili'}`);
+        }
+
         function inboxCard(item) {
           const card = el('div', undefined, 'stroll-msgcard');
           if (item.fresh) card.classList.add('fresh');
@@ -1770,7 +1822,7 @@ export default {
 
           const main = el('button', undefined, 'stroll-msgcard-main');
           main.type = 'button';
-          main.title = item.url ? '在你的浏览器里打开这条评论' : '没有可打开的链接';
+          main.title = item.url ? '在你的浏览器里打开这条消息' : '没有可打开的链接';
 
           const head = el('div', undefined, 'stroll-msgcard-head');
           const name = item.user || '有人';
@@ -1778,18 +1830,27 @@ export default {
           const avatar = el('span', [...name][0] ?? '?', 'stroll-msgavatar');
           avatar.style.setProperty('--tone', `hsl(${tone} 58% 52%)`);
           head.append(avatar, el('span', name, 'stroll-msguser'));
-          head.append(el('span', item.kind === 'at' ? '@ 你' : '回复你', 'stroll-msgkind'));
-          head.append(el('span', inboxTime(item.at), 'stroll-msgtime'));
+          const kindLabel = item.kind === 'dm' ? '私信你' : item.kind === 'at' ? '@ 你' : '回复你';
+          head.append(platformTag(item.platform), el('span', kindLabel, 'stroll-msgkind'));
+          head.append(el('span', item.timeLabel || inboxTime(item.at), 'stroll-msgtime'));
           if (item.fresh) head.append(el('i', undefined, 'stroll-msgnew'));
           main.append(head);
           main.append(el('div', item.text || '', 'stroll-msgtext'));
           if (item.quote) main.append(el('div', `你说的：${cut(item.quote, 30)}`, 'stroll-msgquote'));
-          const where = [item.where ? `《${cut(item.where, 22)}》` : '', INBOX_TYPES[item.type] ?? '页面'].filter(Boolean).join(' · ');
+          const where =
+            item.kind === 'dm'
+              ? [
+                  item.platform === 'douyin' ? '抖音私信' : 'B站私信',
+                  item.where && item.where !== '私信' ? item.where : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
+              : [item.where ? `《${cut(item.where, 22)}》` : '', INBOX_TYPES[item.type] ?? '页面'].filter(Boolean).join(' · ');
           main.append(el('div', where, 'stroll-msgwhere'));
           if (item.replied) main.append(el('div', '已经回过这一条', 'stroll-msgdone'));
 
           main.addEventListener('click', () => {
-            if (item.url) openExternal(item.url, `「${cut(name, 10)}」那条评论`);
+            if (item.url) openExternal(item.url, `「${cut(name, 10)}」那条消息`);
             markSeen([item.id]);
           });
           card.append(main);
@@ -1799,23 +1860,23 @@ export default {
           goBtn.type = 'button';
           goBtn.append(icon('link', 12), el('span', '去看看'));
           goBtn.addEventListener('click', () => {
-            if (item.url) openExternal(item.url, `「${cut(name, 10)}」那条评论`);
+            if (item.url) openExternal(item.url, `「${cut(name, 10)}」那条消息`);
             markSeen([item.id]);
           });
           acts.append(goBtn);
 
           let replyBox = null;
-          if (item.bvid || item.dynamicId || item.cvid) {
+          if (item.kind === 'dm' || item.bvid || item.dynamicId || item.cvid) {
             const replyBtn = el('button', undefined, 'stroll-chipbtn');
             replyBtn.type = 'button';
-            replyBtn.append(icon('comment', 12), el('span', '回一句'));
+            replyBtn.append(icon('comment', 12), el('span', item.kind === 'dm' ? '回私信' : '回一句'));
             replyBox = el('div', undefined, 'stroll-msgreply');
             replyBox.style.display = 'none';
             const replyInput = el('input');
             replyInput.type = 'text';
             replyInput.className = 'stroll-input';
-            replyInput.placeholder = `回 ${cut(name, 10)}…`;
-            replyInput.maxLength = Number(lastData?.config?.commentMaxChars ?? 120);
+            replyInput.placeholder = item.kind === 'dm' ? `回 ${cut(name, 10)} 的私信…` : `回 ${cut(name, 10)}…`;
+            replyInput.maxLength = item.kind === 'dm' ? 300 : Number(lastData?.config?.commentMaxChars ?? 120);
             const replySend = button('发送', () => sendReply(item, replyInput, replyHint, replySend), 'primary xs');
             const replyHint = el('span', undefined, 'stroll-token');
             const row = el('div', undefined, 'stroll-inline');
@@ -1883,6 +1944,18 @@ export default {
             msgSet(error.message || String(error), true);
           } finally {
             btn.disabled = false;
+          }
+        }
+
+        async function dmMe(platform = 'bilibili') {
+          msgSet(platform === 'douyin' ? '让她用抖音给你发条私信…' : '让她给你发条私信…');
+          try {
+            const result = await ctx.invoke('dm_me', ['', platform]);
+            if (result?.ok === false) throw new Error(result.error || '没发出去');
+            msgSet(result.message || '私信发出去了。');
+            await refresh();
+          } catch (error) {
+            msgSet(error.message || String(error), true);
           }
         }
 
@@ -2073,6 +2146,42 @@ export default {
               result?.message || (result?.ok ? '窗口开了，去登录吧。' : result?.error || '没成功'),
               result?.ok === false,
             );
+            await refresh();
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+          }
+        }
+
+        /** 把设置里填的抖音号/链接解析成 sec_uid 并绑上。 */
+        async function bindPendingDouyin() {
+          let raw = String(lastData?.status?.owner?.douyin ?? '').trim();
+          if (!raw) {
+            // 刚在设置里改完，面板还没刷到：先拉一次最新状态
+            await refresh();
+            raw = String(lastData?.status?.owner?.douyin ?? '').trim();
+          }
+          if (!raw) {
+            msgSet('设置里的「主人抖音」还是空的：填抖音号或主页链接再来。', true);
+            return;
+          }
+          msgSet(`正在解析「${cut(raw, 20)}」…（要开一次浏览器，慢一点）`);
+          try {
+            const result = await ctx.invoke('bind_douyin_owner', [raw]);
+            if (result?.ok === false) throw new Error(result.error || '没解析出来');
+            msgSet(result.message || '已绑定。');
+            await refresh();
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+          }
+        }
+
+        /** 只读：看桌宠现在登的是哪个抖音号，和主人是不是同一个。 */
+        async function checkDouyinSelf() {
+          msgSet('正在读她现在登录的抖音号…（要开一次浏览器，慢一点）');
+          try {
+            const result = await ctx.invoke('douyin_self');
+            if (result?.ok === false) throw new Error(result.error || '没读到');
+            msgSet(result.message || `现在登录的是「${result.name || '这个号'}」。`);
             await refresh();
           } catch (error) {
             msgSet(error.message || String(error), true);

@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "stroll",
-      "description": "出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站链接都行）；comments 只读评论区；inbox 看谁回了你；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。",
+      "description": "出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站链接都行）；comments 只读评论区；inbox 看谁回了你（评论/@/私信都算，私信带 kind=dm 和未读条数）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -135,7 +135,7 @@
           },
           "target": {
             "type": "string",
-            "description": "视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID；私信时是对方 UID/sec_uid。"
+            "description": "视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID；私信时不用填——只会发给主人（填了也只能是主人）。"
           },
           "text": {
             "type": "string",

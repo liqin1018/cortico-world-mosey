@@ -65,7 +65,7 @@ export class Policy {
   }
 
   /** 公开动作总闸。userInitiated 是你亲手点的：只做防连点，不再按 90 秒节奏拦。 */
-  check(action, platform, target, { userInitiated = false, quotaAction = action, dedupeKey = '' } = {}) {
+  check(action, platform, target, { userInitiated = false, quotaAction = action, dedupeKey = '', free = false } = {}) {
     if (!this.cfg.enabled) return { ok: false, code: 'DISABLED', message: '摸鱼已停用。' };
     if (platform === 'bilibili' && !this.cfg.bilibili) return { ok: false, code: 'PLATFORM_OFF', message: 'B站这边关着。' };
     if (platform === 'douyin' && !this.cfg.douyin) return { ok: false, code: 'PLATFORM_OFF', message: '抖音这边关着。' };
@@ -80,26 +80,28 @@ export class Policy {
     const meta = ACTION_CAPS[quotaAction];
     if (!meta) return { ok: false, code: 'UNKNOWN_ACTION', message: '不认识这个动作。' };
 
-    const left = this.remaining(quotaAction);
-    if (left.daily <= 0) return { ok: false, code: 'DAILY_CAP', message: `今天的「${meta.label}」额度用完了（${left.dailyCap}）。` };
-    if (left.weekly <= 0) return { ok: false, code: 'WEEKLY_CAP', message: `这周的「${meta.label}」额度用完了（${left.weeklyCap}）。` };
+    // free：只发给主人的私信不限额，也不做去重（不然一天只能发一条）
+    if (!free) {
+      const left = this.remaining(quotaAction);
+      if (left.daily <= 0) return { ok: false, code: 'DAILY_CAP', message: `今天的「${meta.label}」额度用完了（${left.dailyCap}）。` };
+      if (left.weekly <= 0) return { ok: false, code: 'WEEKLY_CAP', message: `这周的「${meta.label}」额度用完了（${left.weeklyCap}）。` };
+    }
 
     // 手动点的动作只防连点；自动出门才需要完整的人类间隔
-    const gap = userInitiated
-      ? 2000
-      : Math.max(30, Number(this.cfg.minGapSeconds ?? 90)) * 1000;
+    // 给主人的私信按「聊天」算：只防连点，不套 90 秒的出门节奏
+    const gap = free ? 5000 : userInitiated ? 2000 : Math.max(30, Number(this.cfg.minGapSeconds ?? 90)) * 1000;
     const since = Date.now() - Number(this.store.data.lastWriteAt ?? 0);
     if (since < gap) {
       return {
         ok: false,
         code: 'TOO_FAST',
-        message: userInitiated
-          ? '刚发过一次，等两秒再点，别重复提交。'
+        message: userInitiated || free
+          ? '刚发过一次，等几秒再说，别连点。'
           : `上一次动作才过去 ${Math.round(since / 1000)} 秒，再等等（至少 ${Math.round(gap / 1000)} 秒）。`,
       };
     }
 
-    if (target || dedupeKey) {
+    if (!free && (target || dedupeKey)) {
       const key = dedupeKey || `${platform}:${action}:${target}`;
       const seen = this.store.seenAt(key);
       const windowMs = action === 'comment' || action === 'reply' ? 7 * 86400000 : 24 * 3600 * 1000;
@@ -117,7 +119,7 @@ export class Policy {
 
   /** 动作成功后记账。调用方必须在平台确认成功后才会走到这里。 */
   consume(action, platform, target, detail = {}) {
-    this.store.bump(detail.quotaAction ?? action);
+    if (detail.countQuota !== false) this.store.bump(detail.quotaAction ?? action);
     for (const tag of detail.tags ?? []) this.store.noteInterest([tag]);
     if (detail.dedupeKey) this.store.markSeen(detail.dedupeKey);
     else if (target) this.store.markSeen(`${platform}:${action}:${target}`);

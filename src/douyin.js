@@ -5,6 +5,15 @@ import { formatCount, formatDuration, humanPause, parseDouyinId, parseKeywords, 
 
 const ORIGIN = 'https://www.douyin.com';
 
+/** 抖音主页 id（sec_uid）：MS4w 开头，后面是字母数字和 _ - 。 */
+export const SEC_UID_RE = /MS4w[A-Za-z0-9_-]{10,200}/;
+
+/** 从一段文字里抠 sec_uid：直接填、粘主页链接、粘分享文案都能用。 */
+export function secUidOf(value) {
+  const hit = String(value ?? '').match(SEC_UID_RE);
+  return hit ? hit[0] : '';
+}
+
 export class DouyinError extends Error {
   constructor(code, message) {
     super(message);
@@ -107,6 +116,32 @@ const watchScript = String.raw`(() => {
     loginHint: /登录后|请先登录|扫码登录|立即登录/.test(text),
   };
 })()`;
+
+/** 抖音只给「11分钟前 / 昨天 / 周四」这种相对时间，换成大约的时间戳，用来排序。 */
+function approxTime(label, index = 0) {
+  const text = String(label ?? '');
+  const now = Date.now();
+  let m = /^(\d+)\s*秒前/.exec(text);
+  if (m) return now - Number(m[1]) * 1000;
+  m = /^(\d+)\s*分钟前/.exec(text);
+  if (m) return now - Number(m[1]) * 60 * 1000;
+  m = /^(\d+)\s*小时前/.exec(text);
+  if (m) return now - Number(m[1]) * 3600 * 1000;
+  if (text.includes('昨天')) return now - 24 * 3600 * 1000;
+  const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const wi = week.findIndex((w) => text.includes(w));
+  if (wi >= 0) {
+    const today = new Date(now).getDay();
+    const diff = (today - wi + 7) % 7 || 7;
+    return now - diff * 24 * 3600 * 1000;
+  }
+  m = /^(\d{2})-(\d{2})/.exec(text);
+  if (m) {
+    const d = new Date(new Date(now).getFullYear(), Number(m[1]) - 1, Number(m[2]));
+    return d.getTime() > now ? d.getTime() - 365 * 24 * 3600 * 1000 : d.getTime();
+  }
+  return now - index * 1000;
+}
 
 const RISK_TEXT = /(完成验证|安全验证|操作频繁|账号异常|访问过于频繁|请稍后再试|captcha|verify)/i;
 
@@ -324,6 +359,9 @@ export class DouyinBrowser {
           this.markLoggedIn();
           clearInterval(this.loginPoller);
           this.loginPoller = null;
+          // 顺手记一下「现在登的是哪个号」，面板就能显示昵称、也能发现和主人是同一个号
+          const self = await this.selfProfile().catch(() => null);
+          if (self?.secUid) this.onSelf?.(self);
           await this.close();
           this.log?.info?.('stroll: 抖音登录成功，已切回后台');
         } else if (Date.now() - started > 5 * 60 * 1000) {
@@ -399,6 +437,129 @@ export class DouyinBrowser {
 
   async idOf(value) {
     return parseDouyinId(value) ?? (await this.resolveShort(value));
+  }
+
+  /**
+   * 当前登录的是哪个号。
+   * /user/self 不会跳到 /user/<sec_uid>，页面里的 <a> 又大多是推荐位/广告（实测点开是别人），
+   * 所以不能拿第一个链接当自己。可靠做法：先从页面读出「抖音号：xxx」，
+   * 再把 HTML 里出现的 sec_uid 逐个打开核一遍，抖音号对上的那个才是自己。
+   */
+  async selfProfile() {
+    return this.serialize(async () => {
+      const page = await this.getPage();
+      if (!(await this.isLoggedIn())) {
+        throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录：先点「登录 / 验证」扫一次码');
+      }
+      try {
+        await page.goto(`${ORIGIN}/user/self`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch((error) => {
+          throw new DouyinError('NAV', `打不开抖音个人页：${error.message}`);
+        });
+        await page.waitForTimeout(2600);
+        const meta = await page
+          .evaluate(() => {
+            const text = document.body.innerText ?? '';
+            const douyinId = (text.match(/抖音号[:：]\s*([A-Za-z0-9_.-]{2,40})/) ?? ['', ''])[1].trim();
+            const name = (document.querySelector('h1')?.innerText ?? '').trim().split('\n')[0] ?? '';
+            const html = document.documentElement.innerHTML;
+            const ids = Array.from(new Set(html.match(/MS4w[A-Za-z0-9_-]{10,200}/g) ?? [])).slice(0, 4);
+            return { douyinId, name, ids, url: location.href };
+          })
+          .catch(() => ({ douyinId: '', name: '', ids: [], url: page.url() }));
+
+        let uid = secUidOf(page.url());
+        let verified = !!uid;
+        if (!uid && meta.douyinId) {
+          for (const cand of meta.ids) {
+            const info = await this.profileOf(page, cand);
+            if (info.douyinId && info.douyinId === meta.douyinId) {
+              uid = cand;
+              verified = true;
+              break;
+            }
+          }
+        }
+        if (!uid) uid = meta.ids[0] ?? '';
+        if (!uid) {
+          throw new DouyinError('NO_SELF', '读不到当前登录的抖音号（抖音可能改版了）；也可以把主页链接粘到「主人抖音」里');
+        }
+        return {
+          ok: true,
+          secUid: uid,
+          name: meta.name || '',
+          douyinId: meta.douyinId || '',
+          verified,
+        };
+      } finally {
+        this.scheduleClose(45);
+      }
+    });
+  }
+
+  /**
+   * 把「主人抖音」填的东西统一成 sec_uid：
+   * sec_uid 直接认；主页链接/分享文案里抠；纯抖音号解析不了（抖音搜索页反爬），会给出替代办法。
+   */
+  async resolveOwner(input) {
+    return this.serialize(async () => {
+      const raw = String(input ?? '').trim();
+      if (!raw) throw new DouyinError('EMPTY', '没填内容');
+      // 抖音号最常见的就是别里带 @ 或者「抖音号：」前缀
+      const handle = raw
+        .replace(/^@/, '')
+        .replace(/^抖音号[:：]\s*/, '')
+        .replace(/\s+/g, '')
+        .trim();
+      const direct = secUidOf(raw);
+      if (direct) return { ok: true, secUid: direct, name: '', source: 'sec_uid' };
+
+      // 分享文案里夹着链接也算链接（"复制此链接，打开抖音搜索…" 那种整段）
+      const linkInText =
+        raw.match(/https?:\/\/\S+/i)?.[0] ?? (/^v\.douyin\.com\//i.test(raw) ? `https://${raw}` : '');
+
+      // 纯抖音号：实测搜索页在后台是空壳（只有导航、没有结果，换 UA 也一样）。
+      // 不进浏览器，直接说清楚该怎么填，省得主人等十秒再失败。
+      if (!linkInText) {
+        throw new DouyinError(
+          'HANDLE_UNSUPPORTED',
+          `抖音号「${handle}」解析不了：抖音的搜索页对后台浏览器是空的（反爬），这条路走不通。两个能用的办法：① 抖音 App →「我」→ 右上角分享 → 复制链接，把主页链接整段粘到「主人抖音」；② 直接填 sec_uid（主页链接里 MS4w 开头那一段）。`,
+        );
+      }
+
+      const page = await this.getPage();
+      if (!(await this.isLoggedIn())) {
+        throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录：先点「登录 / 验证」扫一次码');
+      }
+      // 链接：短链会先跳一次，落到主页地址上再抠
+      {
+        const url = linkInText;
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await page.waitForTimeout(2600);
+        const fromUrl = secUidOf(page.url());
+        if (fromUrl) {
+          const name = await page
+            .evaluate(() => (document.querySelector('h1')?.innerText ?? '').trim().split('\n')[0] ?? '')
+            .catch(() => '');
+          this.scheduleClose(45);
+          return { ok: true, secUid: fromUrl, name, source: 'link' };
+        }
+        throw new DouyinError('NO_SEC_UID', '这个链接里没有抖音主页；把「分享主页」的链接整段粘进来');
+      }
+    });
+  }
+
+  /** 打开某人主页，读昵称和主页上写的抖音号（核对身份用）。 */
+  async profileOf(page, secUid) {
+    await page.goto(`${ORIGIN}/user/${secUid}`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await page.waitForTimeout(2600);
+    return page
+      .evaluate(() => {
+        const text = (document.body.innerText ?? '').slice(0, 2000);
+        const id = text.match(/抖音号[:：]\s*([A-Za-z0-9_.-]{2,40})/)?.[1] ?? '';
+        const name = (document.querySelector('h1')?.innerText ?? '').trim().split('\n')[0] ?? '';
+        return { douyinId: id.trim(), name };
+      })
+      .catch(() => ({ douyinId: '', name: '' }));
   }
 
   async feed(limit = 6) {
@@ -775,46 +936,172 @@ export class DouyinBrowser {
     });
   }
 
+  /**
+   * 点一个「文字正好是这个」的可见元素。
+   * 抖音主页的「私信」在 DOM 里有两份：一份是隐藏的模板（宽高 0），点它必然超时。
+   * 所以不能 getByText().first()，要逐个挑可见的。
+   */
+  async clickVisibleText(page, text, { limit = 14 } = {}) {
+    const nodes = page
+      .locator('button, [role="button"], a, span, div')
+      .filter({ hasText: new RegExp(`^\\s*${text}\\s*$`) });
+    const total = Math.min(await nodes.count().catch(() => 0), limit);
+    for (let i = 0; i < total; i += 1) {
+      const el = nodes.nth(i);
+      if (!(await el.isVisible().catch(() => false))) continue;
+      const box = await el.boundingBox().catch(() => null);
+      if (!box || box.width < 4 || box.height < 4) continue;
+      try {
+        await el.scrollIntoViewIfNeeded().catch(() => {});
+        await el.click({ timeout: 4000 });
+        return true;
+      } catch {
+        // 换下一个（可能被浮层挡住）
+      }
+    }
+    return false;
+  }
+
+  /** 等私信输入框出现（抽屉是异步挂上来的）。 */
+  async waitMsgInput(page, ms = 9000) {
+    const deadline = Date.now() + ms;
+    const loc = page.locator('[data-e2e="msg-input"], div[contenteditable="true"], textarea');
+    while (Date.now() < deadline) {
+      const n = await loc.count().catch(() => 0);
+      for (let i = 0; i < n; i += 1) {
+        const el = loc.nth(i);
+        if (await el.isVisible().catch(() => false)) return el;
+      }
+      await page.waitForTimeout(400);
+    }
+    return null;
+  }
+
+  /**
+   * 在已经打开的聊天框里把话发出去，并确认真的发出去了。
+   * contenteditable 清空后会剩一个零宽字符，trim() 去不掉，所以要自己剥。
+   */
+  async sendInChat(page, input, text) {
+    const read = () =>
+      input
+        .evaluate((el) => String(el.value ?? el.textContent ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim())
+        .catch(() => '');
+    await input.click({ timeout: 6000 });
+    await input.pressSequentially(String(text).slice(0, 300), { delay: 60 });
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(1500);
+    let left = await read();
+    if (left) {
+      // 有些版本回车只是换行，得点发送
+      const sendBtn = page.locator('[data-e2e="msg-send"]').first();
+      if ((await sendBtn.count().catch(() => 0)) > 0 && (await sendBtn.isVisible().catch(() => false))) {
+        await sendBtn.click({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(1200);
+        left = await read();
+      }
+    }
+    if (left) {
+      throw new DouyinError('NOT_SENT', '消息还留在输入框里，没发出去（可能被限流，或对方设置了陌生人限制）');
+    }
+    const body = await page.locator('body').innerText().catch(() => '');
+    if (RISK_TEXT.test(body)) {
+      this.policy.noteRisk('DOUYIN_VERIFY', '发私信后出现验证');
+      throw new DouyinError('RISK', '发私信后出现验证，已停手。');
+    }
+    return true;
+  }
+
   async dm(secUid, text) {
     return this.serialize(async () => {
-      if (!/^MS4w[A-Za-z0-9_.-]{10,200}$/.test(String(secUid ?? ''))) {
-        throw new DouyinError('BAD_TARGET', '抖音私信需要作者的 sec_uid（MS4w 开头）');
+      const uid = secUidOf(secUid);
+      if (!uid) {
+        throw new DouyinError('BAD_TARGET', '抖音私信需要主人的 sec_uid（MS4w 开头）');
       }
       const page = await this.getPage();
       if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，发不了私信');
-      await this.goto(page, `${ORIGIN}/user/${secUid}`, 4200);
-      const btn = page.getByText('私信', { exact: true }).first();
-      if (!(await btn.count())) throw new DouyinError('NO_DM', '这个主页没有私信按钮（可能对方关闭了）');
-      await btn.click({ timeout: 6000 });
-      await humanPause(1600, 2600);
-      const input = page.locator('div[contenteditable="true"], textarea').last();
-      await input.click({ timeout: 6000 });
-      await input.pressSequentially(text, { delay: 75 });
-      await page.keyboard.press('Enter');
-      await page.waitForTimeout(1600);
-      const body = await page.locator('body').innerText().catch(() => '');
-      if (RISK_TEXT.test(body)) {
-        this.policy.noteRisk('DOUYIN_VERIFY', '发私信后出现验证');
-        throw new DouyinError('RISK', '发私信后出现验证，已停手。');
+      try {
+        await this.goto(page, `${ORIGIN}/user/${uid}`, 4600);
+        const clicked = await this.clickVisibleText(page, '私信');
+        if (!clicked) {
+          throw new DouyinError(
+            'NO_DM',
+            '这个主页上没有能点的「私信」：对方关了私信，或者这根本就是你现在登录的号（抖音不能给自己发私信）',
+          );
+        }
+        await page.waitForTimeout(1200);
+        const input = await this.waitMsgInput(page, 9000);
+        if (!input) {
+          throw new DouyinError('NO_INPUT', '点了「私信」但聊天框没弹出来（抖音可能改版了）');
+        }
+        await this.sendInChat(page, input, text);
+        this.lastAction = `dm ${uid}`;
+        return { ok: true, sent: true };
+      } finally {
+        // 失败也要收窗口：以前抛错就直接留着，后台会堆一堆浏览器
+        this.scheduleClose(60);
       }
-      this.lastAction = `dm ${secUid}`;
-      return { ok: true, sent: true };
     });
   }
 
-  async inbox(limit = 5) {
+  /**
+   * 私信会话列表。地址是 /chat，不是 /user/self——后者只有导航壳，什么都读不到。
+   * 每条会话的 innerText 依次是：昵称 / 时间 / 最后一句 / 未读数。
+   */
+  async inbox(limit = 6) {
     return this.serialize(async () => {
       const page = await this.getPage();
       if (!(await this.isLoggedIn())) return [];
-      await this.goto(page, `${ORIGIN}/user/self?from_tab_name=main`, 4200);
-      const items = await page.evaluate((n) => {
-        const nodes = Array.from(document.querySelectorAll('[data-e2e="conversation-item"], .conversation-item, [class*="conversation"]')).slice(0, n);
-        return nodes
-          .map((el) => (el.innerText || '').split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 3).join(' · '))
-          .filter(Boolean);
+      await this.goto(page, `${ORIGIN}/chat`, 5200);
+      const rows = await page.evaluate((n) => {
+        const nodes = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]')).slice(0, n);
+        return nodes.map((el) => (el.innerText || '').split('\n').map((s) => s.trim()).filter(Boolean));
       }, limit);
       this.scheduleClose(60);
-      return items;
+      return rows
+        .filter((l) => l.length >= 2)
+        .map((lines, i) => {
+          const name = lines[0] ?? '抖音好友';
+          const text = lines[2] ?? '';
+          const unread = lines.length >= 4 && /^\d+$/.test(lines[3]) ? Number(lines[3]) : 0;
+          return {
+            kind: 'dm',
+            platform: 'douyin',
+            type: 'dm',
+            id: `dm:douyin:${i}:${name}`,
+            user: name,
+            text: truncate(text, 120),
+            where: unread > 0 ? `${unread} 条未读` : '私信',
+            unread,
+            at: approxTime(lines[1] ?? '', i),
+            timeLabel: lines[1] ?? '',
+            url: `${ORIGIN}/chat`,
+            order: i,
+          };
+        });
+    });
+  }
+
+  /** 在抖音聊天页回一条私信：按昵称找到会话，点进去输入。 */
+  async replyDm(name, text) {
+    return this.serialize(async () => {
+      const who = String(name ?? '').trim();
+      if (!who) throw new DouyinError('BAD_TARGET', '没有会话昵称，回不了');
+      const page = await this.getPage();
+      if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，发不了私信');
+      try {
+        await this.goto(page, `${ORIGIN}/chat`, 5200);
+        const item = page.locator('[data-e2e="conversation-item"]', { hasText: who }).first();
+        if (!(await item.count())) throw new DouyinError('NO_DM', '聊天列表里找不到这个会话，可能被新消息刷下去了');
+        await item.click({ timeout: 6000 });
+        await humanPause(1200, 1900);
+        const input = await this.waitMsgInput(page, 6000);
+        if (!input) throw new DouyinError('NO_INPUT', '没找到输入框，抖音可能改版了');
+        await this.sendInChat(page, input, text);
+        this.lastAction = `dm ${who}`;
+        return { ok: true, sent: true };
+      } finally {
+        this.scheduleClose(60);
+      }
     });
   }
 

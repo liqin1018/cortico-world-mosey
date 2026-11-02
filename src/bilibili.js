@@ -828,6 +828,116 @@ export class Bilibili {
     throw new BiliError('BAD_ID', '这个链接不是 B站视频/动态/专栏。');
   }
 
+  /** 私信会话列表。只认文字消息（msg_type 1），系统卡片和推荐位不混进来。 */
+  async dmSessions(limit = 8) {
+    const data = await this.request(
+      '/session_svr/v1/session_svr/get_sessions',
+      { session_type: 1, group_id: 0, mobi_app: 'web', build: 0, platform: 'web' },
+      {
+        base: 'https://api.vc.bilibili.com',
+        cacheMs: 30 * 1000,
+        referer: 'https://message.bilibili.com/',
+        origin: 'https://message.bilibili.com',
+      },
+    );
+    const list = (data.session_list ?? [])
+      .map((s) => {
+        const last = s.last_msg ?? {};
+        let body = '';
+        try {
+          body = JSON.parse(last.content ?? '{}').content ?? '';
+        } catch {
+          body = '';
+        }
+        return {
+          talkerId: String(s.talker_id ?? ''),
+          unread: Number(s.unread_count ?? 0),
+          at: Number(last.timestamp ?? 0),
+          msgType: Number(last.msg_type ?? 0),
+          senderUid: String(last.sender_uid ?? ''),
+          seqno: String(s.max_seqno ?? ''),
+          body: stripTags(body),
+          fromThem: String(last.sender_uid ?? '') === String(s.talker_id ?? ''),
+        };
+      })
+      .filter((x) => x.talkerId && x.msgType === 1 && x.at > 0)
+      .sort((a, b) => b.at - a.at)
+      .slice(0, Math.max(1, limit));
+    return list;
+  }
+
+  /** 把某个会话标成已读；B站那边的红点才会消。失败就算了，不影响收发。 */
+  async dmAck(talkerId, ackSeqno) {
+    if (!talkerId || !ackSeqno) return false;
+    try {
+      await this.request(
+        '/session_svr/v1/session_svr/update_ack',
+        { talker_id: String(talkerId), session_type: 1, ack_seqno: String(ackSeqno) },
+        {
+          post: true,
+          base: 'https://api.vc.bilibili.com',
+          cacheMs: 0,
+          referer: 'https://message.bilibili.com/',
+          origin: 'https://message.bilibili.com',
+        },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 批量取昵称，省得一条私信查一次空间（那个接口很容易 412）。 */
+  async userCards(uids) {
+    const list = [...new Set((uids ?? []).map(String).filter((x) => /^\d+$/.test(x)))];
+    if (!list.length) return {};
+    const data = await this.request(
+      '/account/v1/user/cards',
+      { uids: list.join(',') },
+      {
+        base: 'https://api.vc.bilibili.com',
+        cacheMs: 6 * 60 * 60 * 1000,
+        referer: 'https://message.bilibili.com/',
+        origin: 'https://message.bilibili.com',
+      },
+    );
+    const out = {};
+    for (const u of data ?? []) out[String(u.mid ?? '')] = stripTags(u.name ?? '');
+    return out;
+  }
+
+  /** 和某个人的最近几条私信；默认按时间正序，方便直接接在面板里看。 */
+  async dmThread(talkerId, size = 10) {
+    const data = await this.request(
+      '/svr_sync/v1/svr_sync/fetch_session_msgs',
+      { talker_id: String(talkerId), session_type: 1, size: Math.min(30, Math.max(1, size)), build: 0, mobi_app: 'web', platform: 'web' },
+      {
+        base: 'https://api.vc.bilibili.com',
+        cacheMs: 0,
+        referer: 'https://message.bilibili.com/',
+        origin: 'https://message.bilibili.com',
+      },
+    );
+    return (data.messages ?? [])
+      .map((m) => {
+        let body = '';
+        try {
+          body = JSON.parse(m.content ?? '{}').content ?? '';
+        } catch {
+          body = '';
+        }
+        return {
+          at: Number(m.timestamp ?? 0) * 1000,
+          from: String(m.sender_uid ?? ''),
+          type: Number(m.msg_type ?? 0),
+          text: stripTags(body),
+          key: String(m.msg_key ?? ''),
+        };
+      })
+      .filter((m) => m.text)
+      .sort((a, b) => a.at - b.at);
+  }
+
   async inbox(limit = 8) {
     const out = [];
     for (const [kind, route] of [
@@ -867,6 +977,40 @@ export class Bilibili {
         // 一类读不到不影响另一类
       }
     }
+    // 私信：以前完全没读，所以主人发过来她永远「收不到」
+    try {
+      const sessions = await this.dmSessions(Math.min(6, Math.max(2, limit)));
+      if (sessions.length) {
+        const cards = await this.userCards(sessions.map((x) => x.talkerId)).catch(() => ({}));
+        for (const s of sessions) {
+          out.push({
+            kind: 'dm',
+            platform: 'bilibili',
+            type: 'dm',
+            id: `dm:${s.talkerId}`,
+            user: cards[s.talkerId] || `UID ${s.talkerId}`,
+            mid: s.talkerId,
+            text: truncate(s.fromThem ? s.body : `（我最后说）${s.body}`, 140),
+            quote: '',
+            where: s.unread > 0 ? `${s.unread} 条未读` : '私信',
+            at: s.at,
+            url: `https://message.bilibili.com/#/whisper/mid${s.talkerId}`,
+            bvid: '',
+            dynamicId: '',
+            cvid: '',
+            rpid: '0',
+            rootRpid: '0',
+            unread: s.unread,
+            ackSeqno: s.seqno,
+            fromThem: s.fromThem,
+            likeState: false,
+          });
+        }
+      }
+    } catch {
+      // 私信读不到不影响评论/@
+    }
+
     const seen = new Set();
     return out
       .sort((a, b) => b.at - a.at)
@@ -1089,8 +1233,26 @@ export class Bilibili {
     return { ok: true, msgKey: String(data.msg_key ?? ''), sender: String(nav.mid), receiver: String(uid) };
   }
 
+  /**
+   * 私信接口要一个稳定的 dev_id：每次重启都换新的，B站会当成陌生设备，
+   * 表现就是「发出去了但对面收不到」。所以生成一次就存进 state.json。
+   */
   storeDeviceId() {
-    if (!this._deviceId) this._deviceId = this.policy?.store?.data?.deviceId || uuid();
+    if (this._deviceId) return this._deviceId;
+    const data = this.store?.data ?? this.policy?.store?.data;
+    if (!data) {
+      this._deviceId = uuid();
+      return this._deviceId;
+    }
+    if (!data.deviceId) {
+      data.deviceId = uuid();
+      try {
+        (this.store ?? this.policy.store).save?.();
+      } catch {
+        // 存不了也先用着，至少本次进程内稳定
+      }
+    }
+    this._deviceId = String(data.deviceId);
     return this._deviceId;
   }
 

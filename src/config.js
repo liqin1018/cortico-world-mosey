@@ -25,7 +25,6 @@ export const DEFAULTS = {
   dailyComments: 6,
   dailyFollows: 3,
   dailyPosts: 2,
-  dailyDms: 3,
   dailySaves: 8,
 
   quietFrom: 23,
@@ -136,8 +135,9 @@ const BASIC = {
       },
       [P + 'ownerDouyin']: {
         type: 'string',
-        title: '主人抖音 sec_uid',
-        description: '只有要发抖音私信才需要；MS4w 开头。',
+        title: '主人抖音（主页链接 / sec_uid / 抖音号）',
+        description:
+          '最稳的是「主页分享链接」：抖音 App → 我 → 右上角分享 → 复制链接，整段粘进来（分享文案里夹着链接也行）。也可以填 MS4w 开头的 sec_uid。纯抖音号填了也解析不了——抖音搜索页对后台浏览器是空的，这条路走不通。抖音不能给自己发私信，桌宠登录的号要和你不是同一个。',
       },
     },
   },
@@ -178,13 +178,6 @@ const QUOTA = {
         title: '每天最多发动态',
         minimum: 0,
         maximum: 3,
-        'x-suffix': ' 条',
-      },
-      [P + 'dailyDms']: {
-        type: 'integer',
-        title: '每天最多私信',
-        minimum: 0,
-        maximum: 5,
         'x-suffix': ' 条',
       },
       [P + 'dailySaves']: {
@@ -369,7 +362,7 @@ export const POLICY_FIELDS = {
   approval: { type: 'enum', values: ['confirm', 'auto_low_risk', 'auto_all', 'dry_run'] },
   ownerUid: { type: 'string', max: 20 },
   ownerName: { type: 'string', max: 40 },
-  ownerDouyin: { type: 'string', max: 220 },
+  ownerDouyin: { type: 'string', max: 500 },
   bilibili: { type: 'boolean' },
   douyin: { type: 'boolean' },
   allowFollow: { type: 'boolean' },
@@ -380,7 +373,6 @@ export const POLICY_FIELDS = {
   dailyComments: { type: 'int', min: 0, max: 20 },
   dailyFollows: { type: 'int', min: 0, max: 5 },
   dailyPosts: { type: 'int', min: 0, max: 3 },
-  dailyDms: { type: 'int', min: 0, max: 5 },
   dailySaves: { type: 'int', min: 0, max: 10 },
   quietFrom: { type: 'int', min: 0, max: 23 },
   quietTo: { type: 'int', min: 0, max: 23 },

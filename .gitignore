@@ -2,7 +2,3 @@ node_modules/
 .smoke-data*/
 .tmp-check/
 *.log
-.DS_Store
-Thumbs.db
-.env
-*.zip

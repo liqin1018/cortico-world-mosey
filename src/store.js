@@ -19,6 +19,12 @@ function blank() {
     drafts: [],
     risk: { until: 0, reason: '', strikes: 0, lastCode: '' },
     lastWriteAt: 0,
+    /** 每个平台各自的上次公开动作时间：抖音限流不该连带卡住 B站。 */
+    lastWriteByPlat: {},
+    /** 上次给主人回私信的时间：只用来防私信连发，不占公开动作的节奏位。 */
+    lastChatAt: 0,
+    /** 主人最近一次点单的时间：3 分钟内她做的事算「主人让的」，不套出门节奏。 */
+    ownerAskAt: 0,
     lastSessionAt: 0,
     stats: { likes: 0, comments: 0, follows: 0, posts: 0, dms: 0, saves: 0, opens: 0 },
     interests: {},

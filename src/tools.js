@@ -4,7 +4,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll',
     description:
-      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站链接都行）；comments 只读评论区；inbox 看谁回了你（评论/@/私信都算，私信带 kind=dm 和未读条数）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
+      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站/抖音链接都行，/note/ 图文也行）；comments 只读评论区；inbox 看谁回了你（评论/@/私信都算；抖音私信带 recent 最近十几句，含分享的视频/图文链接，还有 pending/said 表示主人连着发了几句）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
     tags: ['read'],
     parameters: {
       type: 'object',
@@ -37,7 +37,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll_act',
     description:
-      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态）、dm、save（B站稍后再看）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（评论 rpid）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下可直接执行。不要自己批准，不要绕过额度。',
+      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态）、dm、save（B站稍后再看）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（评论 rpid）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。不要自己批准，不要绕过额度。',
     tags: ['act', 'speak'],
     parameters: {
       type: 'object',
@@ -94,7 +94,7 @@ export const EVENT_DECLS = [
   { type: 'stroll.due', description: { zh: '自己该出门溜达了（每天最多几次）。', en: 'A scheduled outing is due.' }, trigger: 'debounce' },
   { type: 'stroll.sent', description: { zh: '主人批准后，公开动作真的发出去了。', en: 'An approved public action was sent.' }, trigger: 'flush' },
   { type: 'stroll.risk', description: { zh: '平台风控/验证，已自动停手。', en: 'A platform risk signal paused all writes.' }, trigger: 'flush' },
-  { type: 'stroll.reply', description: { zh: '有人回复或 @ 了她。', en: 'Someone replied to or mentioned her.' }, trigger: 'debounce' },
+  { type: 'stroll.reply', description: { zh: '有人回复或 @ 了她，或者主人刚发来私信（会立刻把她叫起来回）。', en: 'Someone replied or mentioned her, or the owner just sent a DM (she is woken to answer right away).' }, trigger: 'debounce' },
   { type: 'stroll.watch', description: { zh: '和主人一起看时，页面/进度/评论区的新情况。', en: 'The shared watch page changed: title, progress or comments.' }, trigger: 'debounce' },
   { type: 'stroll.watching', description: { zh: '她开始看某一条了（只在配置里选了「对话里也说一句」时推送）。', en: 'She started watching something (only when chat notifications are on).' }, trigger: 'debounce' },
 ];

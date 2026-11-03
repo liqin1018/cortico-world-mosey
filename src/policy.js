@@ -56,24 +56,45 @@ export class Policy {
     return from < to ? hour >= from && hour < to : hour >= from || hour < to;
   }
 
-  paused() {
-    const until = Number(this.store.data.risk.until ?? 0);
-    if (until > Date.now()) {
-      return { paused: true, until, reason: this.store.data.risk.reason || '风控冷却中' };
-    }
-    return { paused: false };
+  /** 风控拦截的力度：off 只记账不拦人，light 只在验证码时停，strict 是旧的长时间冷却。 */
+  guard() {
+    const v = String(this.cfg.riskGuard ?? 'off').toLowerCase();
+    return v === 'light' || v === 'strict' ? v : 'off';
   }
 
-  /** 公开动作总闸。userInitiated 是你亲手点的：只做防连点，不再按 90 秒节奏拦。 */
+  /** 主人刚点过单（私信/面板）的窗口：这期间她做的事算「主人让的」，不套出门节奏。 */
+  ownerActive() {
+    return Date.now() - Number(this.store.data.ownerAskAt ?? 0) < 180 * 1000;
+  }
+
+  paused() {
+    const until = Number(this.store.data.risk.until ?? 0);
+    if (until <= Date.now()) return { paused: false };
+    const reason = this.store.data.risk.reason || '风控冷却中';
+    // 主人自己拉的手刹永远算数
+    if (String(this.store.data.risk.lastCode ?? '') === 'MANUAL') return { paused: true, until, reason };
+    const guard = this.guard();
+    if (guard === 'off') return { paused: false };
+    // light：只有验证码/封禁这种「再试也没用」的才停；频率限流一律放行
+    if (guard === 'light' && !/验证|captcha|verify|封禁|ban|异常|-352|-799/i.test(reason)) return { paused: false };
+    return { paused: true, until, reason };
+  }
+
+  /** 公开动作总闸。userInitiated 是你亲手点的：只做防连点，不再按节奏拦。 */
   check(action, platform, target, { userInitiated = false, quotaAction = action, dedupeKey = '', free = false } = {}) {
     if (!this.cfg.enabled) return { ok: false, code: 'DISABLED', message: '摸鱼已停用。' };
     if (platform === 'bilibili' && !this.cfg.bilibili) return { ok: false, code: 'PLATFORM_OFF', message: 'B站这边关着。' };
     if (platform === 'douyin' && !this.cfg.douyin) return { ok: false, code: 'PLATFORM_OFF', message: '抖音这边关着。' };
     if (this.cfg.approval === 'dry_run') return { ok: false, code: 'DRY_RUN', message: '现在是只读模式，动作只会进草稿箱。' };
 
+    // 这里原来不看风控，一律拒。现在 paused() 自己按 riskGuard 决定要不要拦：
+    // 默认 off 模式下频率限流不再堵任何动作（连试都不用试的那种验证码才拦）。
     const paused = this.paused();
     if (paused.paused) {
-      return { ok: false, code: 'RISK_PAUSE', message: `先歇着：${paused.reason}。到 ${new Date(paused.until).toLocaleString('zh-CN')} 再说。` };
+      // 给主人的私信永远放行：风控冷却挡的是「她自己出门互动」，不该连主人的话都不回。
+      if (!free) {
+        return { ok: false, code: 'RISK_PAUSE', message: `先歇着：${paused.reason}。到 ${new Date(paused.until).toLocaleString('zh-CN')} 再说。` };
+      }
     }
 
     // 安静时段只拦「自己出门」，不拦主人当场让它做的事。
@@ -87,16 +108,24 @@ export class Policy {
       if (left.weekly <= 0) return { ok: false, code: 'WEEKLY_CAP', message: `这周的「${meta.label}」额度用完了（${left.weeklyCap}）。` };
     }
 
-    // 手动点的动作只防连点；自动出门才需要完整的人类间隔
-    // 给主人的私信按「聊天」算：只防连点，不套 90 秒的出门节奏
-    const gap = free ? 5000 : userInitiated ? 2000 : Math.max(30, Number(this.cfg.minGapSeconds ?? 90)) * 1000;
-    const since = Date.now() - Number(this.store.data.lastWriteAt ?? 0);
+    // 三档节奏：
+    //   free（回主人私信） 0.5 秒，只盖住「一次发送本身的耗时」，纯粹防重发
+    //   主人点单         1.5 秒，只防连点 —— 以前这里漏判，导致「回完私信马上评论」
+    //                    永远撞 90 秒的 TOO_FAST，表现就是每次评论都要等一两分钟
+    //   自己出门         minGapSeconds（默认 20 秒）
+    const asked = userInitiated || this.ownerActive();
+    const minGap = Math.max(5, Number(this.cfg.minGapSeconds ?? 20));
+    const sincePlat = Date.now() - Number((this.store.data.lastWriteByPlat ?? {})[platform] ?? 0);
+    const sinceAny = Date.now() - Number(this.store.data.lastWriteAt ?? 0);
+    const sinceChat = Date.now() - Number(this.store.data.lastChatAt ?? 0);
+    const gap = free ? 500 : asked ? 1500 : minGap * 1000;
+    const since = free ? sinceChat : asked ? Math.min(sincePlat, sinceAny) : sinceAny;
     if (since < gap) {
       return {
         ok: false,
         code: 'TOO_FAST',
-        message: userInitiated || free
-          ? '刚发过一次，等几秒再说，别连点。'
+        message: asked || free
+          ? `刚发过一次，等 ${Math.max(1, Math.ceil((gap - since) / 1000))} 秒再说，别连点。`
           : `上一次动作才过去 ${Math.round(since / 1000)} 秒，再等等（至少 ${Math.round(gap / 1000)} 秒）。`,
       };
     }
@@ -123,7 +152,15 @@ export class Policy {
     for (const tag of detail.tags ?? []) this.store.noteInterest([tag]);
     if (detail.dedupeKey) this.store.markSeen(detail.dedupeKey);
     else if (target) this.store.markSeen(`${platform}:${action}:${target}`);
-    this.store.data.lastWriteAt = Date.now();
+    const at = Date.now();
+    if (detail.free) {
+      // 回主人私信只算「聊天」，不占公开动作的节奏位：
+      // 不然刚回完一句私信，紧接着要评论就得干等（以前就是 90 秒）
+      this.store.data.lastChatAt = at;
+    } else {
+      this.store.data.lastWriteAt = at;
+      this.store.data.lastWriteByPlat = { ...(this.store.data.lastWriteByPlat ?? {}), [platform]: at };
+    }
     this.store.addAction({
       platform,
       action,
@@ -149,18 +186,47 @@ export class Policy {
     this.store.save();
   }
 
-  /** 平台风控信号：立刻停写，不重试。 */
+  /**
+   * 平台风控信号。
+   * 默认 riskGuard=off：**只记账，不暂停**。频率限流（-509/429）本来就是几十分钟自己好的，
+   * 停掉全部动作只会把主人当场点的事一起埋了——之前评论发不出去、要等一两个小时就是这么来的。
+   * 真被验证码/封号挡住时平台自己会报错，她会如实告诉主人。
+   * light：只有验证码/封禁这种「再试也没用」的才停 30 分钟。strict：旧的 48h/24h 分档。
+   */
   noteRisk(code, message) {
     const text = `${code ?? ''} ${message ?? ''}`.toLowerCase();
-    let hours = Number(this.cfg.riskPauseHours ?? 48);
-    if (/412|429|-412|-352|-509|-799|频繁|rate/.test(text)) hours = Math.max(12, hours);
-    if (/验证|captcha|verify|异常|封禁|ban/.test(text)) hours = Math.max(24, hours);
-    if (/登录|login|-101|未登录/.test(text)) hours = 0;
+    const verify = /验证|captcha|verify|异常|封禁|ban|-352|-799/.test(text);
+    const rate = /429|-509|请求过于频繁|操作频繁|访问过于频繁|rate/.test(text);
+    const guard = this.guard();
+    const before = Number(this.store.data.risk.strikes ?? 0);
+    const strikes = rate ? before + 1 : before;
+
+    let hours = 0;
+    if (guard === 'strict') {
+      hours = Number(this.cfg.riskPauseHours ?? 48);
+      // 分档按「这次之前撞过几次」算：第 1 次 30 分钟，第 2 次 2 小时，之后 6 小时封顶
+      if (rate) hours = before >= 2 ? 6 : before === 1 ? 2 : 0.5;
+      else if (/412|-412/.test(text)) hours = Math.max(12, hours);
+      else if (verify) hours = Math.max(24, hours);
+      else if (/登录|login|-101|未登录/.test(text)) hours = 0;
+    } else if (guard === 'light' && verify) {
+      // 30 分钟够主人去处理一次验证码，也不至于把一整天埋掉
+      hours = 0.5;
+    }
+
     const until = hours > 0 ? Date.now() + hours * 3600 * 1000 : 0;
     this.store.setRisk(until, `${code ?? ''} ${message ?? ''}`.trim().slice(0, 160), String(code ?? ''));
-    this.store.addAction({ platform: 'system', action: 'risk', target: '', text: this.store.data.risk.reason, result: 'paused' });
+    // setRisk 自己会把 strikes +1，这里以算好的值为准
+    this.store.data.risk.strikes = strikes;
+    this.store.addAction({
+      platform: 'system',
+      action: 'risk',
+      target: '',
+      text: this.store.data.risk.reason,
+      result: hours > 0 ? 'paused' : 'noted',
+    });
     this.store.save();
-    return { until, hours, reason: this.store.data.risk.reason };
+    return { until, hours, reason: this.store.data.risk.reason, guard };
   }
 
   /** 给 ENV_PROMPT 的一行摘要。 */
@@ -210,6 +276,8 @@ export function approvalFor(cfg, action) {
   if (cfg.approval === 'auto_all') return 'auto';
   if (cfg.approval === 'auto_low_risk' && (action === 'like' || action === 'unlike')) return 'auto';
   if (action === 'save' && cfg.allowSave) return 'auto';
+  // 私信主人不是公开动作，也不给别人看：等批准的话「主人一发消息就能回」就成了空话
+  if (action === 'dm' && cfg.allowDm) return 'auto';
   return 'draft';
 }
 

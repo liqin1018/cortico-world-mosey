@@ -234,3 +234,18 @@ export function safeJson(text, fallback = null) {
     return fallback;
   }
 }
+
+/**
+ * 正文里自己写了「@昵称」，而发的时候又会前置一个真 @ → 页面上就成了 @ 两次。
+ * 插真 @ 之前先把它从正文里剥掉（连带紧跟的一个空格）。name 为空就原样返回。
+ */
+export function stripAtName(text, name) {
+  const s = String(text ?? '');
+  const who = String(name ?? '').trim();
+  if (!who) return s;
+  const escaped = who.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return s
+    .replace(new RegExp(`@${escaped}[ \\t]?`, 'g'), '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}

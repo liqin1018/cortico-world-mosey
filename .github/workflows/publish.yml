@@ -1,0 +1,81 @@
+name: publish
+
+# 推一个 vX.Y.Z 的 tag 就发一版到 npm。
+# 走 npm 的 trusted publishing（OIDC），仓库里不存任何 token。
+# 一次性前置：npmjs.com → 这个包的 Settings → Trusted publishing
+#   填本仓库（liqin1018/cortico-world-mosey）和 workflow 文件名 publish.yml
+# 配好之后，换电脑、丢手机都不影响发布。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC 换临时凭证，这一行是整件事的关键
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 系统自带的 npm 可能是 10.x，trusted publishing 要 >= 11.5.1
+      - name: 升级 npm
+        run: npm i -g npm@latest
+
+      # 包名从 package.json 读，不写死 —— 这个模板可以直接复制到别的包
+      - name: 核对 tag 与 package.json 的版本
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          NAME=$(node -p "require('./package.json').name")
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            if [ "$TAG" != "$VER" ]; then
+              echo "::error::tag 是 $TAG，package.json 是 $VER，对不上"
+              exit 1
+            fi
+          fi
+          echo "VERSION=$VER" >> "$GITHUB_ENV"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          echo "要发的是 $NAME@$VER"
+
+      # npm 的版本号一旦发过就不能覆盖，重跑这个 workflow 会撞 409。
+      # 所以先查一下，发过了就安静跳过 —— 手动触发、重试都安全。
+      - name: 看这个版本是不是已经发过
+        id: check
+        run: |
+          if npm view "${NAME}@${VERSION}" version \
+               --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "::notice::${NAME}@${VERSION} 已经在 npm 上了，跳过发布"
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 有 test 脚本跑 test，有 check 脚本跑 check，都没有就跳过。
+      # 如果 CI 里跑不动（比如依赖 playwright 下载浏览器），把本步改成
+      # 加一行 continue-on-error: true 即可。
+      - name: 跑检查
+        if: steps.check.outputs.done != 'true'
+        run: |
+          HAS_TEST=$(node -p "!!require('./package.json').scripts?.test")
+          HAS_CHECK=$(node -p "!!require('./package.json').scripts?.check")
+          if [ "$HAS_TEST" = "true" ]; then
+            npm test
+          elif [ "$HAS_CHECK" = "true" ]; then
+            npm run check
+          else
+            echo "这个包没有 test / check 脚本，跳过"
+          fi
+
+      - name: 发布
+        if: steps.check.outputs.done != 'true'
+        run: npm publish --provenance --access public --registry=https://registry.npmjs.org

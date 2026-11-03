@@ -84,7 +84,26 @@ export class StrollWorld {
     this.watch = null;
     this.watchTimer = null;
     this.lastWatchPush = 0;
+    this.dmTimer = null;
+    this.dmBusy = false;
+    /** 正在挂「私信事件通道」；以及上次尝试/上次对账的时间。 */
+    this.dmArmBusy = false;
+    this.dmArmAt = 0;
+    this.dmArmFails = 0;
+    this.dmSweepAt = 0;
+    /** 上一次推「该出门溜达了」的时间：那个窗口里她做的动作算自己出门，按 20 秒节奏。 */
+    this.autoWalkAt = 0;
     this.running = false;
+  }
+
+  /**
+   * 这次动作算「主人让她做的」吗？
+   * 主人刚发过私信 → 算；否则只要不在自己出门的窗口里，也算（面板里说话、让她看个视频都算）。
+   * 只有「刚被 stroll.due 叫去逛」的那段时间才切回严格节奏，避免连发招 -509。
+   */
+  ownerNearby() {
+    if (this.policy.ownerActive()) return true;
+    return Date.now() - Number(this.autoWalkAt ?? 0) > 15 * 60 * 1000;
   }
 
   /* ---------------- lifecycle ---------------- */
@@ -99,12 +118,14 @@ export class StrollWorld {
     }, 10 * 60 * 1000);
     // 启动后先让进程稳定，再决定要不要自己出门
     setTimeout(() => this.tick().catch(() => {}), 90 * 1000);
+    this.startDmWatch();
   }
 
   async stop() {
     this.running = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.stopDmWatch();
     this.stopWatchTimer();
     await this.douyin.close().catch(() => {});
     this.store.save();
@@ -127,6 +148,9 @@ export class StrollWorld {
     if (Math.random() > 0.6) return;
     this.store.data.lastAutoAt = Date.now();
     this.store.data.autoSessions[day] = used + 1;
+    // 记住「这是一次自己出门」：出门窗口内她连续做动作要按 20 秒节奏，
+    // 不能拿主人点单的 1.5 秒去连发（那会招 -509）。
+    this.autoWalkAt = Date.now();
     this.store.save();
     await this.push(
       'stroll.due',
@@ -136,8 +160,247 @@ export class StrollWorld {
     );
   }
 
+  /* ---------------- 私信监听：主人一说话就接上 ---------------- */
+
+  /**
+   * 以前只有「她自己去查」才看得到私信：主人在抖音/B站说完，要等她下一次出门才回，
+   * 表现出来就是「发了好几句，半天没人理，最后只回了一条」。
+   * 这里按 dmPollSec 轮询两边的会话：B站走 HTTP（几十毫秒），抖音读已经开着的聊天页 DOM。
+   * 一出现「主人说的新话」就推一条事件把她叫起来，马上回。
+   */
+  startDmWatch() {
+    this.stopDmWatch();
+    if (!this.running) return;
+    this.dmLastAt = 0;
+    const live = this.liveConfig() ?? {};
+    const warm = this.dmWatchOn(live) && (live.douyin ?? this.cfg.douyin) !== false;
+    // 抖音监听要靠浏览器读 DOM：保持后台页面热着，冷启动一次要十几秒，那段时间的消息接不住
+    this.douyin.keepWarm?.(warm);
+    // 抖音走「事件通道」：客服页里的观察器一看到新消息就直接回调过来，几百毫秒内就知道。
+    // 这条路不轮询、不点会话，所以可以做得比轮询快得多。
+    if (warm) this.armDmPush().catch(() => {});
+    // 心跳 5 秒：抖音有事件通道后这里只是兜底（挂观察器、防掉线）；
+    // B站是 HTTP，几秒一次毫无压力。
+    this.dmTimer = setInterval(() => {
+      this.dmBeat().catch(() => {});
+    }, 5 * 1000);
+    // 刚启动别抢登录/初始化，等十几秒再开始看
+    setTimeout(() => this.dmBeat().catch(() => {}), 8 * 1000);
+  }
+
+  /**
+   * 把抖音的「新消息」事件通道挂上：单独一个聊天页停在主人会话上，
+   * 页面里的 MutationObserver 一变就回调 onDouyinPoke。
+   */
+  async armDmPush() {
+    if (this.dmArmBusy) return;
+    const owner = this.douyinOwner();
+    if (!owner.secUid) return;
+    this.dmArmBusy = true;
+    try {
+      const name = owner.name || (await this.douyinOwnerName().catch(() => ''));
+      if (!name) return;
+      // 不在这里判「已经挂好了」：watchDm 自己会判断，而且它还要把回调换成最新的这个
+      const res = await this.douyin.watchDm(name, (messages) => this.onDouyinPoke(messages, name)).catch(() => null);
+      if (res?.ok) {
+        this.dmArmFails = 0;
+        this.log?.info?.('stroll dm push armed', { thread: res.thread ?? name });
+      } else {
+        this.dmArmFails = Number(this.dmArmFails ?? 0) + 1;
+        this.log?.warn?.('stroll dm push arm failed', { code: res?.code, fails: this.dmArmFails });
+      }
+    } finally {
+      this.dmArmBusy = false;
+    }
+  }
+
+  /** 私信监听到底该不该干活：总开关、私信开关、平台开关都得是开的。 */
+  dmWatchOn(live = this.liveConfig() ?? {}) {
+    const enabled = (live.enabled ?? this.cfg.enabled) !== false;
+    const on = (live.dmWatch ?? this.cfg.dmWatch) !== false;
+    if (!enabled || !on) return false;
+    return (live.douyin ?? this.cfg.douyin) !== false || (live.bilibili ?? this.cfg.bilibili) !== false;
+  }
+
+  stopDmWatch() {
+    if (this.dmTimer) clearInterval(this.dmTimer);
+    this.dmTimer = null;
+    this.douyin.keepWarm?.(false);
+  }
+
+  /** 心跳：按设置里的开关和间隔决定这一拍要不要真去看。 */
+  async dmBeat() {
+    if (!this.running) return;
+    const live = this.liveConfig() ?? {};
+    if (!this.dmWatchOn(live)) {
+      // 主人在设置里关掉了：把后台页面放掉，别白占内存
+      this.douyin.keepWarm?.(false);
+      return;
+    }
+    const useDy = (live.douyin ?? this.cfg.douyin) !== false;
+    // 兜底：观察器没挂上（刚重启、页面被带跑、掉线重连）就补挂一次。
+    // 连不上时按 20s→40s→…→10min 退避，别在没登录的时候一直刷抖音。
+    if (useDy && !this.douyin.dmArmed?.()) {
+      const fails = Math.min(5, Number(this.dmArmFails ?? 0));
+      const gap = Math.min(10 * 60 * 1000, 20000 * 2 ** fails);
+      if (Date.now() - Number(this.dmArmAt ?? 0) > gap) {
+        this.dmArmAt = Date.now();
+        this.armDmPush().catch(() => {});
+      }
+    }
+    const sec = Math.max(3, Number(live.dmPollSec ?? this.cfg.dmPollSec ?? 5) || 5);
+    if (Date.now() - Number(this.dmLastAt ?? 0) < sec * 1000 - 800) return;
+    this.dmLastAt = Date.now();
+    await this.watchDms();
+  }
+
+  async watchDms() {
+    if (!this.running || this.dmBusy) return;
+    // 风险冷却分软硬：频率限流（-509/频繁）是软的，几分钟到半小时就恢复，
+    // 而且读私信的浏览操作不写任何东西，继续看没有风险——不能让它把主人的私信埋掉。
+    // 只有验证码/封禁这种硬风险才真的全停（那种状态下连读都可能出问题）。
+    const paused = this.policy.paused();
+    const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
+    if (paused.paused && !soft) return;
+    const live = this.liveConfig() ?? {};
+    const useBili = (live.bilibili ?? this.cfg.bilibili) !== false;
+    const useDy = (live.douyin ?? this.cfg.douyin) !== false;
+    this.dmBusy = true;
+    try {
+      const fresh = [];
+      if (useBili) fresh.push(...(await this.newBiliDm().catch(() => [])));
+      // 抖音已经走事件通道时就不必每 5 秒读一遍 DOM 了；但每 60 秒仍然对一次账，
+      // 万一观察器漏了（页面卡住、切走了），最多晚一分钟，而不是一直不响。
+      const dyArmed = !!this.douyin.dmArmed?.();
+      const sweep = !dyArmed || Date.now() - Number(this.dmSweepAt ?? 0) > 60 * 1000;
+      if (useDy && sweep) {
+        this.dmSweepAt = Date.now();
+        fresh.push(...(await this.newDouyinDm().catch(() => [])));
+      }
+      await this.pushDm(fresh);
+    } finally {
+      this.dmBusy = false;
+    }
+  }
+
+  /** 把「主人发私信了」这件事推给她。攒一批一起推，别一条一条地叫。 */
+  async pushDm(fresh) {
+    if (!fresh?.length) return false;
+    // 主人刚点过单：接下来三分钟她做的动作都算「主人让的」，不套她自己出门的节奏，
+    // 也不该因为给主人回私信就把后面的评论卡住（以前就是这里卡 90 秒）。
+    this.store.data.ownerAskAt = Date.now();
+    // 顺手把风控的连续计数清掉：主人重新开口，说明平台那边已经恢复了
+    if (Number(this.store.data.risk?.strikes ?? 0) > 0) this.store.data.risk.strikes = 0;
+    this.store.save();
+    const lines = fresh.map((x) => `${PLATFORM_NAMES[x.platform] ?? x.platform}·${x.who}：${x.text}`);
+    const body =
+      `主人刚给你发私信了：\n${lines.join('\n')}\n` +
+      '别等下次出门，也别先查 status/feed：现在就一句短的（1-2 句，像平时说话），' +
+      '直接 stroll_act action=dm 发出去（platform 照上面那个来；私信主人不占额度，也不用等批准）。' +
+      '连发几句的要一句一句都接住，别只回最后一条；带链接的把链接里的东西看一眼再说。';
+    const meta = { platform: fresh[0].platform, count: fresh.length };
+    // interrupt 最急（当场把她叫起来）；宿主不认这个值就退到 flush / debounce，别让消息掉地上
+    if (await this.push('stroll.reply', body, meta, 'interrupt')) return true;
+    if (await this.push('stroll.reply', body, meta, 'flush')) return true;
+    return this.push('stroll.reply', body, meta, 'debounce');
+  }
+
+  /**
+   * 抖音页面里的观察器报到「消息列表变了」：直接判是不是主人的新话，是就立刻推。
+   * 这条路径不经过任何轮询，抖音那边一更新 DOM 就到这儿（实测几百毫秒）。
+   */
+  async onDouyinPoke(messages, name) {
+    if (!this.running || !this.dmWatchOn()) return;
+    const paused = this.policy.paused();
+    const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
+    if (paused.paused && !soft) return;
+    const hit = this.douyinDmTail(messages, name);
+    if (!hit) return;
+    await this.pushDm([hit]);
+  }
+
+  /** B站私信：会话列表里主人那条的最新时间变了，就说明有新话。 */
+  async newBiliDm() {
+    const ownerUid = this.ownerId('bilibili');
+    if (!ownerUid) return [];
+    const sessions = await this.bili.dmSessions(8, { fresh: true }).catch(() => []);
+    const hit = sessions.find((s) => String(s.talkerId) === String(ownerUid));
+    if (!hit || !hit.fromThem || !hit.at) return [];
+    const seen = this.store.data.dmSeen?.bilibili ?? null;
+    if (seen && String(seen.at) === String(hit.at)) return [];
+    const old = Date.now() / 1000 - Number(hit.at) > 300;
+    // 会话预览只有最后一句，主人连着发好几条时会漏。顺手把末尾连着那几句都读出来。
+    const thread = await this.bili.dmThread(ownerUid, 12).catch(() => []);
+    const tail = [];
+    for (let i = thread.length - 1; i >= 0; i -= 1) {
+      if (String(thread[i].from) !== String(ownerUid)) break;
+      tail.unshift(thread[i]);
+    }
+    const body = tail.length ? tail.map((m) => m.text).join(' / ') : hit.body;
+    this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), bilibili: { at: hit.at, body } };
+    this.store.save();
+    // 第一次跑、或者这条已经放了好几分钟（上个版本的旧消息）：只记基线，不叫她
+    if (!seen || old) return [];
+    return [{ platform: 'bilibili', who: this.cfg.ownerName || '主人', text: body || '（发来一条非文字消息）' }];
+  }
+
+  /** 抖音私信：读会话末尾连着的那几句主人说的话。 */
+  async newDouyinDm() {
+    const owner = this.douyinOwner();
+    if (!owner.secUid) return [];
+    const name = owner.name || (await this.douyinOwnerName().catch(() => ''));
+    if (!name) {
+      // 没昵称就没法定位会话：与其乱读别人的私信，不如跳过，等主人点一次「绑定这个号」
+      this.log?.warn?.('stroll dm watch skipped: 还不知道主人抖音昵称');
+      return [];
+    }
+    const res = await this.douyin.peekThread(name, 8).catch(() => null);
+    if (!res?.ok || !res.messages?.length) return [];
+    const hit = this.douyinDmTail(res.messages, name);
+    return hit ? [hit] : [];
+  }
+
+  /**
+   * 从一段会话消息里判断「有没有主人还没被接住的新话」。
+   * 轮询和页面事件都走这里，保证两条路的去重口径一致。返回要推的条目或 null。
+   */
+  douyinDmTail(messages, name) {
+    const list = Array.isArray(messages) ? messages : [];
+    const tail = [];
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      if (list[i].from !== 'them') break;
+      tail.unshift(list[i]);
+    }
+    const fp = tail.map((m) => `${m.kind}:${m.text}`).join('|').slice(0, 300);
+    const seen = this.store.data.dmSeen?.douyin ?? null;
+    // 第一次跑：把当前尾巴记成基线。以前这里直接 return，基线一直为空，
+    // 于是「装好以后主人发的第一句」永远被当成基线吞掉——正是「发了没反应」。
+    if (!seen) {
+      this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: { fp, at: Date.now() } };
+      this.store.save();
+      return null;
+    }
+    if (!tail.length) {
+      // 末尾是我发的（说明已经接住了）：把指纹清掉，
+      // 否则主人过会儿再发一模一样的一句（「在吗」），指纹相同就被当成旧消息吞了。
+      if (seen.fp) {
+        this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: { fp: '', at: Date.now() } };
+        this.store.save();
+      }
+      return null;
+    }
+    if (seen.fp === fp) return null;
+    this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: { fp, at: Date.now() } };
+    this.store.save();
+    return {
+      platform: 'douyin',
+      who: name,
+      text: tail.map((m) => (m.url ? `${m.text}（${m.url}）` : m.text)).join(' / '),
+    };
+  }
+
   async push(type, text, meta = {}, trigger = 'debounce') {
-    if (!this.host) return;
+    if (!this.host) return false;
     try {
       await this.host.pushEvent(
         {
@@ -151,8 +414,10 @@ export class StrollWorld {
         },
         { trigger },
       );
+      return true;
     } catch (error) {
-      this.log?.warn?.('stroll push failed', { type, message: error?.message });
+      this.log?.warn?.('stroll push failed', { type, trigger, message: error?.message });
+      return false;
     }
   }
 
@@ -210,6 +475,31 @@ export class StrollWorld {
       selfDouyinId,
       sameAsSelf: (!!secUid && !!selfSecUid && secUid === selfSecUid) || sameHandle,
     };
+  }
+
+  /** 抖音主人昵称：评论里 @ 人要用昵称。没存过就现读一次主页，然后写回 state。 */
+  async douyinOwnerName() {
+    const owner = this.douyinOwner();
+    if (!owner.secUid) return '';
+    if (owner.name) return owner.name;
+    try {
+      const got = await this.douyin.ownerProfile(owner.secUid);
+      if (got?.name) {
+        this.store.data.douyinOwner = {
+          ...(this.store.data.douyinOwner ?? {}),
+          secUid: owner.secUid,
+          name: got.name,
+          at: Date.now(),
+        };
+        this.store.save();
+        return got.name;
+      }
+      this.log?.warn?.('stroll douyin owner name empty', { secUid: owner.secUid.slice(-8) });
+    } catch (error) {
+      // 读不到就算了：@ 会退化成纯文本，不该挡住评论本身
+      this.log?.warn?.('stroll douyin owner profile failed', { message: error?.message });
+    }
+    return '';
   }
 
   noteDouyinSelf(self) {
@@ -391,7 +681,7 @@ export class StrollWorld {
     if (action === 'open') return this.readOpen(args);
     if (action === 'inbox') return JSON.stringify(await this.inbox(args.platform, args.n));
     if (action === 'comments') {
-      const url = String(args.url ?? args.id ?? '').trim();
+      const url = String(args.url ?? args.id ?? args.target ?? '').trim();
       if (!url) return JSON.stringify({ ok: false, error: '给个 B站视频/动态/专栏链接。' });
       const data = await this.bili.commentsOf(url, clamp(args.n ?? 10, 1, 20));
       return JSON.stringify({ ok: true, ...data });
@@ -432,7 +722,7 @@ export class StrollWorld {
         draftId: args.draft_id ?? null,
       });
     }
-    const plan = await this.buildPlan(action, args);
+    const plan = await this.buildPlan(action, args, { byOwner: this.ownerNearby() });
     if (!plan.ok) return JSON.stringify(plan);
     if (args.preview === true || approvalFor(this.cfg, plan.action) === 'draft') {
       const draft = this.makeDraft(plan);
@@ -549,8 +839,8 @@ export class StrollWorld {
     }
     try {
       if (this.cfg.bilibili) inbox = await this.bili.inbox(3);
-      // 抖音私信要用浏览器抓，brief 里只用已经热着的缓存，别让主人等十秒
-      if (this.cfg.douyin && this._dyInbox?.length && Date.now() - this._dyInboxAt < 10 * 60 * 1000) {
+      // 抖音私信要用浏览器抓，brief 里只用已经热着的缓存（一分钟内），别让主人等十秒
+      if (this.cfg.douyin && this._dyInbox?.length && Date.now() - this._dyInboxAt < 60 * 1000) {
         inbox = inbox.concat(this._dyInbox).sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0)).slice(0, 5);
       }
       if (inbox.length) this.inboxCache = inbox;
@@ -594,11 +884,12 @@ export class StrollWorld {
     if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
     const items = await this.douyin.feed(clamp(n ?? 6, 1, 8));
     this.policy.noteRead('douyin');
-    return { ok: true, platform: p, items: items.map(({ _score, ...rest }) => rest) };
+    return { ok: true, platform: p, items: items.map(({ _score, ...rest }) => ({ kind: 'video', ...rest })) };
   }
 
   async readOpen(args) {
-    const raw = String(args.url ?? args.id ?? '').trim();
+    // target 是 act 那边的叫法，她很容易顺手带过来——两个都认，少一次失败
+    const raw = String(args.url ?? args.id ?? args.target ?? '').trim();
     if (!raw) return JSON.stringify({ ok: false, error: '给个链接或 ID。' });
     const platform = this.inferPlatform(raw, args.platform);
     const frames = clamp(Number(args.frames ?? this.cfg.framesPerOpen ?? 0), 0, 3);
@@ -690,11 +981,15 @@ export class StrollWorld {
     return JSON.stringify({ ok: false, error: '只认 B站/抖音链接。' });
   }
 
-  /** 抖音私信要开浏览器，慢；面板每两分钟刷一次，缓存八分钟，别每次都开一遍。 */
-  async douyinInbox() {
+  /**
+   * 抖音私信要开浏览器，慢；面板会频繁刷，所以留一点缓存。
+   * 但别留太长：以前缓存三分钟、brief 里还用十分钟前的快照，
+   * 主人连着发好几句，她读到的还是上一轮那一句——看起来就是「只收到一条」。
+   */
+  async douyinInbox(force = false) {
     if (!this.cfg.douyin) return [];
-    const ttl = 8 * 60 * 1000;
-    if (this._dyInbox && Date.now() - this._dyInboxAt < ttl) return this._dyInbox;
+    const ttl = 20 * 1000;
+    if (!force && this._dyInbox && Date.now() - this._dyInboxAt < ttl) return this._dyInbox;
     try {
       const items = await this.douyin.inbox(5);
       this._dyInbox = items;
@@ -711,11 +1006,20 @@ export class StrollWorld {
     if (p === 'bilibili') {
       if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
       const items = await this.bili.inbox(clamp(n ?? 6, 1, 8));
-      if (items.length) this.inboxCache = items;
+      // 只换掉 B站那部分，别把抖音的缓存冲掉：两边共用这一份 inboxCache
+      if (items.length) {
+        this.inboxCache = [...items, ...(this.inboxCache ?? []).filter((x) => x.platform !== 'bilibili')];
+      }
       return { ok: true, platform: p, items };
     }
     if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
-    return { ok: true, platform: p, items: (await this.douyinInbox()).slice(0, clamp(n ?? 5, 1, 8)) };
+    const items = (await this.douyinInbox()).slice(0, clamp(n ?? 5, 1, 8));
+    // 抖音这几条也要进 inboxCache：面板点「回私信」时是拿 id 回查的，
+    // 以前只写 B站那份，导致抖音私信一点就提示「消息已经刷新掉了」。
+    if (items.length) {
+      this.inboxCache = [...items, ...(this.inboxCache ?? []).filter((x) => x.platform !== 'douyin')];
+    }
+    return { ok: true, platform: p, items };
   }
 
   async login(platform) {
@@ -741,6 +1045,8 @@ export class StrollWorld {
         tries += 1;
         if (tries > 60 || !this.douyin.context) {
           clearInterval(timer);
+          // 三分钟没扫完就收窗，别让一个有头窗口永远挂在桌面上
+          if (tries > 60) await this.douyin.loginWindowClose().catch(() => {});
           return;
         }
         try {
@@ -1352,6 +1658,19 @@ export class StrollWorld {
     return this.replyDm(item?.mid, text);
   }
 
+  /** 抖音私信：有会话就直接在聊天页回（比去主页点「私信」快十几秒），没有才回退到主页。 */
+  async douyinDmFast(secUid, text) {
+    const name = this.douyinOwner().name || (await this.douyinOwnerName().catch(() => ''));
+    if (name) {
+      const ok = await this.douyin
+        .replyDm(name, String(text).slice(0, 300))
+        .then(() => true)
+        .catch(() => false);
+      if (ok) return { ok: true, sent: true, via: 'chat' };
+    }
+    return await this.douyin.dm(secUid, text);
+  }
+
   /** 抖音私信：走页面操作，慢一点，也不占她的额度。 */
   async replyDouyinDm(item, text) {
     const body = String(text ?? '').trim();
@@ -1493,11 +1812,15 @@ export class StrollWorld {
     return 'bilibili';
   }
 
-  async buildPlan(action, args) {
+  async buildPlan(action, args, { byOwner = false } = {}) {
     const platform = this.inferPlatform(args.target ?? args.url ?? '', args.platform);
     const targetRaw = String(args.target ?? args.url ?? '').trim();
     const text = String(args.text ?? '').trim();
     const mentionOwner = args.mention_owner === true;
+    // 对话里点单的动作只防连点，不套她自己出门的 20 秒节奏。
+    // 这一点以前漏了：回完私信紧接着评论，永远撞 90 秒的 TOO_FAST，
+    // 表现就是「每次让她评论都要等一两分钟」。
+    const asked = byOwner || this.policy.ownerActive();
 
     if (!this.cfg.enabled) return { ok: false, error: '摸鱼 已停用。' };
     if (platform === 'bilibili' && !this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
@@ -1512,7 +1835,7 @@ export class StrollWorld {
         target = parseBvid(targetRaw);
         if (!target) return { ok: false, error: '给个 BV 号/链接。' };
       }
-      const check = this.policy.check(action, platform, target, { quotaAction: 'like' });
+      const check = this.policy.check(action, platform, target, { quotaAction: 'like', userInitiated: asked });
       if (!check.ok) return check;
       return { ok: true, action, platform, target, text: '' };
     }
@@ -1539,7 +1862,7 @@ export class StrollWorld {
         target = await this.douyin.idOf(targetRaw);
         if (!target) return { ok: false, error: '抖音关注要给视频链接/ID（从视频页点）。' };
       }
-      const check = this.policy.check(action, platform, target, { quotaAction: 'follow' });
+      const check = this.policy.check(action, platform, target, { quotaAction: 'follow', userInitiated: asked });
       if (!check.ok) return check;
       return { ok: true, action, platform, target, text: '' };
     }
@@ -1549,7 +1872,7 @@ export class StrollWorld {
       if (!this.cfg.allowSave) return { ok: false, error: '稍后再看关着。' };
       const bvid = parseBvid(targetRaw);
       if (!bvid) return { ok: false, error: '给个 BV 号/链接。' };
-      const check = this.policy.check('save', platform, bvid, { quotaAction: 'save' });
+      const check = this.policy.check('save', platform, bvid, { quotaAction: 'save', userInitiated: asked });
       if (!check.ok) return check;
       return { ok: true, action, platform, target: bvid, text: '' };
     }
@@ -1567,7 +1890,7 @@ export class StrollWorld {
         if (action === 'reply') return { ok: false, error: '抖音楼中楼回复暂未开放；先发一条评论。' };
         target = await this.douyin.idOf(targetRaw);
         if (!target) return { ok: false, error: '给个抖音视频链接/ID。' };
-        const check = this.policy.check(action, platform, target, { quotaAction: 'comment' });
+        const check = this.policy.check(action, platform, target, { quotaAction: 'comment', userInitiated: asked });
         if (!check.ok) return check;
         return { ok: true, action, platform, target, text, mentionOwner };
       }
@@ -1616,7 +1939,7 @@ export class StrollWorld {
         // 一条评论只回一次；同一内容下的不同评论互不影响
         dedupeKey = `${platform}:${action}:${target}:r${rpid}`;
       }
-      const check = this.policy.check(action, platform, target, { quotaAction: 'comment', dedupeKey });
+      const check = this.policy.check(action, platform, target, { quotaAction: 'comment', dedupeKey, userInitiated: asked });
       if (!check.ok) return check;
       return { ok: true, action, platform, target, text, mentionOwner, root, parent, kind, dynamicId, articleId, oid, commentType, dedupeKey };
     }
@@ -1626,7 +1949,7 @@ export class StrollWorld {
       if (!this.cfg.allowPost) return { ok: false, error: '发动态关着。' };
       if ([...text].length < 4) return { ok: false, error: '正文太短。' };
       if ([...text].length > 2000) return { ok: false, error: '正文最多 2000 字。' };
-      const check = this.policy.check('post', platform, 'dynamic', { quotaAction: 'post' });
+      const check = this.policy.check('post', platform, 'dynamic', { quotaAction: 'post', userInitiated: asked });
       if (!check.ok) return check;
       return { ok: true, action, platform, target: 'dynamic', text, mentionOwner };
     }
@@ -1775,11 +2098,14 @@ export class StrollWorld {
               parent: plan.parent,
               mentionOwner: plan.mentionOwner,
             })
-          : await this.douyin.comment(target, text);
+          : await this.douyin.comment(target, text, {
+              // 抖音 @ 人要用昵称（sec_uid 不行）；没存昵称就现读一次
+              mention: plan.mentionOwner ? await this.douyinOwnerName() : '',
+            });
       } else if (action === 'post') {
         result = await this.bili.post({ text, mentionOwner: plan.mentionOwner });
       } else if (action === 'dm') {
-        result = platform === 'bilibili' ? await this.bili.dm(target, text) : await this.douyin.dm(target, text);
+        result = platform === 'bilibili' ? await this.bili.dm(target, text) : await this.douyinDmFast(target, text);
       } else {
         return { ok: false, code: 'UNKNOWN_ACTION', error: '不认识的动作。' };
       }
@@ -1788,6 +2114,8 @@ export class StrollWorld {
         quotaAction: this.capAction(action),
         countQuota: !plan.free,
         dedupeKey: plan.free ? '' : plan.dedupeKey,
+        // free：回主人私信只算聊天，不占公开动作的节奏位
+        free: !!plan.free,
         text,
         title: this.titleOf(platform, target),
         kind: plan.kind ?? result?.kind,
@@ -1825,7 +2153,10 @@ export class StrollWorld {
       return `${p} ${what}成功`;
     }
     if (action === 'comment' || action === 'reply') {
-      if (platform === 'douyin' && result?.queued) return '抖音 评论发出去了，评论区暂时没刷出来，可能审核中';
+      if (platform === 'douyin' && result?.queued) {
+        const tail = result.mentioned === true ? '，@ 已生效' : result.mentioned === false ? '，@ 没生效' : '';
+        return `抖音 评论发出去了，评论区暂时没刷出来，可能审核中${tail}`;
+      }
     }
     if (action === 'comment' || action === 'reply') {
       const verb = action === 'reply' ? '回复' : '评论';
@@ -1877,6 +2208,9 @@ export class StrollWorld {
       avoid: this.cfg.avoid,
       tokenDailyBudget: this.cfg.tokenDailyBudget,
       risk: this.store.data.risk,
+      // 风控拦截力度：off 只记账不拦人（默认）/ light 只拦验证码 / strict 旧的长冷却
+      riskGuard: this.cfg.riskGuard ?? 'off',
+      riskGuardPaused: this.policy.paused(),
       pending: this.store.pendingDrafts().length,
     };
   }

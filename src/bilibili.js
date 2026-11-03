@@ -8,6 +8,7 @@ import {
   parseCvid,
   parseDynamicId,
   parseKeywords,
+  stripAtName,
   stripTags,
   truncate,
   uuid,
@@ -760,6 +761,8 @@ export class Bilibili {
       root: String(r.root ?? 0),
       parent: String(r.parent ?? 0),
       at: Number(r.ctime ?? 0),
+      // 评论里真正 @ 到的人（不是正文里那个 @ 字符）
+      mentions: (r.content?.members ?? []).map((m) => String(m.mid ?? '')),
     }));
   }
 
@@ -829,13 +832,14 @@ export class Bilibili {
   }
 
   /** 私信会话列表。只认文字消息（msg_type 1），系统卡片和推荐位不混进来。 */
-  async dmSessions(limit = 8) {
+  async dmSessions(limit = 8, { fresh = false } = {}) {
     const data = await this.request(
       '/session_svr/v1/session_svr/get_sessions',
       { session_type: 1, group_id: 0, mobi_app: 'web', build: 0, platform: 'web' },
       {
         base: 'https://api.vc.bilibili.com',
-        cacheMs: 30 * 1000,
+        // 监听私信时不能吃缓存：30 秒的旧数据看起来就是「收不到消息」
+        cacheMs: fresh ? 0 : 30 * 1000,
         referer: 'https://message.bilibili.com/',
         origin: 'https://message.bilibili.com',
       },
@@ -843,24 +847,29 @@ export class Bilibili {
     const list = (data.session_list ?? [])
       .map((s) => {
         const last = s.last_msg ?? {};
+        const msgType = Number(last.msg_type ?? 0);
         let body = '';
         try {
           body = JSON.parse(last.content ?? '{}').content ?? '';
         } catch {
           body = '';
         }
+        body = stripTags(body);
+        // 主人发的是图片/表情/分享时正文是空的：以前会被过滤掉，
+        // 看起来就是「发了消息她没反应」。这里给个占位，别把会话整条丢掉。
+        if (!body && msgType > 1) body = msgType === 2 ? '[图片]' : msgType === 3 ? '[表情]' : '[分享]';
         return {
           talkerId: String(s.talker_id ?? ''),
           unread: Number(s.unread_count ?? 0),
           at: Number(last.timestamp ?? 0),
-          msgType: Number(last.msg_type ?? 0),
+          msgType,
           senderUid: String(last.sender_uid ?? ''),
           seqno: String(s.max_seqno ?? ''),
-          body: stripTags(body),
+          body,
           fromThem: String(last.sender_uid ?? '') === String(s.talker_id ?? ''),
         };
       })
-      .filter((x) => x.talkerId && x.msgType === 1 && x.at > 0)
+      .filter((x) => x.talkerId && x.msgType > 0 && x.at > 0)
       .sort((a, b) => b.at - a.at)
       .slice(0, Math.max(1, limit));
     return list;
@@ -1126,11 +1135,25 @@ export class Bilibili {
 
     const ownerUid = String(this.cfg.ownerUid ?? '').trim();
     let mention = '';
+    let bodyText = String(text ?? '');
+    const atNameToMid = {};
     if (mentionOwner && ownerUid) {
       const name = await this.ownerName(ownerUid);
-      if (name) mention = `@${name} `;
+      if (name) {
+        // 正文里如果已经写了「@昵称」，再前置一个就成了 @ 两次（实测 2026-11 动态里
+        // 就是「@小月月 … @小月月还在玩」）。剥得干净才前置；正文本来就只是 @昵称 的，
+        // 不前置、靠下面的 at_name_to_mid 把正文里那个变成真 @。
+        const clean = stripAtName(bodyText, name);
+        if (clean) {
+          bodyText = clean;
+          mention = `@${name} `;
+        }
+        // 关键：光在正文里写 @昵称 只是纯文本，B站不会真的提到人、也不会发通知。
+        // 必须随请求带上 at_name_to_mid（{"昵称": mid}），服务端才会把它变成真 @。
+        atNameToMid[name] = Number(ownerUid);
+      }
     }
-    const message = `${mention}${text}`.slice(0, Number(this.cfg.commentMaxChars ?? 120) + 20);
+    const message = `${mention}${bodyText}`.slice(0, Number(this.cfg.commentMaxChars ?? 120) + 20);
     const body = {
       oid: target.oid,
       type: target.type,
@@ -1138,6 +1161,7 @@ export class Bilibili {
       plat: 1,
       ...(root ? { root: String(root) } : {}),
       ...(parent ? { parent: String(parent) } : {}),
+      ...(Object.keys(atNameToMid).length ? { at_name_to_mid: JSON.stringify(atNameToMid) } : {}),
     };
     const data = await this.request('/x/v2/reply/add', body, {
       post: true,
@@ -1147,13 +1171,19 @@ export class Bilibili {
     });
     const rpid = String(data.rpid ?? '');
     const members = data.reply?.content?.members ?? [];
-    const mentioned = !mentionOwner || !ownerUid ? null : members.some((m) => String(m.mid ?? '') === ownerUid);
+    let mentioned = null;
+    if (mentionOwner && ownerUid) {
+      // add 接口的响应不一定带 members，先看，看不到就发布后回查一次
+      mentioned = members.some((m) => String(m.mid ?? '') === ownerUid) ? true : null;
+    }
     let visibility = 'unknown';
     if (rpid) {
       await new Promise((r) => setTimeout(r, 1200));
       try {
         const pub = await this.replyList(target.type, target.oid, 20, 0, 0);
-        visibility = pub.some((r) => r.rpid === rpid) ? 'public' : 'unknown';
+        const mine = pub.find((r) => r.rpid === rpid);
+        visibility = mine ? 'public' : 'unknown';
+        if (mentioned === null && mine) mentioned = (mine.mentions ?? []).includes(ownerUid);
       } catch {
         visibility = 'unknown';
       }
@@ -1176,13 +1206,19 @@ export class Bilibili {
   async post({ text, mentionOwner = false }) {
     const ownerUid = String(this.cfg.ownerUid ?? '').trim();
     const contents = [];
+    let bodyText = String(text ?? '');
     if (mentionOwner && ownerUid) {
       const name = await this.ownerName(ownerUid);
       if (name) {
-        contents.push({ raw_text: `@${name} `, type: 2, biz_id: ownerUid });
+        // 同上：正文自带「@昵称」时先剥掉，否则动态里会出现两个 @。
+        const clean = stripAtName(bodyText, name);
+        if (clean) {
+          bodyText = clean;
+          contents.push({ raw_text: `@${name} `, type: 2, biz_id: ownerUid });
+        }
       }
     }
-    contents.push({ raw_text: text, type: 1, biz_id: '' });
+    contents.push({ raw_text: bodyText, type: 1, biz_id: '' });
     const body = {
       dyn_req: {
         content: { contents },

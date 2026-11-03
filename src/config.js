@@ -29,7 +29,8 @@ export const DEFAULTS = {
 
   quietFrom: 23,
   quietTo: 8,
-  minGapSeconds: 90,
+  /** 她自己出门时的动作间隔；主人当场让她做的事不走这个数（只防连点）。 */
+  minGapSeconds: 20,
 
   /** 0 = 不自己出门；默认一天五次，比较像会自己刷手机的人。 */
   autoSessionsPerDay: 5,
@@ -52,6 +53,15 @@ export const DEFAULTS = {
   /** 一起看：至少隔多久才主动说一句（秒）。 */
   watchSpeakSec: 60,
 
+  /** 私信监听：主人在抖音/B站发来就马上推给她回。 */
+  dmWatch: true,
+  /**
+   * 多久兜底看一次私信（秒）。
+   * 抖音现在走页面事件通道（新消息一进 DOM 就回调），轮询只是防掉线的兜底，
+   * 所以可以设得比过去小很多：抖音那边几乎不花代价，B站是 HTTP 也就几十毫秒。
+   */
+  dmPollSec: 5,
+
   /** 复用应用里已有的 B站登录资料（通常是小号/桌宠号）。 */
   sharedBiliCookie: true,
   /** 每天给这个小家伙的模型预算，超了就只读不主动出门。 */
@@ -60,6 +70,8 @@ export const DEFAULTS = {
   newAccountRamp: false,
   /** 她开始看东西时怎么提醒你：off / panel（面板浮条）/ chat（顺便在对话里说一句）。 */
   watchNotify: 'panel',
+  /** 风控力度：off 只记账不拦人（默认）/ light 只在验证码时停 30 分钟 / strict 旧的长时间冷却。 */
+  riskGuard: 'off',
   riskPauseHours: 48,
 };
 
@@ -204,11 +216,12 @@ const QUOTA = {
       },
       [P + 'minGapSeconds']: {
         type: 'integer',
-        title: '两次动作至少间隔',
-        description: '太快像机器，90 秒起步比较稳。',
-        minimum: 30,
+        title: '她自己多久能动一次',
+        description: '只约束她自己出门逛的时候；你在对话里让她做的事只防连点，不受这个限制。',
+        minimum: 10,
         maximum: 600,
         'x-suffix': ' 秒',
+        'x-hot': true,
       },
       [P + 'sessionMaxItems']: {
         type: 'integer',
@@ -340,10 +353,18 @@ const ADVANCED = {
         title: '新号保护',
         description: '前 3 天额度打五折，4–7 天八折，之后恢复。老号可以关掉。',
       },
+      [P + 'riskGuard']: {
+        type: 'string',
+        title: '风控拦截力度',
+        description: 'off＝只记一笔、不拦任何动作（推荐，限流本来几十分钟就自己好）；light＝只有要验证码时停 30 分钟；strict＝旧的长时间冷却。',
+        enum: ['off', 'light', 'strict'],
+        'x-options': ['off', 'light', 'strict'],
+        'x-labels': { off: '不拦（推荐）', light: '只在验证码时停', strict: '严格' },
+      },
       [P + 'riskPauseHours']: {
         type: 'integer',
-        title: '风控后暂停多久',
-        description: '遇到验证/412/频繁提示时，停写这么久。',
+        title: '严格模式停多久',
+        description: '只在「风控拦截力度＝严格」时生效。',
         minimum: 1,
         maximum: 168,
         'x-suffix': ' 小时',
@@ -352,7 +373,37 @@ const ADVANCED = {
   },
 };
 
-export const CONFIG_GROUPS = [BASIC, QUOTA, INTERACT, ADVANCED];
+/** 私信：主人发来就接住，不用等她下次出门。 */
+const MESSAGES = {
+  id: 'world:stroll-messages',
+  owner: 'world:stroll',
+  schema: {
+    type: 'object',
+    title: '私信',
+    description: '你给她发私信，她能不能马上回。抖音要常驻一个后台页面。',
+    properties: {
+      [P + 'dmWatch']: {
+        type: 'boolean',
+        title: '私信马上回',
+        description:
+          '开着时每隔一会儿看一眼你和她的私信，你一发就推给她回，不用等她下次出门。关掉就只能等她主动去查。',
+        'x-hot': true,
+      },
+      [P + 'dmPollSec']: {
+        type: 'integer',
+        title: '多久看一次私信',
+        description:
+          '抖音有新消息时页面会立刻通知她（1-2 秒），这个间隔只是掉线时的兜底。默认 5 秒；嫌吵可以调到 15-30 秒。',
+        minimum: 3,
+        maximum: 300,
+        'x-suffix': ' 秒',
+        'x-hot': true,
+      },
+    },
+  },
+};
+
+export const CONFIG_GROUPS = [BASIC, QUOTA, MESSAGES, INTERACT, ADVANCED];
 
 /** 旧引用兼容：第一组即基础组。 */
 export const CONFIG_GROUP = BASIC;
@@ -376,7 +427,8 @@ export const POLICY_FIELDS = {
   dailySaves: { type: 'int', min: 0, max: 10 },
   quietFrom: { type: 'int', min: 0, max: 23 },
   quietTo: { type: 'int', min: 0, max: 23 },
-  minGapSeconds: { type: 'int', min: 30, max: 600 },
+  minGapSeconds: { type: 'int', min: 10, max: 600 },
+  riskGuard: { type: 'enum', values: ['off', 'light', 'strict'] },
   autoSessionsPerDay: { type: 'int', min: 0, max: 10 },
   autoGapMinutes: { type: 'int', min: 30, max: 360 },
   sessionMaxItems: { type: 'int', min: 3, max: 12 },
@@ -387,6 +439,8 @@ export const POLICY_FIELDS = {
   background: { type: 'boolean' },
   watchSpeakSec: { type: 'int', min: 20, max: 600 },
   watchPollSec: { type: 'int', min: 5, max: 120 },
+  dmWatch: { type: 'boolean' },
+  dmPollSec: { type: 'int', min: 3, max: 300 },
   tokenDailyBudget: { type: 'int', min: 1000, max: 50000 },
   commentMaxChars: { type: 'int', min: 20, max: 300 },
   riskPauseHours: { type: 'int', min: 1, max: 168 },

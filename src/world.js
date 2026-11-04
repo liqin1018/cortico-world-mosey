@@ -4,19 +4,26 @@ import { fileURLToPath } from 'node:url';
 import { Store } from './store.js';
 import { Policy, approvalFor, clampText } from './policy.js';
 import { Bilibili } from './bilibili.js';
-import { DouyinBrowser, secUidOf } from './douyin.js';
+import { DouyinBrowser, secUidOf, stripLeadingFakeAt } from './douyin.js';
+import { StickerBook } from './stickers.js';
 import { TOOL_DECLS, EVENT_DECLS } from './tools.js';
 import { CONFIG_GROUPS, validatePolicyPatch } from './config.js';
 import {
   dayKey,
   hourOf,
+  looksBrokenPath,
   nowIso,
+  openFolder,
   openInBrowser,
   parseBvid,
   parseCvid,
   parseDouyinId,
   parseDynamicId,
+  pickFolder,
   platformUrl,
+  repairMojibakePath,
+  stripAtName,
+  stripAtPlaceholder,
   truncate,
 } from './util.js';
 
@@ -29,6 +36,7 @@ const ACTION_NAMES = {
   reply: '回复',
   post: '发动态',
   dm: '私信',
+  sticker: '表情包',
   save: '稍后再看',
 };
 
@@ -66,7 +74,8 @@ export class StrollWorld {
     this.store.data.autoSessions ??= {};
     this.policy = new Policy({ store: this.store, cfg, timeZone: this.timeZone });
     this.bili = new Bilibili({ dataDir, cfg, log, policy: this.policy, store: this.store });
-    this.douyin = new DouyinBrowser({ dataDir, cfg, log, policy: this.policy });
+    this.stickers = new StickerBook({ dataDir, log });
+    this.douyin = new DouyinBrowser({ dataDir, cfg, log, policy: this.policy, stickers: this.stickers });
     // 扫码成功后顺手记下「现在登的是哪个抖音号」，面板要显示，也要防「给自己发私信」
     this.douyin.onSelf = (self) => this.noteDouyinSelf(self);
     this.timer = null;
@@ -91,6 +100,11 @@ export class StrollWorld {
     this.dmArmAt = 0;
     this.dmArmFails = 0;
     this.dmSweepAt = 0;
+    /** 群聊观察器：挂的时候防并发，以及上次尝试的时间（失败退避用）。 */
+    this.groupArmBusy = false;
+    this.groupArmAt = 0;
+    /** 自动识别出来的群名缓存：{ at, names }。10 分钟刷一次，dmBeat 不会反复读页面。 */
+    this.groupAuto = { at: 0, names: [] };
     /** 上一次推「该出门溜达了」的时间：那个窗口里她做的动作算自己出门，按 20 秒节奏。 */
     this.autoWalkAt = 0;
     this.running = false;
@@ -214,9 +228,213 @@ export class StrollWorld {
     }
   }
 
+  /**
+   * 要盯的抖音群。
+   *
+   * 抖音的群如果没起名，会话列表里显示的是成员名拼起来的「A, B, C」——
+   * 这种标题本身带逗号，所以配置里那条既可能是「一个群名」也可能是「两个群名」，
+   * 光靠分隔符分不清。做法是：把配置切成片段，拿去和自动识别出的真实群名比对，
+   * 命中的用真实群名；一个都没命中才把片段当成群名直接用（手填的场合）。
+   */
+  groupNames() {
+    const raw = String(this.cfg.douyinGroups ?? '').trim();
+    const detected = (this.groupAuto?.names ?? []).slice(0, 4);
+    if (!raw) return detected.slice(0, 2);
+    const fragments = raw
+      .split(/[,，、;；\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const hit = [];
+    // 整条配置先当成一个群名比一次（群名自带逗号时这一步就命中）
+    const whole = detected.find((n) => this.sameGroup(n, raw));
+    if (whole) hit.push(whole);
+    for (const f of fragments) {
+      const m = detected.find((n) => this.sameGroup(n, f));
+      if (m && !hit.includes(m)) hit.push(m);
+    }
+    if (hit.length) return hit.slice(0, 2);
+    // 还没识别到群（或手填的名字对不上）：先按片段当群名，挂载时会再核一次
+    return fragments.slice(0, 2);
+  }
+
+  /** 群名比较：忽略空白和大小写，允许「包含」——这样她只写「小月月」也能对上。 */
+  sameGroup(a, b) {
+    const norm = (s) =>
+      String(s ?? '')
+        .replace(/[\s\u3000]+/g, '')
+        .replace(/\(\d+\)$|（\d+）$/, '')
+        .toLowerCase();
+    const x = norm(a);
+    const y = norm(b);
+    if (!x || !y) return false;
+    return x === y || x.includes(y) || y.includes(x);
+  }
+
+  /** 群监听的开关 + 平台开关是否都允许。 */
+  groupWatchOn(live = this.liveConfig() ?? {}) {
+    if (live.groupWatch === false || this.cfg.groupWatch === false) return false;
+    if ((live.douyin ?? this.cfg.douyin) === false) return false;
+    return true;
+  }
+
+  /**
+   * 自动认出她在哪些群里：会话列表里 `kind === 'group'` 的那些。
+   * 结果缓存在内存里（默认 10 分钟），dmBeat 每 5 秒一拍不会反复去读页面。
+   */
+  async resolveGroups(force = false) {
+    if (!this.groupWatchOn()) return [];
+    const ttl = 10 * 60 * 1000;
+    const cache = this.groupAuto ?? { at: 0, names: [], next: 0 };
+    // next 是显式的下次可重试时间；老缓存只有 at，就按 at + 10 分钟算
+    const nextAt = Number(cache.next ?? 0) || Number(cache.at ?? 0) + ttl;
+    if (!force && Date.now() < nextAt) return this.groupNames();
+    const res = await this.douyin.listThreads().catch(() => null);
+    if (!res?.ok) {
+      // 读不到（没登录 / 页面还没起来）：留个 2 分钟的重试窗口，
+      // 不然 dmBeat 每 5 秒就会去拉一次会话列表，白白折腾抖音。
+      this.groupAuto = { at: cache.at ?? 0, names: cache.names ?? [], next: Date.now() + 2 * 60 * 1000 };
+      return this.groupNames();
+    }
+    const names = (res.threads ?? [])
+      .filter((t) => t.kind === 'group')
+      .map((t) => t.name)
+      .slice(0, 2);
+    this.groupAuto = { at: Date.now(), names, next: Date.now() + ttl };
+    if (names.length && !(cache.names ?? []).length) this.log?.info?.('stroll groups detected', { groups: names });
+    return this.groupNames();
+  }
+
+  /** 把要盯的群各挂一个观察器（每个群一个后台 tab，跟私信同一个机制）。 */
+  async armGroupPush() {
+    if (this.groupArmBusy) return;
+    if (!this.groupWatchOn()) return;
+    const names = await this.resolveGroups().catch(() => []);
+    if (!names.length) return;
+    this.groupArmBusy = true;
+    try {
+      for (const name of names) {
+        if (this.douyin.groupArmed?.(name)) continue;
+        const res = await this.douyin.watchGroup(name, (messages) => this.onGroupPoke(messages, name)).catch(() => null);
+        if (res?.ok) {
+          this.log?.info?.('stroll group watch armed', { group: name });
+          await this.seedGroupBaseline(name).catch(() => {});
+        } else {
+          this.log?.warn?.('stroll group watch failed', { group: name, code: res?.code });
+        }
+      }
+    } finally {
+      this.groupArmBusy = false;
+    }
+  }
+
+  /** 一条消息的身份，用来做「上次看到的是哪条」的锚点。 */
+  msgKey(m) {
+    return `${m?.who ?? ''}:${m?.kind ?? ''}:${m?.text ?? ''}`;
+  }
+
+  /** 末尾连着的那几句（都是对方说的），最多 cap 条。 */
+  dmTailOf(messages, cap = 4) {
+    const tail = [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].from !== 'them') break;
+      tail.unshift(messages[i]);
+      if (tail.length >= cap) break;
+    }
+    return tail;
+  }
+
+  fpOf(tail) {
+    return tail.map((m) => this.msgKey(m)).join('|').slice(0, 300);
+  }
+
+  /**
+   * 群消息的「新增内容」。
+   *
+   * 以前只按「末尾一路往前收，遇到自己发的就停」来取尾巴。群里根本没有自己发的消息，
+   * 于是一条新话会把整个群历史当成新消息全推一遍。
+   *
+   * 现在用「上一屏见过哪些消息」当边界：从最新的往前收，一碰到见过的就停。
+   * 存的是 key 的集合而不是单条锚点，这样即便消息列表被虚拟化裁剪、
+   * 或者顺序抖动，也不会把旧话重新当成新话。
+   */
+  groupTailFp(messages, seen = null) {
+    const list = Array.isArray(messages) ? messages : [];
+    const last = list.length ? this.msgKey(list[list.length - 1]) : '';
+    const known = new Set(seen?.tail ?? []);
+    const tail = [];
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const m = list[i];
+      // 自己说的话就是边界：前面那些更旧的不可能还没被接住
+      if (m.from !== 'them') break;
+      if (known.has(this.msgKey(m))) break;
+      tail.unshift(m);
+      if (tail.length >= 6) break;
+    }
+    return {
+      tail,
+      fp: this.fpOf(tail),
+      last,
+      // 记下这一屏都见过什么，下一拍据此判断「新」在哪里
+      tailKeys: list.slice(-8).map((m) => this.msgKey(m)),
+    };
+  }
+
+  /**
+   * 刚挂上观察器时先把当前末尾记成基线。
+   * 不这么做的话，进群之后的第一条消息会被当成「基线」吞掉——表现就是「她怎么不理」。
+   */
+  async seedGroupBaseline(name) {
+    const slot = this.douyin.groupPages?.get?.(name);
+    const page = slot?.page;
+    if (!page || page.isClosed()) return;
+    const messages = await this.douyin.readGroupMessages(page, 10).catch(() => []);
+    if (!messages.length) return;
+    const { fp, last, tailKeys } = this.groupTailFp(messages);
+    this.store.data.dmSeen = {
+      ...(this.store.data.dmSeen ?? {}),
+      groups: { ...(this.store.data.dmSeen?.groups ?? {}), [name]: { fp, last, tail: tailKeys, at: Date.now() } },
+    };
+    this.store.save();
+  }
+
+  /** 群里有人说话：跟私信走同一套去重和推送，只是多带群名和发言人。 */
+  async onGroupPoke(messages, group) {
+    if (!this.running || !this.dmWatchOn() || !messages?.length) return;
+    const paused = this.policy.paused();
+    const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
+    if (paused.paused && !soft) return;
+    const seen = this.store.data.dmSeen?.groups?.[group] ?? null;
+    const saveSeen = (value) => {
+      this.store.data.dmSeen = {
+        ...(this.store.data.dmSeen ?? {}),
+        groups: { ...(this.store.data.dmSeen?.groups ?? {}), [group]: value },
+      };
+      this.store.save();
+    };
+    const { tail, fp, last, tailKeys } = this.groupTailFp(messages, seen);
+    if (!seen) {
+      // 第一次看到这个群：把当前这一屏记成基线，别把历史消息全推一遍
+      saveSeen({ fp, last, tail: tailKeys, at: Date.now() });
+      return;
+    }
+    // 最后一条没变 = 没有新消息（页面上别的地方抖了一下，不算）
+    if (seen.last && seen.last === last) return;
+    // 有新消息就记下这一屏。哪怕新话全是自己发的（tail 空）也要更新，
+    // 否则下次会把这几条自己的话当成别人的新消息推给她。
+    saveSeen({ fp, last, tail: tailKeys, at: Date.now() });
+    if (!tail.length) return;
+    const lines = tail.map((m) => `${m.who || '有人'}：${m.url ? `${m.text}（${m.url}）` : m.text}`);
+    const body =
+      `抖音群「${group}」里刚有人说话：\n${lines.join('\n')}\n` +
+      `想接就调 stroll_act action=dm platform=douyin target=${group} text=... 发到群里（target 可以只写群名的一部分，比如某个成员名）。` +
+      '不想接就别理，群消息不用每条都回。';
+    if (await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'interrupt')) return;
+    if (await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'flush')) return;
+    await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'debounce');
+  }
+
   /** 私信监听到底该不该干活：总开关、私信开关、平台开关都得是开的。 */
-  dmWatchOn(live = this.liveConfig() ?? {}) {
-    const enabled = (live.enabled ?? this.cfg.enabled) !== false;
+  dmWatchOn(live = this.liveConfig() ?? {}) {    const enabled = (live.enabled ?? this.cfg.enabled) !== false;
     const on = (live.dmWatch ?? this.cfg.dmWatch) !== false;
     if (!enabled || !on) return false;
     return (live.douyin ?? this.cfg.douyin) !== false || (live.bilibili ?? this.cfg.bilibili) !== false;
@@ -246,6 +464,16 @@ export class StrollWorld {
       if (Date.now() - Number(this.dmArmAt ?? 0) > gap) {
         this.dmArmAt = Date.now();
         this.armDmPush().catch(() => {});
+      }
+    }
+    // 群聊：观察器掉了就补挂（30 秒最多试一次）。
+    // 群名留空时靠自动识别，所以这里先解析一次（有 10 分钟缓存，不会反复读页面）。
+    if (useDy && this.groupWatchOn(live) && Date.now() - Number(this.groupArmAt ?? 0) > 30000) {
+      const names = await this.resolveGroups().catch(() => []);
+      const missing = names.filter((n) => !this.douyin.groupArmed?.(n));
+      if (missing.length) {
+        this.groupArmAt = Date.now();
+        this.armGroupPush().catch(() => {});
       }
     }
     const sec = Math.max(3, Number(live.dmPollSec ?? this.cfg.dmPollSec ?? 5) || 5);
@@ -366,11 +594,8 @@ export class StrollWorld {
    */
   douyinDmTail(messages, name) {
     const list = Array.isArray(messages) ? messages : [];
-    const tail = [];
-    for (let i = list.length - 1; i >= 0; i -= 1) {
-      if (list[i].from !== 'them') break;
-      tail.unshift(list[i]);
-    }
+    // 末尾连着的那几句，最多 6 条：主人连发一大串时别把整屏都塞进推送
+    const tail = this.dmTailOf(list, 6);
     const fp = tail.map((m) => `${m.kind}:${m.text}`).join('|').slice(0, 300);
     const seen = this.store.data.dmSeen?.douyin ?? null;
     // 第一次跑：把当前尾巴记成基线。以前这里直接 return，基线一直为空，
@@ -707,8 +932,43 @@ export class StrollWorld {
     if (action === 'following') return JSON.stringify(await this.followingFeed(args.platform, args.n));
     if (action === 'weekly') return JSON.stringify(this.weeklyReport(args.days));
     if (action === 'books') return JSON.stringify(this.listBooks());
+    if (action === 'groups') {
+      const list = await this.douyin.listThreads().catch((error) => ({ ok: false, error: error?.message ?? '读不到会话列表' }));
+      if (!list.ok) return JSON.stringify({ ok: false, error: list.error ?? '读不到会话列表' });
+      // 顺手刷新一次自动识别（用户可能就是来问「我在哪些群」）
+      if (list.threads?.some((t) => t.kind === 'group')) {
+        this.groupAuto = { at: Date.now(), names: list.threads.filter((t) => t.kind === 'group').map((t) => t.name).slice(0, 2) };
+      }
+      return JSON.stringify({
+        ok: true,
+        watched: this.groupNames(),
+        arming: this.groupWatchOn(),
+        threads: list.threads,
+      });
+    }
+    if (action === 'join_group') {
+      const link = String(args.url ?? '').trim();
+      if (!link) return JSON.stringify({ ok: false, error: '给一个群邀请链接（url）。' });
+      return JSON.stringify(await this.douyin.joinGroup(link).catch((error) => ({ ok: false, error: error?.message ?? '进群失败' })));
+    }
     if (action === 'read') return JSON.stringify(this.readBook({ name: args.book, chars: args.chars }));
     if (action === 'note') return JSON.stringify(this.noteBook(args.text));
+    if (action === 'stickers') {
+      const list = this.stickers.list({
+        query: String(args.query ?? '').trim(),
+        tag: String(args.tag ?? '').trim(),
+        limit: clamp(Number(args.n ?? 10), 1, 40),
+      });
+      return JSON.stringify({
+        ok: true,
+        ...list,
+        dir: this.stickers.dir,
+        stats: this.stickers.stats(),
+        hint: list.total
+          ? '发的时候用 stroll_act action=sticker text=<名字/序号>；不写 text 就是随机一张。'
+          : '表情库还是空的：用 stroll_act action=collect_stickers 从抖音收藏几张。',
+      });
+    }
     if (action === 'history') return JSON.stringify(this.history());
     return JSON.stringify({ ok: false, error: `不认识的动作：${action}` });
   }
@@ -722,6 +982,10 @@ export class StrollWorld {
         draftId: args.draft_id ?? null,
       });
     }
+    // 表情包：聊天行为，和私信一样直接发，不占公开额度、不进草稿箱
+    if (action === 'sticker') return JSON.stringify(await this.sendStickerAct(args));
+    if (action === 'collect_stickers') return JSON.stringify(await this.collectStickersAct(args));
+    if (action === 'sticker_name') return JSON.stringify(this.nameStickerAct(args));
     const plan = await this.buildPlan(action, args, { byOwner: this.ownerNearby() });
     if (!plan.ok) return JSON.stringify(plan);
     if (args.preview === true || approvalFor(this.cfg, plan.action) === 'draft') {
@@ -1243,6 +1507,33 @@ export class StrollWorld {
   /* ---------------- 本地书库 ---------------- */
 
   bookDir() {
+    // 主人可以在设置里指定任意目录；留空就用数据目录下默认那个
+    const custom = String(this.cfg.booksDir ?? '').trim();
+    if (custom) {
+      // 老版本用 PowerShell 的 utf8 标准输出读路径，被 GBK 代码页坑成了乱码，
+      // 还把乱码当目录名建了个文件夹。这里认出来就还原成盘上真实的那个目录；
+      // 还原不了就当没设过，别让「读书」一直对着一个不存在的乱码路径。
+      if (looksBrokenPath(custom)) {
+        if (this._bookDirFix === undefined) {
+          this._bookDirFix = repairMojibakePath(custom);
+          if (this._bookDirFix) {
+            try {
+              this.cfg.booksDir = this._bookDirFix;
+              this.persist({ booksDir: this._bookDirFix });
+            } catch {
+              // 存不下也只是下次再修一遍，不影响读书
+            }
+          }
+        }
+        if (!this._bookDirFix) return path.join(this.dataDir, 'stroll', 'books');
+        return path.resolve(this._bookDirFix);
+      }
+      try {
+        return path.resolve(custom);
+      } catch {
+        // 路径写坏了就退回默认，不要让「读书」整个挂掉
+      }
+    }
     return path.join(this.dataDir, 'stroll', 'books');
   }
 
@@ -1731,6 +2022,125 @@ export class StrollWorld {
     }
   }
 
+  /* ---------------- 表情包（收藏 / 发送） ---------------- */
+
+  /**
+   * 表情包发给谁：群名优先，其次主人私信。
+   * 和私信一样，只允许发给主人或主人这边的群，不给陌生人发东西。
+   */
+  async stickerTargetOf(raw) {
+    const wanted = String(raw ?? '').trim();
+    const groups = await this.resolveGroups().catch(() => this.groupNames());
+    if (wanted) {
+      const hit = groups.find((g) => this.sameGroup(g, wanted));
+      if (hit) return { ok: true, who: hit, group: true };
+    }
+    const owner = this.douyinOwner();
+    if (owner.sameAsSelf) {
+      return {
+        ok: false,
+        error: '抖音主人绑的就是她自己登录的那个号，抖音不能给自己发消息。要么给她换个号，要么把表情发到群里。',
+      };
+    }
+    const name = String(owner.name ?? '').trim();
+    if (!name) {
+      return { ok: false, error: '还不知道主人在抖音的昵称。先让主人在面板点一次「绑定这个号」。' };
+    }
+    if (wanted && !this.sameGroup(wanted, name)) {
+      return { ok: false, error: `表情只能发到 ${groups.length ? groups.map((g) => `「${g}」或`).join('') : ''}主人私信，不能发给「${wanted}」。` };
+    }
+    return { ok: true, who: name, group: false };
+  }
+
+  async sendStickerAct(args) {
+    if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
+    const pick = this.stickers.find(args.text);
+    if (!pick.ok) {
+      return { ok: false, error: pick.error, candidates: pick.candidates, total: this.stickers.stats().total };
+    }
+    const target = await this.stickerTargetOf(args.target);
+    if (!target.ok) return target;
+    const check = this.policy.check('dm', 'douyin', target.who, { quotaAction: 'dm', free: true });
+    if (!check.ok) return check;
+    const entry = pick.entry;
+    this.log?.info?.(`发表情「${entry.name}」→ ${target.who || '主人私信'}`);
+    const result = await this.douyin
+      .sendStickerTo(target.who, { file: this.stickers.fileOf(entry), src: entry.src, label: entry.name })
+      .catch((error) => ({ ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) }));
+    if (result.ok) {
+      this.stickers.touch(entry.id);
+      this.store.addAction({
+        platform: 'douyin',
+        action: 'sticker',
+        target: target.who,
+        title: target.who,
+        text: `[表情] ${entry.name}`,
+        result: 'ok',
+        extra: { sticker: entry.id, via: result.via },
+      });
+      this.store.save();
+    } else {
+      // 失败也要留痕：不然「发了四五次都不行」只剩一句抱怨，查都没法查
+      this.log?.warn?.(`发表情失败：${result.code ?? '?'} ${result.error ?? ''} ${result.dump ?? ''}`);
+      this.store.addAction({
+        platform: 'douyin',
+        action: 'sticker',
+        target: target.who,
+        title: target.who,
+        text: `[表情没发出去] ${entry.name}`,
+        result: 'fail',
+        extra: {
+          sticker: entry.id,
+          code: result.code ?? '',
+          error: String(result.error ?? '').slice(0, 160),
+          dump: result.dump ?? '',
+        },
+      });
+      this.store.save();
+    }
+    return {
+      ...result,
+      sticker: entry.name,
+      id: entry.id,
+      to: target.who,
+      group: target.group,
+      receipt: result.ok
+        ? `表情包「${entry.name}」发到${target.group ? `群「${truncate(target.who, 16)}」` : '主人私信'}了${result.via === 'upload' ? '（按图片发的）' : ''}`
+        : `表情包没发出去：${result.error ?? '不知道什么原因'}`,
+    };
+  }
+
+  async collectStickersAct(args) {
+    if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
+    const paused = this.policy.paused();
+    if (paused.paused) return { ok: false, error: `现在停手了：${paused.reason ?? '风控冷却中'}` };
+    const target = await this.stickerTargetOf(args.target);
+    // 收表情不改任何东西，目标解析不出来就去当前打开的会话里收
+    const who = target.ok ? target.who : '';
+    const limit = clamp(Number(args.n ?? 12), 1, 30);
+    const result = await this.douyin
+      .collectStickersFrom(who, { limit })
+      .catch((error) => ({ ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) }));
+    const total = this.stickers.stats().total;
+    return {
+      ...result,
+      to: who || '当前会话',
+      total,
+      dir: this.stickers.dir,
+      receipt: result.ok
+        ? `从${result.via === 'chat' ? '聊天记录' : '抖音表情面板'}收了 ${result.saved} 张新的（重复 ${result.duplicate ?? 0} 张），库里有 ${total} 张了`
+        : `没收到表情：${result.error ?? '面板没打开'}`,
+    };
+  }
+
+  nameStickerAct(args) {
+    const id = String(args.target ?? '').trim();
+    const name = String(args.text ?? '').trim();
+    if (!id || !name) return { ok: false, error: '要说清楚哪一张（id）和它的新名字。' };
+    const r = this.stickers.rename(id, name);
+    return r.ok ? { ok: true, id: r.entry.id, name: r.entry.name } : r;
+  }
+
   /**
    * 面板「看评论」弹层里，直接回某一条。
    * url 可以是视频 / 动态 / 专栏；rpid 是弹层里那条评论。
@@ -1964,6 +2374,66 @@ export class StrollWorld {
         target = String(targetRaw || owner).trim();
         if (target !== owner) return { ok: false, error: '私信只发主人，不发别人。' };
       } else {
+        // 群聊：target 写群名。只认「认出来的群」，免得她随手把消息发到别人的会话里。
+        // 匹配放宽成「包含」：群没起名时标题是「A, B, C」，让她抄一遍不现实；
+        // 只写其中一个成员名，或干脆写「群」（只有一个群时）也能对上。
+        const groups = await this.resolveGroups().catch(() => this.groupNames());
+        const wanted = String(targetRaw).trim();
+        let asGroup = groups.find((g) => this.sameGroup(g, wanted));
+        if (!asGroup && groups.length === 1 && /^(群|群聊|那个群|抖音群|group|the group)$/i.test(wanted)) asGroup = groups[0];
+        if (asGroup) {
+          // 要真 @ 人就得知道那个人在群里的昵称；不知道就直说，别让她手打一个假 @。
+          // 默认 @ 主人；也可以用 args.mention 指定群里的别人。
+          const rawMention = String(args.mention ?? '').trim().replace(/^@+/, '');
+          // 她常把要 @ 的人直接写在正文开头（「@大萌神 在吗」）——那只是个普通字符。
+          // 这里把它当成 @ 目标，交给候选面板插成真 chip，而不是发一串蓝字。
+          const leadingAt = /^@([^\s@，。！？、,.!?：:;；~～]{1,24})/.exec(String(text ?? '').trim());
+          const fromText = leadingAt ? leadingAt[1].trim() : '';
+          // 「@你 / @主人」不是昵称：她不知道主人的抖音名时就会这么写，候选面板里永远找不到人
+          const isPlaceholder = (v) => /^(你|您|主人|主人你|老板|我|me|you|owner)$/i.test(v);
+          const explicit = isPlaceholder(rawMention) ? '' : rawMention || (isPlaceholder(fromText) ? '' : fromText);
+          const ownerName = String(this.douyinOwner().name ?? '').trim();
+          const wantsOwner = mentionOwner || isPlaceholder(rawMention) || isPlaceholder(fromText);
+          /**
+           * 还有一种最常见的写法：不传 mention，直接把名字写在正文开头（「大萌神，在吗」）。
+           * 以前这种情况就当普通正文发出去，一个字都不 @。群标题没起名时就是成员名拼的，
+           * 从里面拆出名单，在开头对一次名字——对上了就当成 @ 目标。
+           */
+          const rawText = String(text ?? '').trim();
+          const members = [...String(asGroup).split(/[,，、]/).map((s) => s.trim()).filter(Boolean), ownerName].filter(Boolean);
+          let lead = null;
+          if (!explicit) {
+            for (const n of members) {
+              const esc = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const m = new RegExp(`^@?\\s*${esc}(?=[\\s，。！？、,.!?：:;；~～]|$)[\\s，。！？、,.!?：:;；~～]*`).exec(rawText);
+              if (m && (!lead || n.length > lead.name.length)) lead = { name: n, cut: m[0].length };
+            }
+          }
+          const wantMention = explicit || (lead ? lead.name : '') || (wantsOwner ? ownerName : '');
+          if (!explicit && !lead && wantsOwner && !ownerName) {
+            return {
+              ok: false,
+              error: '还不知道主人在抖音叫什么，群里 @ 不到人。先让主人在面板点一次「绑定这个号」，或者把群里的昵称告诉我。',
+            };
+          }
+          // 手打的「@昵称」/ 开头的名字都是假 @（只是文字），发之前剥掉；真 @ 由插入 chip 完成
+          let body = rawText;
+          if (lead && lead.name === wantMention) body = body.slice(lead.cut);
+          body = stripLeadingFakeAt(stripAtPlaceholder(wantMention ? stripAtName(body, wantMention) : body));
+          body = body.replace(/^[\s，。！？、,.!?：:;；~～]+/, '').trim();
+          if (!body) {
+            return { ok: false, error: '除了 @ 就没有正文了。群里只发一个 @ 等于刷屏，写点要说的。' };
+          }
+          const check = this.policy.check('dm', platform, asGroup, { quotaAction: 'dm', free: true });
+          if (!check.ok) return check;
+          return { ok: true, action, platform, target: asGroup, text: body, free: true, group: true, mention: wantMention };
+        }
+        if (wanted && groups.length) {
+          return {
+            ok: false,
+            error: `能发到 ${groups.map((g) => `「${g}」`).join(' 或 ')}，不是「${wanted}」。群里只发主人这边的群，别的会话不发。`,
+          };
+        }
         const owner = await this.ensureDouyinOwner();
         if (!owner.ok) return owner;
         if (this.douyinOwner().sameAsSelf) {
@@ -1990,6 +2460,7 @@ export class StrollWorld {
       action: plan.action,
       platform: plan.platform,
       target: plan.target,
+      group: !!plan.group,
       kind: plan.kind ?? '',
       dynamicId: plan.dynamicId ?? '',
       articleId: plan.articleId ?? '',
@@ -1998,6 +2469,8 @@ export class StrollWorld {
       dedupeKey: plan.dedupeKey ?? '',
       text: plan.text ?? '',
       mentionOwner: !!plan.mentionOwner,
+      // 群里的 @ 目标要跟着草稿一起存：批准时走的是 draft，丢了就变成「只有正文没有 @」
+      mention: String(plan.mention ?? ''),
       root: plan.root ?? '',
       parent: plan.parent ?? '',
     });
@@ -2011,7 +2484,9 @@ export class StrollWorld {
       draft.action === 'post'
         ? '动态'
         : draft.action === 'dm'
-          ? `给主人（${draft.platform === 'douyin' ? '抖音' : 'B站'}）`
+          ? draft.group
+            ? `群「${truncate(String(draft.target), 16)}」`
+            : `给主人（${draft.platform === 'douyin' ? '抖音' : 'B站'}）`
           : known
             ? `《${truncate(known, 24)}》`
             : draft.kind === 'opus'
@@ -2046,6 +2521,7 @@ export class StrollWorld {
       action: draft.action,
       platform: draft.platform,
       target: draft.target,
+      group: !!draft.group,
       kind: draft.kind,
       dynamicId: draft.dynamicId,
       articleId: draft.articleId,
@@ -2054,6 +2530,7 @@ export class StrollWorld {
       dedupeKey: draft.dedupeKey,
       text: draft.text,
       mentionOwner: draft.mentionOwner,
+      mention: draft.mention ?? '',
       root: draft.root,
       parent: draft.parent,
     };
@@ -2105,7 +2582,15 @@ export class StrollWorld {
       } else if (action === 'post') {
         result = await this.bili.post({ text, mentionOwner: plan.mentionOwner });
       } else if (action === 'dm') {
-        result = platform === 'bilibili' ? await this.bili.dm(target, text) : await this.douyinDmFast(target, text);
+        result =
+          platform === 'bilibili'
+            ? await this.bili.dm(target, text)
+            : plan.group
+              ? await this.douyin.replyDm(target, text, {
+                  // 群里 @ 人必须是真 chip：手打 @ 只是文字，看起来蓝但对方收不到通知
+                  mention: String(plan.mention ?? '').trim(),
+                })
+              : await this.douyinDmFast(target, text);
       } else {
         return { ok: false, code: 'UNKNOWN_ACTION', error: '不认识的动作。' };
       }
@@ -2123,9 +2608,9 @@ export class StrollWorld {
         extra: result,
         tags: plan.mentionOwner ? [] : [],
       });
-      const receipt = { ok: true, action, platform, target, result, receipt: this.receiptText(action, platform, result) };
+      const receipt = { ok: true, action, platform, target, group: !!plan.group, result, receipt: this.receiptText(action, platform, result, plan) };
       if (source === 'operator') {
-        await this.push('stroll.sent', `${this.receiptText(action, platform, result)}`, { action, platform, target }, 'flush');
+        await this.push('stroll.sent', `${this.receiptText(action, platform, result, plan)}`, { action, platform, target }, 'flush');
       }
       return receipt;
     } catch (error) {
@@ -2144,7 +2629,7 @@ export class StrollWorld {
     return action;
   }
 
-  receiptText(action, platform, result) {
+  receiptText(action, platform, result, plan = {}) {
     const p = PLATFORM_NAMES[platform] ?? platform;
     if (action === 'like' || action === 'unlike') {
       const what = action === 'like' ? '点赞' : '取消赞';
@@ -2171,7 +2656,17 @@ export class StrollWorld {
       return bits.join('，');
     }
     if (action === 'post') return `${p} 动态发出去了${result.dynamicId ? `（${result.dynamicId}）` : ''}`;
-    if (action === 'dm') return `${p} 私信发出去了`;
+    if (action === 'dm') {
+      if (!plan.group) return `${p} 私信发出去了`;
+      const name = truncate(String(plan.target ?? ''), 16);
+      if (plan.mention) {
+        // 群里 @ 只有在插成 chip 时才真的会通知对方；插不上就如实说，别让主人以为提到了
+        return result?.mentioned
+          ? `${p} 群「${name}」发出去了，@${plan.mention} 已经插进去（带名字的那种）`
+          : `${p} 群「${name}」发出去了，但 @${plan.mention} 没插上——那样只是正文里一个 @ 符号，对方收不到通知`;
+      }
+      return `${p} 群「${name}」发出去了`;
+    }
     if (action === 'save') return '已加到 B站稍后再看';
     if (action === 'follow' || action === 'unfollow') return `${p} ${action === 'follow' ? '关注' : '取关'}完成`;
     return `${p} ${ACTION_NAMES[action] ?? action}完成`;
@@ -2380,6 +2875,47 @@ export class StrollWorld {
         const raw = String(args[0] ?? '').trim();
         if (!raw) return { ok: false, error: '没有链接可打开。' };
         return openInBrowser(raw);
+      }
+      if (method === 'books_pick') {
+        // 面板拿不到系统对话框，只能由 Node 这边弹一个
+        const picked = await pickFolder('选择书库文件夹（放 txt / md）');
+        if (!picked) {
+          return { ok: false, error: '没选文件夹（取消了，或者系统不让弹窗）。也可以在设置里手动粘路径。' };
+        }
+        // 走到这儿还带替换符，说明拿到的还是坏字符串：宁可不改，也别再建一个乱码目录
+        if (looksBrokenPath(picked)) {
+          return { ok: false, error: '路径里有中文没读对，没敢保存。请在设置里手动粘一次路径。' };
+        }
+        let exists = false;
+        try {
+          exists = fs.statSync(picked).isDirectory();
+        } catch {
+          exists = false;
+        }
+        if (!exists) {
+          try {
+            fs.mkdirSync(picked, { recursive: true });
+          } catch (error) {
+            return { ok: false, error: `建不了这个目录：${error?.message ?? error}` };
+          }
+        }
+        this._bookDirFix = picked;
+        this.persist({ booksDir: picked });
+        return { ok: true, dir: picked, books: this.listBooks() };
+      }
+      if (method === 'books_open') {
+        const dir = this.bookDir();
+        try {
+          if (!fs.statSync(dir).isDirectory()) throw new Error('不是目录');
+        } catch {
+          try {
+            fs.mkdirSync(dir, { recursive: true });
+          } catch (error) {
+            return { ok: false, dir, error: `这个目录打不开：${error?.message ?? error}` };
+          }
+        }
+        const opened = openFolder(dir);
+        return { ...opened, dir };
       }
       if (method === 'reply_to_comment') {
         const id = String(args[0] ?? '');

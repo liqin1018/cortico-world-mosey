@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { formatCount, formatDuration, humanPause, parseDouyinId, parseKeywords, stripAtName, truncate } from './util.js';
+import { formatCount, formatDuration, humanPause, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
 
 const ORIGIN = 'https://www.douyin.com';
 
@@ -165,6 +165,30 @@ async function bodyFlags(page) {
 }
 
 /**
+ * 剥掉正文开头手打的「@某人」。
+ *
+ * 聊天框里手打的 `@` 只是普通字符：抖音会把它染成蓝色，看起来像提到了人，
+ * 实际上后面没有名字、对方也收不到通知。真 @ 只能从候选面板选（插 chip）。
+ * 所以发正文前把开头这种假 @ 去掉，别让主人以为被 @ 了。
+ * 只处理开头，正文中间正常的「@」不动。
+ */
+export function stripLeadingFakeAt(text) {
+  let s = String(text ?? '').trim();
+  for (let i = 0; i < 3; i += 1) {
+    const before = s;
+    s = s
+      // 「@昵称」后面跟空格/标点
+      .replace(/^@[^\s@，。！？、,.!?：:;；~～]{1,24}\s*/, '')
+      // 孤零零的「@ 」
+      .replace(/^@+\s+/, '')
+      .trim();
+    if (s === before) break;
+  }
+  // 整条只剩 @ 的话就别发了
+  return s.replace(/^@+$/, '').trim();
+}
+
+/**
  * 挂在聊天页里的观察器：消息列表的 DOM 一变，就把「变了」这件事推给 Node 侧。
  * 抖音自己的长连接/轮询会先更新 DOM，所以这边几乎和手机上同时知道——不用我们再轮询接口，
  * 也不用反复点开会话（点会话正是 -509 的来源）。
@@ -238,12 +262,207 @@ function dmObserverScript() {
   return 'ok';
 }
 
+/**
+ * 在页面里找「一片小图」的区域 = 表情面板。
+ * 不认抖音的类名（它们会变），只认形状：可见、16~96 像素、不在消息气泡里，
+ * 而且成片出现（同一块地方 >= 4 张）。这样改版也还能用。
+ */
+function probeEmojiPanelInPage() {
+  const vis = (n) => {
+    const r = n.getBoundingClientRect();
+    const st = getComputedStyle(n);
+    return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity) > 0.05;
+  };
+  const small = [];
+  const push = (el, src) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 16 || r.width > 96 || r.height < 16 || r.height > 96) return;
+    if (!vis(el)) return;
+    if (el.closest('[data-e2e="msg-item-content"]')) return;
+    if (el.closest('[data-e2e="conversation-item"]')) return;
+    small.push({ el, src, x: r.x, y: r.y, w: r.width, h: r.height });
+  };
+  for (const img of Array.from(document.querySelectorAll('img'))) {
+    push(img, img.currentSrc || img.src || '');
+  }
+  // 有的表情是背景图，不是 <img>。全页算样式有点贵，限个上限。
+  const bgPool = document.querySelectorAll('span, i, div');
+  for (let i = 0; i < bgPool.length && i < 4000 && small.length < 120; i += 1) {
+    const el = bgPool[i];
+    if (el.childElementCount) continue;
+    const bg = getComputedStyle(el).backgroundImage || '';
+    const m = /url\("?(.+?)"?\)/.exec(bg);
+    if (m) push(el, m[1]);
+  }
+  if (small.length < 4) return { found: false, items: [], tabs: [] };
+  /**
+   * 找「最紧凑的那一片」：候选容器宽 160-680、高 80-640，里面 >=4 张小图。
+   * 只按「图片多」挑会挑到 body（整页都算），所以用「张数 + 密度」打分，
+   * 表情面板永远是又小又密的那块。
+   */
+  let best = null;
+  for (const s of small) {
+    let n = s.el.parentElement;
+    for (let i = 0; i < 8 && n; i += 1) {
+      const r = n.getBoundingClientRect();
+      if (r.width >= 160 && r.width <= 680 && r.height >= 80 && r.height <= 640) {
+        const cnt = small.filter((x) => n.contains(x.el)).length;
+        if (cnt >= 4) {
+          const density = cnt / Math.max(1, (r.width * r.height) / 10000);
+          const score = cnt + density;
+          if (!best || score > best.score) best = { el: n, cnt, score };
+          break;
+        }
+      }
+      n = n.parentElement;
+    }
+  }
+  if (!best) return { found: false, items: [], tabs: [] };
+  const box = best.el.getBoundingClientRect();
+  const items = small
+    .filter((s) => best.el.contains(s.el))
+    .map((s, i) => ({ i, src: s.src, x: Math.round(s.x + s.w / 2), y: Math.round(s.y + s.h / 2), w: Math.round(s.w) }))
+    .filter((x) => x.x > 0 && x.y > 0);
+  // 面板里那排「小图标」就是分类 tab（表情 / 收藏 / 各个表情包）
+  const tabs = [];
+  const up = best.el.parentElement;
+  const upRect = up ? up.getBoundingClientRect() : null;
+  const root = up && upRect && upRect.width <= 680 && upRect.height <= 700 ? up : best.el;
+  for (const el of Array.from(root.querySelectorAll('img, span, div, button'))) {
+    if (best.el.contains(el)) continue;
+    if (el.childElementCount) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 14 || r.width > 60 || r.height < 14 || r.height > 60) continue;
+    if (!vis(el)) continue;
+    const label = String(el.alt || el.innerText || '').replace(/\s+/g, ' ').trim();
+    if (label.length > 8) continue;
+    tabs.push({ i: tabs.length, label, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
+  }
+  return {
+    found: true,
+    box: { x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.width), h: Math.round(box.height) },
+    items,
+    tabs: tabs.slice(0, 12),
+  };
+}
+
+/**
+ * 输入框旁边那些小图标按钮（发图 / 表情 / 发送…）。
+ *
+ * 两个坑都踩过：
+ * 1. 「往上找一块容器再全扫」会把消息气泡、会话头像也算进来（实测点开过群资料面板）；
+ * 2. 反过来「把 el 的子元素全排除」也不行——传进来的 el 常常就是
+ *    `[data-e2e="msg-input"]` 那整个输入区，工具栏就在它**里面**，
+ *    结果一个按钮都找不到，表情直接发不出去（1.8.1 的线上故障）。
+ * 所以现在：框按输入区算，只排除**编辑器本身**，再按几何把工具栏那一排圈出来。
+ */
+export function toolbarProbeInPage(el) {
+  if (!el) return [];
+  const vis = (n) => {
+    const r = n.getBoundingClientRect();
+    const st = getComputedStyle(n);
+    return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity) > 0.05;
+  };
+  const ed = el.matches?.('textarea, input, [contenteditable="true"]')
+    ? el
+    : el.querySelector?.('[contenteditable="true"], [data-slate-editor="true"], textarea') || el;
+  const box = el.closest?.('[data-e2e="msg-input"]') || el.closest?.('[class*="MsgInput"]') || el;
+  const br = box.getBoundingClientRect();
+  const banned =
+    '[data-e2e="msg-item-content"], [data-e2e="conversation-item"], [class*="MessageItem"], [class*="MessageBox"], [class*="messageMessageList"], [class*="avatar"], [class*="Avatar"]';
+  // SVG 元素的 className 是个对象（SVGAnimatedString），直接拼字符串会变成
+  // "[object SVGAnimatedString]"——发送按钮就靠 class 里的 publishBtn 认，漏了就认错
+  const clsOf = (n) => String(n.getAttribute?.('class') ?? n.className ?? '');
+  const kindOf = (n, hint) => {
+    const h = hint || `${n.tagName} ${clsOf(n)} ${clsOf(n.parentElement)} ${n.getAttribute?.('aria-label') ?? ''} ${n.getAttribute?.('title') ?? ''}`.toLowerCase();
+    if (/upload|file|文件|图片|相册|photo|album/.test(h)) return 'upload';
+    if (/send|发送|publish|submit/.test(h)) return 'send';
+    if (/voice|record|语音|mic|说话/.test(h)) return 'voice';
+    if (/emoji|表情|smile|sticker|emote|face/.test(h)) return 'emoji';
+    return 'other';
+  };
+  const inBox = (n) => {
+    // 只排除编辑器本身：工具栏就在 el 里，不能连它一起排掉
+    if (!n || n === ed || ed.contains(n) || n.contains(ed)) return false;
+    if (n.closest(banned)) return false;
+    const r = n.getBoundingClientRect();
+    if (r.width < 15 || r.height < 15 || r.width > 56 || r.height > 56) return false;
+    if (!vis(n)) return false;
+    const cy = r.y + r.height / 2;
+    const cx = r.x + r.width / 2;
+    if (cy < br.top - 40 || cy > br.bottom + 40) return false;
+    if (cx < br.left - 24 || cx > br.right + 140) return false;
+    return true;
+  };
+
+  const hosts = [];
+  const push = (n) => {
+    if (n && inBox(n) && !hosts.some((h) => h === n)) hosts.push(n);
+  };
+  // 图标基本都是 svg：它自己的框就是可点区域，别再往上跳到一整排按钮上
+  for (const svg of Array.from(document.querySelectorAll('svg'))) {
+    const r = svg.getBoundingClientRect();
+    if (r.width < 14 || r.width > 48 || r.height < 14 || r.height > 48) continue;
+    const cy = r.y + r.height / 2;
+    if (cy < br.top - 40 || cy > br.bottom + 40) continue;
+    let host = svg;
+    if (!inBox(host)) {
+      host = svg.parentElement;
+      for (let i = 0; i < 2 && host; i += 1) {
+        const hr = host.getBoundingClientRect();
+        if (hr.width >= 16 && hr.height >= 16 && hr.width <= 56 && hr.height <= 56) break;
+        host = host.parentElement;
+      }
+    }
+    push(host);
+  }
+  // 没有 svg 的版本：按类名找图标
+  if (hosts.length < 2) {
+    for (const n of Array.from(document.querySelectorAll('div, span, button, i'))) {
+      if (!/icon|emoji|btn|button|tool/i.test(String(n.className ?? ''))) continue;
+      if (n.querySelector('svg, img') || !inBox(n)) continue;
+      hosts.push(n);
+    }
+  }
+
+  const out = [];
+  const seen = new Set();
+  for (const n of hosts) {
+    const r = n.getBoundingClientRect();
+    const x = Math.round(r.x + r.width / 2);
+    const y = Math.round(r.y + r.height / 2);
+    const key = `${x},${y}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const text = String(n.innerText || n.getAttribute('aria-label') || n.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+    const hint = `${n.tagName} ${clsOf(n)} ${clsOf(n.parentElement)} ${n.getAttribute('aria-label') ?? ''} ${n.getAttribute('title') ?? ''}`.toLowerCase();
+    out.push({
+      x,
+      y,
+      text: text.slice(0, 12),
+      cls: clsOf(n).slice(0, 90),
+      e2e: String(n.getAttribute('data-e2e') ?? ''),
+      hint,
+      kind: kindOf(n, hint),
+    });
+  }
+  // 表情排最前，其次「认不出来但也不是发图/发送/语音」的，危险按钮（发图/发送/语音）垫底
+  const rank = { emoji: 0, other: 1, upload: 2, send: 3, voice: 4 };
+  out.sort((a, b) => rank[a.kind] - rank[b.kind] || a.x - b.x);
+  return out.slice(0, 10);
+}
+
+
 export class DouyinBrowser {
-  constructor({ dataDir, cfg, log, policy }) {
+  constructor({ dataDir, cfg, log, policy, stickers }) {
     this.dataDir = dataDir;
     this.cfg = cfg;
     this.log = log;
     this.policy = policy;
+    /** 本地表情库（收藏/发送用）；world 启动时注入。 */
+    this.stickers = stickers ?? null;
+    /** 最近一次界面没认出来时落盘的调试文件。 */
+    this.lastDebugDump = '';
     this.profileDir = path.join(dataDir, 'stroll', 'douyin-profile');
     this.loginFile = path.join(dataDir, 'stroll', 'douyin-login.json');
     this.context = null;
@@ -282,9 +501,26 @@ export class DouyinBrowser {
     /** 上一次把观察器挂上去的时间，用来判断要不要重挂。 */
     this.dmArmedAt = 0;
     this.dmMarkAt = 0;
+    /** 登录态的服务端校验结果缓存：cookie 在也有可能被踢，见 sessionAlive。 */
+    this.sessionOk = null;
+    this.sessionOkAt = 0;
+    /** 她自己这个号的昵称/uid：群里用来把「我发的」和「别人发的」分开。 */
+    this.selfName = '';
+    this.selfUid = '';
+    /** 最近发出去的话：{text, at}。群消息里用来兜底识别「这几条其实是我自己说的」。 */
+    this.recentSent = [];
+    /** 上一次发送有没有把 @ 插成真 chip（回执用）。 */
+    this.lastMention = false;
     /** 600ms 的合并窗口：连发两句只叫一次。 */
     this.dmSettle = null;
     this.dmPendingSig = '';
+
+    /**
+     * 群聊监听：跟私信一个思路（常驻 tab + 页面内观察器），但每个群单独一个 tab。
+     * 私信那个 tab 必须钉在主人会话上不动，所以群不能共用它。
+     * 只盯配置里点名的群，没点名就一个都不开。
+     */
+    this.groupPages = new Map();
   }
 
   serialize(fn) {
@@ -374,11 +610,14 @@ export class DouyinBrowser {
         ],
       };
       let context;
-      // 先 Edge 再 Chrome：Windows 上基本都有 Edge，没装 Chrome 的机器也能跑
+      // 先 Edge 再 Chrome：Windows 上基本都有 Edge，没装 Chrome 的机器也能跑。
+      // 注意：Edge 和 Chrome 的 cookie 加密密钥是绑应用身份的（App-Bound Encryption），
+      // 换一个浏览器读同一个 profile 会「没登录」——所以探针/调试要认准当初建库那个。
       const launchOnce = async () => {
         try {
-          return await chromium.launchPersistentContext(this.profileDir, { ...options, channel: 'msedge' });
-        } catch {
+          return await chromium.launchPersistentContext(this.profileDir, { ...options, channel: this.channel ?? 'msedge' });
+        } catch (error) {
+          if (this.channel) throw error;
           return await chromium.launchPersistentContext(this.profileDir, { ...options, channel: 'chrome' });
         }
       };
@@ -571,11 +810,55 @@ export class DouyinBrowser {
     }, 2500);
   }
 
+  /**
+   * 轻量问一次服务端：这个 cookie 现在还能用吗。
+   * 只看 cookie 在不在不够——会话被踢之后 cookie 还留着，页面却什么都读不到，
+   * 表现就是「面板说已登录，实际私信一条都读不出来」。返回 null 表示没法判断（没有页面）。
+   */
+  async sessionAlive({ force = false, maxAge = 5 * 60 * 1000 } = {}) {
+    const now = Date.now();
+    if (!force && this.sessionOkAt && now - this.sessionOkAt < maxAge) return this.sessionOk;
+    const page = this.page;
+    if (!page || page.isClosed() || !/douyin\.com/.test(page.url())) return null;
+    const res = await page
+      .evaluate(async () => {
+        try {
+          const r = await fetch('/aweme/v1/web/user/profile/self/?device_platform=webapp&aid=6383&channel=channel_pc_web', {
+            credentials: 'include',
+          });
+          const t = await r.json().catch(() => ({}));
+          return { code: Number(t.status_code ?? -1), name: String(t.user?.nickname ?? ''), uid: String(t.user?.uid ?? '') };
+        } catch {
+          return { code: -1, name: '', uid: '' };
+        }
+      })
+      .catch(() => ({ code: -1, name: '', uid: '' }));
+    const code = res?.code ?? -1;
+    // 8 = 用户未登录；-1 是没问到，别拿它当结论
+    if (code === -1) return null;
+    if (res.name) this.selfName = res.name;
+    if (res.uid) this.selfUid = res.uid;
+    this.sessionOk = code === 0;
+    this.sessionOkAt = now;
+    return this.sessionOk;
+  }
+
+  /** 她自己这个号的昵称（群里用来区分「谁说的」，拿不到就空串）。 */
+  async selfNickname() {
+    if (this.selfName) return this.selfName;
+    await this.sessionAlive({ force: true }).catch(() => null);
+    return this.selfName || '';
+  }
+
   async isLoggedIn() {
     if (!this.context) return !!this.savedLogin();
     const cookies = await this.context.cookies(ORIGIN).catch(() => []);
     const ok = cookies.some((c) => c.name === 'sessionid' || c.name === 'sid_tt');
-    if (ok) this.markLoggedIn();
+    if (!ok) return false;
+    // cookie 在不代表服务端还认：被踢之后必须让主人重新扫码，而不是装作已登录
+    const alive = await this.sessionAlive().catch(() => null);
+    if (alive === false) return false;
+    this.markLoggedIn();
     return ok;
   }
 
@@ -957,6 +1240,7 @@ export class DouyinBrowser {
     }
     // 关监听时聊天页也收掉：留着只会白占内存
     this.releaseDmPage().catch(() => {});
+    this.releaseGroupPage().catch(() => {});
     if (this.page && !this.page.isClosed()) this.scheduleClose(60);
   }
 
@@ -1152,6 +1436,181 @@ export class DouyinBrowser {
     if (this.dmSettle) clearTimeout(this.dmSettle);
     this.dmSettle = null;
     if (page && !page.isClosed()) await page.close().catch(() => {});
+  }
+
+  /* ---------------- 群聊：一个群一个常驻 tab ---------------- */
+
+  /** 拿（必要时建）某个群的监听槽。 */
+  groupSlot(name) {
+    const key = String(name ?? '').trim();
+    if (!key) return null;
+    let slot = this.groupPages.get(key);
+    if (!slot) {
+      slot = { page: null, thread: '', hit: null, busy: false, queued: false, settle: null, armedAt: 0, arming: null };
+      this.groupPages.set(key, slot);
+    }
+    return slot;
+  }
+
+  /** 这个群现在有人盯着吗（观察器挂着 + 停在群里）。 */
+  groupArmed(name) {
+    const slot = this.groupPages.get(String(name ?? '').trim());
+    return !!(slot?.page && !slot.page.isClosed() && slot.thread && slot.hit);
+  }
+
+  /**
+   * 盯一个群：开（或复用）一个 tab 停在群会话上，挂同一个观察器。
+   * 第一次要点一下会话，之后页面不动——新消息进 DOM 就回调，跟私信一样快。
+   */
+  async watchGroup(name, onHit) {
+    const who = String(name ?? '').trim();
+    if (!who) return { ok: false, code: 'NO_NAME' };
+    const slot = this.groupSlot(who);
+    if (typeof onHit === 'function') slot.hit = onHit;
+    if (this.groupArmed(who)) return { ok: true, armed: true, cached: true };
+    if (slot.arming) return slot.arming;
+    slot.arming = this.armGroupPage(who).finally(() => {
+      slot.arming = null;
+    });
+    return slot.arming;
+  }
+
+  async armGroupPage(who) {
+    const slot = this.groupSlot(who);
+    if (!slot) return { ok: false, code: 'NO_NAME' };
+    // 登录窗/一起看开着时别插一脚（那会儿是有头窗口）
+    if (this.holdOpen) return { ok: false, code: 'BUSY_WINDOW' };
+    const headless = this.headless ?? (this.cfg.background !== false);
+    const ctx = await this.launch({ headless });
+    let page = slot.page;
+    if (page && page.isClosed()) {
+      slot.page = null;
+      slot.thread = '';
+      slot.armedAt = 0;
+      page = null;
+    }
+    if (!page) {
+      page = await ctx.newPage();
+      page.setDefaultTimeout(20000);
+      slot.page = page;
+      page.on('close', () => {
+        if (slot.page === page) {
+          slot.page = null;
+          slot.thread = '';
+          slot.armedAt = 0;
+        }
+      });
+      page.on('domcontentloaded', () => {
+        if (slot.page !== page || !page.__strollGroupBound) return;
+        page.evaluate(dmObserverScript).catch(() => {});
+      });
+      await page.goto(`${ORIGIN}/chat`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    } else if (!/\/chat/.test(page.url())) {
+      await page.goto(`${ORIGIN}/chat`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      slot.thread = '';
+    }
+
+    if (!page.__strollGroupBound) {
+      await page
+        .exposeFunction('__strollDmSignal', (sig) => this.onGroupSignal(who, sig))
+        .then(() => {
+          page.__strollGroupBound = true;
+        })
+        .catch(() => {});
+    }
+
+    const items = page.locator('[data-e2e="conversation-item"]');
+    const hasList = await items
+      .first()
+      .waitFor({ state: 'attached', timeout: 30000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!hasList) {
+      const loggedIn = await this.isLoggedIn().catch(() => false);
+      return { ok: false, code: loggedIn ? 'NO_LIST' : 'LOGIN_REQUIRED' };
+    }
+
+    if (slot.thread !== who) {
+      const item = page.locator('[data-e2e="conversation-item"]', { hasText: who }).first();
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        if (await item.count().catch(() => 0)) break;
+        await page.waitForTimeout(350);
+      }
+      if (!(await item.count().catch(() => 0))) {
+        await this.dismissBubbles(page);
+        return { ok: false, code: 'NO_THREAD' };
+      }
+      await item.scrollIntoViewIfNeeded().catch(() => {});
+      await item.click({ timeout: 8000 }).catch(async () => {
+        await item.evaluate((el) => el.click()).catch(() => {});
+      });
+      slot.thread = who;
+      // 主页面的「当前会话」跟这个 tab 不是一回事，别互相污染
+      this.openThread = '';
+      await page
+        .locator('[data-e2e="msg-item-content"]')
+        .first()
+        .waitFor({ state: 'attached', timeout: 12000 })
+        .catch(() => {});
+    }
+
+    const armed = await page.evaluate(dmObserverScript).catch(() => 'failed');
+    slot.armedAt = Date.now();
+    return { ok: armed !== 'failed', armed: armed !== 'failed', thread: slot.thread, code: armed };
+  }
+
+  /** 群消息观察器回调：和私信一样留 40ms 去抖。 */
+  onGroupSignal(name, sig) {
+    const slot = this.groupSlot(name);
+    if (!slot?.hit) return;
+    slot.pendingSig = sig;
+    if (slot.settle) clearTimeout(slot.settle);
+    slot.settle = setTimeout(() => {
+      slot.settle = null;
+      this.onGroupSettled(name).catch(() => {});
+    }, 40);
+  }
+
+  async onGroupSettled(name) {
+    const slot = this.groupSlot(name);
+    if (!slot?.hit) return;
+    if (slot.busy) {
+      slot.queued = true;
+      return;
+    }
+    slot.busy = true;
+    try {
+      const page = slot.page;
+      if (!page || page.isClosed()) return;
+      const messages = await this.readGroupMessages(page, 10);
+      if (!messages.length) return;
+      await slot.hit(messages, { sig: slot.pendingSig, group: name });
+    } catch (error) {
+      this.log?.warn?.('stroll group signal failed', { group: name, message: error?.message });
+    } finally {
+      slot.busy = false;
+      if (slot.queued) {
+        slot.queued = false;
+        setTimeout(() => {
+          this.onGroupSettled(name).catch(() => {});
+        }, 200);
+      }
+    }
+  }
+
+  /** 收掉某个群（或全部群）的监听 tab。 */
+  async releaseGroupPage(name) {
+    const key = String(name ?? '').trim();
+    const targets = key ? [key] : Array.from(this.groupPages.keys());
+    for (const one of targets) {
+      const slot = this.groupPages.get(one);
+      if (!slot) continue;
+      const page = slot.page;
+      if (slot.settle) clearTimeout(slot.settle);
+      this.groupPages.delete(one);
+      if (page && !page.isClosed()) await page.close().catch(() => {});
+    }
   }
 
   async closePage() {
@@ -1874,7 +2333,7 @@ export class DouyinBrowser {
       .evaluate((want) => {
         const ce = document.querySelector('#comment-input-container div[contenteditable="true"]');
         if (!ce) return false;
-        const norm = (s) => String(s ?? '').replace(/\s+/g, '').replace(/^@+/, '');
+        const norm = (s) => String(s ?? '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^@+/, '');
         return Array.from(ce.querySelectorAll('.douyin_mention_word')).some((c) => norm(c.innerText) === want);
       }, flat)
       .catch(() => false);
@@ -1919,7 +2378,7 @@ export class DouyinBrowser {
   async findAtCandidate(page, flat) {
     return await page
       .evaluate((want) => {
-        const norm = (s) => String(s ?? '').replace(/\s+/g, '').replace(/^@+/, '');
+        const norm = (s) => String(s ?? '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^@+/, '');
         const panel = document.querySelector('.atBox-outside-container');
         if (!panel) return null;
         const inner = panel.querySelector('.atBox-inner-container') ?? panel;
@@ -1993,18 +2452,395 @@ export class DouyinBrowser {
   }
 
   /**
+   * 在聊天输入框里插入**真正的 @**（结构化 chip）。
+   *
+   * 为什么非要做这一步：抖音消息里手打的一个 `@` 会被渲染成蓝色，看起来像 @ 了人，
+   * 但它是纯文本——后面不带名字、对方也收不到任何通知。只有从候选面板里选中，
+   * 才会插成带 uid 的 chip，才叫真提到。
+   *
+   * 1.8.1 那次线上还是没成，dump 里能看出来：一口气把「@昵称」全打进去，
+   * 候选面板压根没弹出来（列表是空的）。抖音是靠**单独一个 @** 触发面板的，
+   * 名字敲太快会把面板顶掉。所以现在：先打一个 @，等名单出来，再从名单里点人。
+   * 点完补一个空格——不然正文会贴着名字，看着就像没 @ 上。
+   */
+  async mentionInChat(page, input, name) {
+    const target = String(name ?? '').trim().replace(/^@+/, '');
+    if (!target) return false;
+    const ed = await this.editorOf(input);
+    this.lastMentionDump = '';
+    await ed.click({ force: true }).catch(() => {});
+
+    // 等候选名单：群成员是异步拉的，0.3-1.2 秒。
+    // 试两次：第一下 @ 偶尔会落在编辑器刚拿到焦点的那一刻被吞掉。
+    let rows = null;
+    for (let attempt = 0; attempt < 2 && !rows?.count; attempt += 1) {
+      // 上一次失败留下的残字会让后面全乱，先清干净
+      await this.clearChatInput(page, input);
+      await ed.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(attempt * 120);
+      await page.keyboard.type('@', { delay: 40 });
+      const deadline = Date.now() + 1800;
+      while (Date.now() < deadline) {
+        await page.waitForTimeout(80);
+        rows = await this.chatAtItems(page, '');
+        if (rows?.count) break;
+        if (Date.now() + 450 > deadline) {
+          // 面板没落在那个容器里（有些版本走 portal）：最后扫一遍浮层
+          rows = await this.chatAtRowsGeneric(page, '');
+          if (rows?.count) break;
+        }
+      }
+    }
+    if (!rows?.count) {
+      this.lastMentionDump = await this.dumpChatDebug(page, 'mention-nopanel', { target });
+      await this.clearChatInput(page, input);
+      return false;
+    }
+
+    // 名单里的名字可能带「群主 / 管理员」标签，剥掉再比；也只认唯一命中，别 @ 错人
+    const hit = this.pickAtRow(rows.items, target);
+    if (!hit) {
+      this.lastMentionDump = await this.dumpChatDebug(page, 'mention-noname', { target, rows });
+      await this.clearChatInput(page, input);
+      return false;
+    }
+    // 坐标是上一次 evaluate 拍的，面板重绘后会偏；重新找一次并给那一行打标，用 locator 点
+    const tagged = await this.chatAtItems(page, target);
+    // 点之前记一份编辑器里的 HTML：点中候选会把它整个换掉，点空则一动不动。
+    // 这比猜 chip 的类名可靠得多（抖音的类名是哈希的，改一次版就没了）。
+    const htmlBefore = await ed.evaluate((el) => el.innerHTML).catch(() => '');
+    const tag = page.locator('[data-stroll-at="1"]').first();
+    let clicked = false;
+    if (tagged?.index >= 0 && (await tag.count().catch(() => 0))) {
+      clicked = await tag
+        .click({ timeout: 1500 })
+        .then(() => true)
+        .catch(() => false);
+    }
+    if (!clicked) await page.mouse.click(hit.x, hit.y).catch(() => {});
+
+    let ok = false;
+    for (let i = 0; i < 12; i += 1) {
+      await page.waitForTimeout(60);
+      ok = await this.mentionInserted(ed, target, htmlBefore);
+      if (ok) break;
+    }
+    if (!ok) {
+      // 名字那一截点不动（有的版本把点击绑在整行上）→ 再试整行
+      const rowTag = page.locator('[data-stroll-at-row="1"]').first();
+      if ((await rowTag.count().catch(() => 0)) > 0) {
+        await rowTag.click({ timeout: 1200 }).catch(() => {});
+        for (let i = 0; i < 40; i += 1) {
+          await page.waitForTimeout(60);
+          ok = await this.mentionInserted(ed, target, htmlBefore);
+          if (ok) break;
+        }
+      }
+    }
+    if (!ok) {
+      // 面板还开着时，回车=选中候选，不会发送
+      const open = await this.chatAtItems(page, '');
+      if (open?.count) {
+        await page.keyboard.press('Enter');
+        for (let i = 0; i < 10; i += 1) {
+          await page.waitForTimeout(60);
+          ok = await this.mentionInserted(ed, target, htmlBefore);
+          if (ok) break;
+        }
+      }
+    }
+    if (!ok) {
+      const chip = await this.hasChatMention(page, input, target);
+      this.lastMentionDump = await this.dumpChatDebug(page, 'mention-nochip', { target, rows, chip });
+      await this.clearChatInput(page, input);
+      return false;
+    }
+    // chip 后面补一个空格：抖音要靠它把 chip 定下来，正文也不会贴着名字
+    await page.keyboard.type(' ', { delay: 20 });
+    return true;
+  }
+
+  /**
+   * 选完候选之后，**编辑器里真的多了这个名字**才算 @ 上了。
+   * 判据两条一起：文字里出现了这个名字，而且 HTML 跟点之前不一样（点空的话 HTML 不会变）。
+   */
+  async mentionInserted(ed, name, htmlBefore) {
+    const state = await ed
+      .evaluate((el) => ({ text: String(el.textContent ?? ''), html: el.innerHTML }))
+      .catch(() => null);
+    if (!state) return false;
+    const norm = (s) => String(s ?? '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^@+/, '').trim();
+    if (!norm(state.text).includes(norm(name))) return false;
+    return state.html !== htmlBefore;
+  }
+
+  /** 输入框里的可编辑区（有 contenteditable 就用它，没有就退回容器）。 */
+  async editorOf(input) {
+    const ed = input.locator('[contenteditable="true"], [data-slate-editor="true"], textarea').first();
+    if (await ed.count().catch(() => 0)) return ed;
+    return input;
+  }
+
+  /** 在候选名单里按昵称找人（剥掉群主/管理员这类身份标签，容忍零宽字符）。 */
+  pickAtRow(items, name) {
+    const norm = (s) => String(s ?? '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^@+/, '').trim();
+    const bare = (s) => norm(s).replace(/(群主|管理员|群成员|成员|owner|admin)/gi, '');
+    const key = bare(name);
+    if (!key) return null;
+    const list = (items ?? []).filter((it) => it && it.text);
+    let hit = list.find((it) => bare(it.text) === key) ?? null;
+    if (!hit) {
+      const pref = list.filter((it) => bare(it.text).startsWith(key));
+      if (pref.length === 1) hit = pref[0];
+    }
+    if (!hit) {
+      const part = list.filter((it) => bare(it.text).includes(key));
+      if (part.length === 1) hit = part[0];
+    }
+    return hit;
+  }
+
+  /** 聊天输入框里有没有「就是这个人」的 @ chip。 */
+  async hasChatMention(page, input, want) {
+    return await input
+      .evaluate((el, name) => {
+        const norm = (s) => String(s ?? '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^@+/, '').trim();
+        const key = norm(name);
+        // textarea 没有 chip 结构，选中候选就是往 value 里写「@昵称 」，只能认文本
+        const ed = el.matches?.('[contenteditable="true"]')
+          ? el
+          : el.querySelector?.('[contenteditable="true"], [data-slate-editor="true"], textarea') || el;
+        if (ed.tagName === 'TEXTAREA' || ed.tagName === 'INPUT') return norm(ed.value).includes(key);
+        // 手打进去的「@昵称」一定落在 data-string 叶子上；选中候选后这一片会被 chip 替换掉。
+        // 所以「叶子还在」= 假 @，「叶子没了、编辑器里还有个正好叫这名字的节点」= chip。
+        const leaves = Array.from(ed.querySelectorAll('[data-string], [data-leaf]'));
+        const plain = leaves.find((n) => norm(n.textContent) === key);
+        if (plain && !plain.closest('[class*="mention"], [data-mention], [data-slate-inline="true"]')) return false;
+        const chips = Array.from(ed.querySelectorAll('[class*="mention"], [data-mention], [data-slate-inline="true"]'));
+        if (chips.some((n) => norm(n.textContent) === key && n.childElementCount > 0)) return true;
+        if (plain) return false;
+        return Array.from(ed.querySelectorAll('*')).some((n) => n.childElementCount > 0 && norm(n.textContent) === key);
+      }, want)
+      .catch(() => false);
+  }
+
+  /** 清空聊天输入框（不发送）。选全删一次可能只删掉一层，删完要复查。 */
+  async clearChatInput(page, input) {
+    const ed = await this.editorOf(input);
+    for (let i = 0; i < 3; i += 1) {
+      await ed.click({ force: true }).catch(() => {});
+      await page.keyboard.press('Control+a').catch(() => {});
+      await page.keyboard.press('Backspace').catch(() => {});
+      await page.waitForTimeout(70);
+      if (!(await this.inputText(page, input))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 读聊天输入框的 @ 候选面板。
+   *
+   * 线上 dump 里的真实结构（21:22）：
+   *   .messageMsgInputmentionContainer        ← 外层，常年挂着，可能是 0 高
+   *     .MsgInputMentionmentionContainer      ← 真正撑开的是这层
+   *       .MentionMentionItemcontainer        ← 一行候选
+   *         .MentionMentionIteminnerContainer（头像 + 「群主」标签）
+   *         span.MentionMentionItemuserName   ← 名字
+   * 所以**不能拿外层容器的尺寸判断面板开没开**（上一版就死在这儿：
+   * 面板明明弹着，外层 0 高，直接 return count 0，回执就成了「没找到选人面板」）。
+   * 现在把几层容器里的行全收上来，去重后按文字认人。want 为空 = 只要名单。
+   */
+  async chatAtItems(page, want) {
+    return await page
+      .evaluate((name) => {
+        const norm = (s) => String(s ?? '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^@+/, '').trim();
+        const bare = (s) => norm(s).replace(/(群主|管理员|群成员|成员|owner|admin)/gi, '');
+        const panels = Array.from(
+          document.querySelectorAll('.atBox-outside-container, [class*="mentionContainer"], [class*="mentionPanel"]'),
+        );
+        if (!panels.length) return null;
+        const hasAvatar = (el) => !!(el && el.querySelector && el.querySelector('img, [class*="avatar"], [class*="Avatar"]'));
+        const inPanel = (el) => panels.some((p) => p === el || p.contains(el));
+        const txt = (el) => String(el?.innerText ?? el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+
+        let cands = [];
+        // ① 首选名字节点：线上是 span.MentionMentionItemuserName，文字就是昵称本身。
+        //    比「猜哪一层是整行」稳得多——整行的高度/宽度都随样式变，名字节点不会。
+        for (const el of Array.from(document.querySelectorAll('[class*="userName"]'))) {
+          if (!inPanel(el)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 16 || r.height < 10 || r.height > 96) continue;
+          const t = txt(el);
+          if (!t || t.length > 40) continue;
+          // 点名字那一截：它在整行的可点区域里，事件会冒泡到行上
+          cands.push({ el, t, r, click: r, avatar: hasAvatar(el.closest('[class*="Itemcontainer"], li, [role="option"]')) });
+        }
+
+        // ② 没有名字节点（改版）时退回「像一行候选」的扫描
+        if (!cands.length) {
+          const seenEl = new Set();
+          for (const panel of panels) {
+            for (const el of Array.from(panel.querySelectorAll('div, li, a, span'))) {
+              if (seenEl.has(el)) continue;
+              seenEl.add(el);
+              const r = el.getBoundingClientRect();
+              if (r.width < 60 || r.height < 18 || r.height > 96) continue;
+              const t = txt(el);
+              if (!t || t.length > 40) continue;
+              const n = el.querySelector('[class*="userName"]');
+              const nr = n ? n.getBoundingClientRect() : null;
+              cands.push({
+                el,
+                t,
+                r,
+                click: nr && nr.width > 0 ? nr : r,
+                avatar: hasAvatar(el),
+              });
+            }
+          }
+        }
+        if (!cands.length) return { count: 0, index: -1, pick: null, items: [] };
+
+        // 同一个名字可能命中好几层（整行 / 行内文字），按文字去重，留最宽的那个当代表
+        const byText = new Map();
+        for (const c of cands) {
+          const k = bare(c.t);
+          if (!k) continue;
+          const prev = byText.get(k);
+          if (!prev || c.r.width > prev.r.width || (c.r.width === prev.r.width && c.avatar && !prev.avatar)) byText.set(k, c);
+        }
+        let pool = Array.from(byText.values());
+        // 有头像的优先当候选行（没头像的可能是分组标题）；一个都没有就不挑
+        if (pool.some((x) => x.avatar)) pool = pool.filter((x) => x.avatar);
+
+        const key = bare(name);
+        let idx = -1;
+        if (key) {
+          idx = pool.findIndex((x) => bare(x.t) === key);
+          if (idx < 0) {
+            const pref = pool.map((x, i) => ({ x, i })).filter(({ x }) => bare(x.t).startsWith(key));
+            if (pref.length === 1) idx = pref[0].i;
+          }
+          if (idx < 0) {
+            const part = pool.map((x, i) => ({ x, i })).filter(({ x }) => bare(x.t).includes(key));
+            if (part.length === 1) idx = part[0].i;
+          }
+        }
+        const spot = (x) => ({
+          x: Math.round(x.click.x + x.click.width / 2),
+          y: Math.round(x.click.y + x.click.height / 2),
+        });
+        for (const el of Array.from(document.querySelectorAll('[data-stroll-at]'))) el.removeAttribute('data-stroll-at');
+        for (const el of Array.from(document.querySelectorAll('[data-stroll-at-row]'))) el.removeAttribute('data-stroll-at-row');
+        if (idx >= 0 && pool[idx]?.el) {
+          pool[idx].el.setAttribute('data-stroll-at', '1');
+          // 整行也标一下：名字那一截点不动时，还能改点整行
+          const row = pool[idx].el.closest?.('[class*="Itemcontainer"], li, [role="option"]');
+          if (row && row !== pool[idx].el) row.setAttribute('data-stroll-at-row', '1');
+        }
+        return {
+          count: pool.length,
+          index: idx,
+          pick: idx >= 0 ? spot(pool[idx]) : null,
+          items: pool.slice(0, 12).map((x) => ({ text: x.t, ...spot(x) })),
+        };
+      }, want ?? '')
+      .catch(() => null);
+  }
+
+  /**
+   * 兜底：不认类名，直接在输入框附近的浮层里找候选行。
+   * 用 textContent 扫（不强制布局），命中了才量尺寸，比满页 innerText 快两个数量级。
+   */
+  async chatAtRowsGeneric(page, name) {
+    return await page
+      .evaluate((want) => {
+        const norm = (s) => String(s ?? '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^@+/, '').trim();
+        const bare = (s) => norm(s).replace(/(群主|管理员|群成员|成员|owner|admin)/gi, '');
+        const key = bare(want);
+        const ed =
+          document.querySelector('[data-e2e="msg-input"] [contenteditable="true"]') ||
+          document.querySelector('[data-slate-editor="true"]') ||
+          document.querySelector('div[contenteditable="true"]');
+        const er = ed ? ed.getBoundingClientRect() : null;
+        // 浮层：fixed/absolute、够宽够高、就在输入框上方
+        const roots = [];
+        const all = document.querySelectorAll('body *');
+        for (let i = 0; i < all.length && i < 7000 && roots.length < 8; i += 1) {
+          const n = all[i];
+          if (ed && (n === ed || ed.contains(n))) continue;
+          if (n.closest('[data-e2e="msg-item-content"], [data-e2e="conversation-item"]')) continue;
+          const st = getComputedStyle(n);
+          if (!/^(fixed|absolute)$/.test(st.position)) continue;
+          const r = n.getBoundingClientRect();
+          if (r.width < 140 || r.width > 960 || r.height < 40 || r.height > 720) continue;
+          if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity) < 0.05) continue;
+          if (er) {
+            if (r.bottom < er.top - 640 || r.top > er.bottom + 40) continue;
+            if (r.right < er.left - 80 || r.left > er.right + 80) continue;
+          }
+          roots.push(n);
+        }
+        let best = null;
+        let scanned = 0;
+        for (const root of roots) {
+          for (const n of Array.from(root.querySelectorAll('div, li, a, span, p'))) {
+            if (++scanned > 1500) break;
+            const t = String(n.textContent ?? '').replace(/\s+/g, ' ').trim();
+            if (!t || t.length > 40) continue;
+            if (key && !bare(t).includes(key)) continue;
+            // 只有「子元素自己也能当一行」时才算外壳；名字那一小截不算，
+            // 否则「大萌神」这种前面没有身份标签的行会被整行丢掉
+            const shell = Array.from(n.children).some((c) => {
+              if (String(c.textContent ?? '').replace(/\s+/g, ' ').trim() !== t) return false;
+              const cr = c.getBoundingClientRect();
+              return cr.width >= 90 && cr.height >= 18;
+            });
+            if (shell) continue;
+            const r = n.getBoundingClientRect();
+            if (r.width < 90 || r.width > 760 || r.height < 18 || r.height > 72) continue;
+            if (!best || r.height < best.h) best = { el: n, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), h: Math.round(r.height), text: t };
+          }
+        }
+        for (const el of Array.from(document.querySelectorAll('[data-stroll-at]'))) el.removeAttribute('data-stroll-at');
+        if (!best) return { count: 0, pick: null, items: [] };
+        best.el.setAttribute('data-stroll-at', '1');
+        return { count: 1, index: 0, pick: { x: best.x, y: best.y }, items: [{ text: best.text.slice(0, 40), x: best.x, y: best.y }] };
+      }, name ?? '')
+      .catch(() => null);
+  }
+
+  /**
    * 在已经打开的聊天框里把话发出去，并确认真的发出去了。
    * contenteditable 清空后会剩一个零宽字符，trim() 去不掉，所以要自己剥。
    */
-  async sendInChat(page, input, text) {
+  async sendInChat(page, input, text, { mention = '' } = {}) {
     const read = () =>
       input
         .evaluate((el) => String(el.value ?? el.textContent ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim())
         .catch(() => '');
-    await input.click({ timeout: 6000 });
+    // 正文里她手打的「@某人」先剥掉：真 @ 由 mention 插 chip，
+    // 手打的那个只是普通字符——抖音会染成蓝色，但对方收不到通知，还容易和真 chip 重复成一个。
+    let body = String(text ?? '').slice(0, 300);
+    if (mention) body = stripAtName(body, mention);
+    // 「@你 / @主人」不是昵称，留着也只是一个假 @
+    body = stripAtPlaceholder(stripLeadingFakeAt(body));
+    await input.click({ timeout: 6000 }).catch(() => {});
+    let mentioned = false;
+    if (mention) {
+      mentioned = await this.mentionInChat(page, input, mention).catch(() => false);
+    }
     // 打字快一点：8ms/字 打 20 个字只要 0.16 秒（以前 24ms 要 0.5 秒）。
     // 抖音输入框不看按键节奏，看的是「最后一个输入事件之后有没有变化」，所以还能再快。
-    await input.pressSequentially(String(text).slice(0, 300), { delay: 8 });
+    if (body) {
+      if (mentioned) {
+        // mentionInChat 收尾已经在 chip 后面补了空格，这里直接接正文
+        await page.keyboard.type(body, { delay: 8 });
+      } else {
+        await input.pressSequentially(body, { delay: 8 });
+      }
+    }
+    this.lastMention = mentioned;
     await page.keyboard.press('Enter');
     // 轮询「输入框清空了没有」：正常 200-300ms 就发完了。每 25ms 问一次，
     // 比原来 60ms 平均快 35ms，比死等 1.5 秒快一个数量级。
@@ -2015,8 +2851,10 @@ export class DouyinBrowser {
       if (!left) break;
     }
     if (left) {
-      // 有些版本回车只是换行，得点发送
-      const sendBtn = page.locator('[data-e2e="msg-send"]').first();
+      // 有些版本回车只是换行，得点发送（发送按钮是个 svg，class 里带 publishBtn / e2e-send-msg-btn）
+      const sendBtn = page
+        .locator('[data-e2e="msg-send"], .e2e-send-msg-btn, [class*="publishBtn"], button:has-text("发送")')
+        .first();
       if ((await sendBtn.count().catch(() => 0)) > 0 && (await sendBtn.isVisible().catch(() => false))) {
         await sendBtn.click({ timeout: 4000 }).catch(() => {});
         for (let i = 0; i < 12; i += 1) {
@@ -2034,7 +2872,523 @@ export class DouyinBrowser {
       this.policy.noteRisk('DOUYIN_VERIFY', '发私信后出现验证');
       throw new DouyinError('RISK', '发私信后出现验证，已停手。');
     }
+    // 记一笔自己刚发出去的话：群里用来兜底区分「我发的」和「别人发的」
+    this.noteSent(text);
     return true;
+  }
+
+  /* ---------------- 表情面板 / 发图 / 出问题留证 ---------------- */
+
+  /**
+   * 抖音的面板结构会变，猜类名迟早失手。失败时把输入框附近真实结构存一份，
+   * 下次照着改就行——总比自己脑补 DOM 强。
+   */
+  async dumpChatDebug(page, tag, extra = {}) {
+    try {
+      const data = await page.evaluate(() => {
+        const cut = (s, n = 3000) => String(s ?? '').slice(0, n);
+        const rect = (n) => {
+          const r = n.getBoundingClientRect();
+          return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+        };
+        const input =
+          document.querySelector('[data-e2e="msg-input"]') ||
+          document.querySelector('div[contenteditable="true"]') ||
+          document.querySelector('textarea');
+        let scope = input;
+        for (let i = 0; i < 4 && scope?.parentElement; i += 1) scope = scope.parentElement;
+        // 输入区（带工具栏的那块）：比输入框高、够宽的第一个祖先，专门存一份方便定位图标
+        let composer = input;
+        for (let i = 0; i < 5 && composer?.parentElement; i += 1) {
+          const r = composer.getBoundingClientRect();
+          if (r.height >= 80 && r.height <= 340 && r.width >= 400) break;
+          composer = composer.parentElement;
+        }
+        // 全页扫定位元素很贵：限定最多看 8000 个节点，够覆盖聊天区就行
+        const floaters = [];
+        const all = document.querySelectorAll('body *');
+        for (let i = 0; i < all.length && i < 8000 && floaters.length < 40; i += 1) {
+          const n = all[i];
+          const st = getComputedStyle(n);
+          if (!/^(fixed|absolute)$/.test(st.position)) continue;
+          const r = n.getBoundingClientRect();
+          if (r.width < 120 || r.height < 60 || r.top >= window.innerHeight || r.bottom <= 0) continue;
+          floaters.push({
+            tag: n.tagName,
+            cls: cut(n.className, 140),
+            ...rect(n),
+            imgs: n.querySelectorAll('img').length,
+            text: cut((n.innerText || '').replace(/\s+/g, ' '), 90),
+          });
+        }
+        return {
+          input: input ? { tag: input.tagName, cls: cut(input.className, 120), ...rect(input), html: cut(input.outerHTML, 2000) } : null,
+          composerHtml: composer ? cut(composer.outerHTML, 14000) : '',
+          // @ 面板 / 工具栏单独留一份：下次再失败，一眼就能看出「面板没弹」还是「弹了但结构不认」
+          mentionHtml: (() => {
+            const m = document.querySelector('[class*="mentionContainer"], [class*="mentionPanel"]');
+            return m ? cut(m.outerHTML, 8000) : '';
+          })(),
+          actionsHtml: (() => {
+            const a = input?.querySelector?.('[class*="inputAction"], [class*="InputAction"]');
+            return a ? cut(a.outerHTML, 4000) : '';
+          })(),
+          scopeHtml: scope ? cut(scope.outerHTML, 9000) : '',
+          floaters,
+          e2e: Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]')).map((n) => n.getAttribute('data-e2e')))),
+          bodyText: cut((document.body.innerText || '').replace(/\s+/g, ' '), 200),
+        };
+      });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const file = path.join(this.dataDir, 'stroll', 'debug', `chat-${tag}-${stamp}.json`);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), url: page.url(), tag, extra, ...data }, null, 1));
+      this.lastDebugDump = file;
+      this.log?.warn?.(`抖音界面没认出来，结构已存到 ${file}`);
+      return file;
+    } catch {
+      return '';
+    }
+  }
+
+  async probePanel(page) {
+    return await page.evaluate(probeEmojiPanelInPage).catch(() => null);
+  }
+
+  async chatToolbar(page, input) {
+    return await input.evaluate(toolbarProbeInPage).catch(() => []);
+  }
+
+  async msgCount(page) {
+    return await page.locator('[data-e2e="msg-item-content"]').count().catch(() => 0);
+  }
+
+  /**
+   * 消息区的「指纹」：条数 + 末尾几条的文字 + 图的数量。
+   * 图片/表情消息不一定带 msg-item-content，只数那个会漏，所以指纹要放宽到 msg-item*。
+   */
+  async chatSig(page) {
+    return await page
+      .evaluate(() => {
+        const items = Array.from(document.querySelectorAll('[data-e2e^="msg-item"]'));
+        let tail = '';
+        for (const el of items.slice(0, 3)) {
+          tail += `|${String(el.innerText || '').replace(/\s+/g, ' ').slice(0, 30)}#${el.querySelectorAll('img').length}`;
+        }
+        return `${items.length}#${tail}`;
+      })
+      .catch(() => '');
+  }
+
+  async inputText(page, input) {
+    return await input
+      .evaluate((el) => String(el.value ?? el.textContent ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim())
+      .catch(() => '');
+  }
+
+  /**
+   * 打开输入框旁边的表情面板：挨个点小图标，谁弹出一片小图就是谁。
+   * 不依赖 data-e2e / 类名，抖音换图标也能摸到。
+   * 上一次点成功的位置会记下来，下次先点它（省掉一轮试错）。
+   */
+  async openEmojiPanel(page, input) {
+    const already = await this.probePanel(page);
+    if (already?.found && already.items?.length >= 4) return { ok: true, panel: already, cached: true };
+    const cands = await this.chatToolbar(page, input);
+    // 只点「表情」和认不出来的那些：发图会弹系统文件框、发送会发空消息、语音会开始录音
+    const safe = cands.filter((c) => c.kind !== 'upload' && c.kind !== 'send' && c.kind !== 'voice');
+    const known = this.emojiBtn && this.emojiBtn.page === page ? this.emojiBtn : null;
+    const order = safe.length ? safe : known ? [{ ...known, kind: 'other', hint: '' }] : [];
+    if (!order.length) {
+      const dump = await this.dumpChatDebug(page, 'emoji-toolbar', { cands });
+      return { ok: false, code: 'NO_TOOLBAR', error: '输入框旁边没找到表情按钮（抖音可能改版了）', dump };
+    }
+    for (const c of order.slice(0, 3)) {
+      await page.mouse.click(c.x, c.y).catch(() => {});
+      await page.waitForTimeout(240);
+      const panel = await this.probePanel(page);
+      if (panel?.found && panel.items?.length >= 4) {
+        this.emojiBtn = { page, x: c.x, y: c.y, cls: c.cls, e2e: c.e2e };
+        return { ok: true, panel, clicked: c };
+      }
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(60);
+    }
+    const dump = await this.dumpChatDebug(page, 'emoji-panel', { cands });
+    return { ok: false, code: 'NO_EMOJI_PANEL', error: '点了表情按钮，但没有面板弹出来（抖音可能改版了）', dump, cands };
+  }
+
+  /** 点面板里的第 i 个表情；点完确认真的发出去了（或至少进了输入框）。 */
+  async clickPanelItem(page, input, item) {
+    const before = await this.chatSig(page);
+    await page.mouse.click(item.x, item.y).catch(() => {});
+    let sent = false;
+    for (let i = 0; i < 18; i += 1) {
+      await page.waitForTimeout(80);
+      if ((await this.chatSig(page)) !== before) {
+        sent = true;
+        break;
+      }
+    }
+    if (sent) return { ok: true, via: 'panel' };
+    // 有些表情只是插进输入框（小黄脸就是这样），再回车发出去。
+    // 注意面板是 semi-modal：不关掉的话遮罩会挡住输入框，回车根本进不去。
+    await this.closeChatModals(page);
+    const typed = await this.inputText(page, input);
+    if (!typed) return { ok: false, code: 'NOT_SENT', error: '点了表情，但消息没发出去' };
+    await input.click({ force: true }).catch(() => {});
+    await page.keyboard.press('Enter').catch(() => {});
+    for (let i = 0; i < 20; i += 1) {
+      await page.waitForTimeout(80);
+      if (!(await this.inputText(page, input))) return { ok: true, via: 'panel+enter' };
+    }
+    return { ok: false, code: 'NOT_SENT', error: '表情插进输入框了，但回车没发出去' };
+  }
+
+  /** 按 src 认人：抖音 CDN 的图带签名参数，比对时只看到 `?` 之前。 */
+  sameSrc(a, b) {
+    const clean = (s) => String(s ?? '').split('?')[0].replace(/^https?:/, '');
+    if (!a || !b) return false;
+    return clean(a) === clean(b);
+  }
+
+  /**
+   * 关掉聊天里弹着的浮层。抖音的表情面板、发图确认框都是 semi-modal，
+   * Escape 它们**不认**（实测按了也没关），点遮罩最稳。
+   */
+  async closeChatModals(page) {
+    for (let i = 0; i < 3; i += 1) {
+      const mask = page.locator('.semi-modal-mask').first();
+      if (!(await mask.count().catch(() => 0))) return;
+      await mask.click({ position: { x: 6, y: 6 }, timeout: 1200 }).catch(() => {});
+      await page.waitForTimeout(120);
+    }
+  }
+
+  /**
+   * 发一张表情：库里记过 src（= 抖音收藏里有的），直接在面板里点它；
+   * 不在面板里就把本地文件当图片发上去。
+   */
+  async sendStickerInChat(page, input, { file = '', src = '', name = '' } = {}) {
+    // 有 src 才值得开面板找（开面板要一两秒）；纯本地文件直接走上传
+    if (src) {
+      const opened = await this.openEmojiPanel(page, input);
+      if (opened.ok) {
+        const hit = opened.panel.items.find((it) => this.sameSrc(it.src, src));
+        if (hit) {
+          const r = await this.clickPanelItem(page, input, hit);
+          await this.closeChatModals(page);
+          if (r.ok) return { ...r, sticker: name };
+        }
+        // 面板开着会盖住输入区，走上传前先关掉，不然发送按钮点不到
+        await this.closeChatModals(page);
+      }
+    }
+    if (file && fs.existsSync(file)) {
+      const up = await this.sendChatImage(page, input, file);
+      return { ...up, sticker: name };
+    }
+    return { ok: false, code: 'NO_STICKER', error: '表情面板里没有这张，也没有本地文件可发。' };
+  }
+
+  /**
+   * 把本地图片当附件发进聊天：点工具按钮 → 接住系统文件选择框 → 等预览 → 发送。
+   * 表情包发出去是图片消息，不是「收藏表情」；能点面板时优先走面板。
+   */
+  async sendChatImage(page, input, filePath) {
+    if (!fs.existsSync(filePath)) return { ok: false, code: 'NO_FILE', error: `找不到文件：${filePath}` };
+    // 上一轮可能把表情面板留在屏幕上（它是个 semi-modal，会挡住输入区），先关掉
+    await this.closeChatModals(page);
+    // 最先试输入区里直接挂着的隐藏 input[type=file]：实测抖音的输入栏里一直有两个，
+    // 塞文件就走上传，不用点图标、不用接系统文件框（点图标要等 700ms，还可能点空）。
+    // 必须在选文件之前记指纹：有的版本 setFiles 当场就把消息发出去了
+    const before = await this.chatSig(page);
+    if (await this.feedFileInput(page, filePath, input)) {
+      return await this.afterImagePicked(page, input, before);
+    }
+    const cands = await this.chatToolbar(page, input);
+    // 已经知道哪个是表情按钮了，就别再去点它（点开面板还要再关，白等一秒）
+    const emoji = this.emojiBtn && this.emojiBtn.page === page ? this.emojiBtn : null;
+    const near = (c, k) => k && Math.abs(c.x - k.x) <= 8 && Math.abs(c.y - k.y) <= 8;
+    const order = cands
+      .filter((c) => !near(c, emoji))
+      .filter((c) => c.kind !== 'send' && c.kind !== 'voice')
+      .sort((a, b) => (a.kind === 'upload' ? -1 : 0) - (b.kind === 'upload' ? -1 : 0) || a.x - b.x);
+    if (!order.length) {
+      const dump = await this.dumpChatDebug(page, 'image-toolbar', { cands });
+      return { ok: false, code: 'NO_TOOLBAR', error: '输入框旁边没找到发图片的按钮', dump };
+    }
+    for (const c of order) {
+      const chooserPromise = page.waitForEvent('filechooser', { timeout: 700 }).catch(() => null);
+      await page.mouse.click(c.x, c.y).catch(() => {});
+      // 抖音多数版本不弹系统框，只在按钮旁边挂一个隐藏的 input[type=file]。
+      // 先给它 120ms 挂上去，找到了就直接喂文件，不用等 filechooser 超时（省半秒）。
+      await page.waitForTimeout(120);
+      if (await this.feedFileInput(page, filePath, input)) {
+        chooserPromise.then((ch) => ch?.setFiles([]).catch(() => {})).catch(() => {});
+        return await this.afterImagePicked(page, input, before);
+      }
+      const chooser = await chooserPromise;
+      if (chooser) {
+        await chooser.setFiles(filePath).catch(() => {});
+        return await this.afterImagePicked(page, input, before);
+      }
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(60);
+    }
+    const dump = await this.dumpChatDebug(page, 'image-upload', { cands });
+    return { ok: false, code: 'NO_UPLOAD', error: '没找到发图片的入口（抖音可能改版了）', dump };
+  }
+
+  /** 页面里有隐藏的 input[type=file]（accept 是图片）就往里塞文件；塞成功返回 true。 */
+  async feedFileInput(page, filePath, scope = null) {
+    const roots = [];
+    if (scope) {
+      const inner = scope.locator('input[type="file"]');
+      if ((await inner.count().catch(() => 0)) > 0) roots.push(inner);
+    }
+    roots.push(page.locator('input[type="file"]'));
+    for (const loc of roots) {
+      const count = await loc.count().catch(() => 0);
+      for (let i = 0; i < count; i += 1) {
+        const el = loc.nth(i);
+        const accept = String((await el.getAttribute('accept').catch(() => '')) ?? '');
+        if (accept && !/image|\.png|\.jpe?g|\.gif|\.webp/i.test(accept)) continue;
+        const done = await el.setInputFiles(filePath).then(() => true).catch(() => false);
+        if (done) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 图选好之后：抖音有时自动发，有时要再点一次「发送」。
+   * 判据用 chatSig（图片消息不一定带 msg-item-content，只数那个会漏——实测图片其实已经发出去了，
+   * 却因为数不到又按了一次回车，弹「不能发送空白消息」）。
+   */
+  async afterImagePicked(page, input, before) {
+    const changed = async () => (await this.chatSig(page)) !== before;
+    /**
+     * 抖音选完图会先弹一个确认框：
+     *   「发送给 小月月一直在玩, 穹, 大萌神(3)   s_811c597ed5c8.png  118.2 KB   取消   发送（1）」
+     * 不点那个「发送」，图就一直挂在预览里——上一版漏了这一步，回执写「图选上了但没确认发出去」，
+     * 界面上其实什么都不会出现。所以这里一边等消息变化，一边盯着这个确认框。
+     */
+    const modalSend = () =>
+      page.locator('.semi-modal-wrap button:has-text("发送"), .semi-modal-wrap [role="button"]:has-text("发送")').last();
+    let viaModal = false;
+    let until = Date.now() + 4000;
+    while (Date.now() < until) {
+      await page.waitForTimeout(100);
+      if (await changed()) return { ok: true, via: viaModal ? 'upload+modal' : 'upload' };
+      if (viaModal) continue;
+      const btn = modalSend();
+      if ((await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false))) {
+        await btn.click({ timeout: 3000 }).catch(() => {});
+        viaModal = true;
+        // 点完「发送」还要等消息真的落地，多给几秒
+        until = Date.now() + 5000;
+      }
+    }
+    // 有的版本不弹确认框：图挂在输入区当预览，得再点一下那个红按钮。
+    // 预览要时间，先等它出来（没有预览就点发送只会弹「不能发送空白消息」）。
+    const preview = async () =>
+      await input
+        .evaluate((el) => {
+          const box = el.closest('[data-e2e="msg-input"]') || el;
+          return Array.from(box.querySelectorAll('img')).some((im) => {
+            const r = im.getBoundingClientRect();
+            return r.width >= 24 && r.height >= 24;
+          });
+        })
+        .catch(() => false);
+    let ready = false;
+    for (let i = 0; i < 12; i += 1) {
+      if (await preview()) {
+        ready = true;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    // 发送按钮是个 svg（class 里带 e2e-send-msg-btn / publishBtn），不是 data-e2e
+    const send = page.locator('[data-e2e="msg-send"], .e2e-send-msg-btn, [class*="publishBtn"]').first();
+    const typed = await this.inputText(page, input);
+    if ((ready || typed) && (await send.count().catch(() => 0)) > 0) {
+      await send.click({ timeout: 3000 }).catch(() => {});
+      for (let i = 0; i < 40; i += 1) {
+        await page.waitForTimeout(100);
+        if (await changed()) return { ok: true, via: 'upload+button' };
+      }
+    }
+    // 只有输入框里真有东西才回车：空着回车会弹「不能发送空白消息」
+    if (typed) {
+      await input.click({ force: true }).catch(() => {});
+      await page.keyboard.press('Enter').catch(() => {});
+      for (let i = 0; i < 30; i += 1) {
+        await page.waitForTimeout(100);
+        if (await changed()) return { ok: true, via: 'upload+enter' };
+      }
+    }
+    const dump = await this.dumpChatDebug(page, 'image-send', { before, ready, viaModal });
+    return {
+      ok: false,
+      code: 'NOT_SENT',
+      error: viaModal ? '点了确认框的「发送」，但消息没落地（多半被限流）' : '图选上了，但没确认发出去（可能还在上传，或者被限流）',
+      dump,
+    };
+  }
+
+  /** 在页面里把图抓下来：先走 context 的 request（带 cookie），不行再用页内 fetch。 */
+  async fetchImageBytes(page, src) {
+    const url = String(src ?? '').trim();
+    if (!/^https?:/.test(url)) return null;
+    try {
+      const resp = await page.context().request.get(url, {
+        headers: { Referer: `${ORIGIN}/`, Accept: 'image/avif,image/webp,image/*,*/*;q=0.8' },
+        timeout: 15000,
+      });
+      if (resp.ok()) {
+        const body = await resp.body();
+        if (body?.length) return body;
+      }
+    } catch {
+      // 换页内 fetch
+    }
+    const b64 = await page
+      .evaluate(async (u) => {
+        try {
+          const r = await fetch(u, { credentials: 'include' });
+          if (!r.ok) return '';
+          const blob = await r.blob();
+          return await new Promise((resolve) => {
+            const fr = new FileReader();
+            fr.onload = () => resolve(String(fr.result || '').split(',')[1] || '');
+            fr.onerror = () => resolve('');
+            fr.readAsDataURL(blob);
+          });
+        } catch {
+          return '';
+        }
+      }, url)
+      .catch(() => '');
+    if (!b64) return null;
+    try {
+      return Buffer.from(b64, 'base64');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 收藏：把表情面板里现在能看到的那些图存进本地表情库。
+   * 这是「收藏抖音表情包」最靠谱的入口——面板里就是她自己账号的收藏 + 官方表情。
+   * 面板底下那排 tab 里如果有「收藏 / 我的」，也顺手点进去收一遍。
+   */
+  async collectStickers(page, input, { limit = 12, source = 'douyin' } = {}) {
+    const opened = await this.openEmojiPanel(page, input);
+    const max = Math.max(1, Math.min(30, Number(limit) || 12));
+    const seen = new Set();
+    let saved = 0;
+    let dup = 0;
+    let failed = 0;
+    const names = [];
+    const tabs = opened?.panel?.tabs?.map((t) => t.label).filter(Boolean) ?? [];
+
+    const grab = async (items) => {
+      for (const it of items) {
+        if (saved + dup >= max) return;
+        const key = String(it.src ?? '').split('?')[0];
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        const buf = await this.fetchImageBytes(page, it.src);
+        if (!buf) {
+          failed += 1;
+          continue;
+        }
+        const r = this.stickers?.addBuffer?.(buf, {
+          source,
+          src: it.src,
+          name: `表情${(this.stickers?.stats?.().total ?? 0) + 1}`,
+        });
+        if (r?.ok) {
+          if (r.duplicate) dup += 1;
+          else {
+            saved += 1;
+            names.push(r.entry.name);
+          }
+        } else {
+          failed += 1;
+        }
+      }
+    };
+
+    if (opened?.ok) {
+      await grab(opened.panel.items);
+      // 「收藏 / 我的」那一栏里的才是她自己的表情包，默认那栏往往只是官方小黄脸
+      const favTab = (opened.panel.tabs ?? []).find((t) => /收藏|我的|自定义|表情包/.test(String(t.label ?? '')));
+      if (favTab && saved + dup < max) {
+        await page.mouse.click(favTab.x, favTab.y).catch(() => {});
+        await page.waitForTimeout(500);
+        const again = await this.probePanel(page);
+        if (again?.found && again.items?.length) await grab(again.items);
+      }
+    }
+    // 面板打不开、或者面板是一张雪碧图（抓不到一张张小图）时退一步：
+    // 把聊天记录里别人发过的表情/图片收进来——「收藏表情包」本来也是收看到的那张。
+    let via = opened?.ok ? 'panel' : '';
+    if (!saved && !dup) {
+      const fromChat = await page
+        .evaluate(() => {
+          const out = [];
+          for (const el of Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]'))) {
+            for (const img of Array.from(el.querySelectorAll('img'))) {
+              const r = img.getBoundingClientRect();
+              if (r.width < 36 || r.width > 260 || r.height < 36 || r.height > 260) continue;
+              const src = img.currentSrc || img.src || '';
+              if (/^https?:/.test(src)) out.push(src);
+            }
+          }
+          return out.slice(0, 40);
+        })
+        .catch(() => []);
+      if (fromChat.length) {
+        via = 'chat';
+        await grab(fromChat.map((src) => ({ src })));
+      }
+    }
+    // 面板是 semi-modal，收完不关会一直挡着输入区
+    if (opened?.ok) await this.closeChatModals(page);
+    return {
+      ok: saved + dup > 0,
+      saved,
+      duplicate: dup,
+      failed,
+      via: via || 'none',
+      panel: { found: opened?.panel?.items?.length ?? 0, tabs },
+      names,
+      code: saved + dup > 0 ? undefined : opened?.code,
+      dump: opened?.dump,
+      error:
+        saved + dup > 0
+          ? undefined
+          : opened?.error ?? '面板和聊天记录里都没抓到图（可能是懒加载还没出图，或者这个会话里还没有表情）',
+    };
+  }
+
+  /** 记下最近发出去的话（5 分钟内有效，最多 10 条）。 */
+  noteSent(text) {
+    const t = String(text ?? '').trim();
+    if (!t) return;
+    const now = Date.now();
+    this.recentSent = [{ text: t, at: now }, ...(this.recentSent ?? [])].filter((x) => now - x.at < 5 * 60 * 1000).slice(0, 10);
+  }
+
+  /** 这句是不是我 3 分钟内刚发的（群消息里抖音可能不给 isFromMe，兜底用）。 */
+  wasJustSent(text) {
+    const t = String(text ?? '').trim();
+    if (!t) return false;
+    const now = Date.now();
+    return (this.recentSent ?? []).some((x) => x.text === t && now - x.at < 3 * 60 * 1000);
   }
 
   async dm(secUid, text) {
@@ -2176,10 +3530,29 @@ export class DouyinBrowser {
    *   - 读不到再退回 innerText
    * DOM 顺序是「最新在前」，这里翻成时间顺序返回。
    */
-  async readMessages(page, size = 12) {
+  async readMessages(page, size = 12, { group = false, selfName = '' } = {}) {
     return await page
-      .evaluate((n) => {
+      .evaluate(([n, withSender, self]) => {
+        // 「是不是我发的」：抖音把语义拼在块名后面（messageMessageBoxisFromMe /
+        // MessageBoxContentisFromMe），用「包含」匹配才对得上。
         const isMine = (el) => !!(el.closest && el.closest('[class*="isFromMe"]'));
+        /**
+         * 群里要分清是谁说的。实测（2026-11）昵称在 `MessageBoxMessageTitleavatarName`，
+         * 而且**只出现在一段连续消息的最上面那条**——也就是 DOM 里最旧的那一条
+         * （消息列表是 column-reverse，DOM 首元素是最新的）。其余条目完全不带名字，
+         * 所以这里拿不到就返回空串，交给下面「从旧往新继承」那一步补。
+         */
+        const senderOf = (el) => {
+          if (!withSender) return '';
+          const row = el.closest('[class*="messageMessageBox"]') || el.parentElement;
+          if (!row) return '';
+          const cand = row.querySelector(
+            '[class*="avatarName"], [class*="nickname"], [class*="Nickname"], [class*="userName"], [class*="UserName"]',
+          );
+          const t = String(cand?.innerText || '').replace(/\s+/g, ' ').trim();
+          // 昵称后面常跟「群主 / 管理员」角色标签，混进 innerText 会变成「小月月群主」
+          return Array.from(t.replace(/(群主|管理员|群成员)$/, '')).slice(0, 20).join('');
+        };
         const parsedOf = (el) => {
           const key = Object.keys(el).find((k) => k.indexOf('__reactProps$') === 0);
           if (!key) return null;
@@ -2247,23 +3620,97 @@ export class DouyinBrowser {
             text = cut(raw, 200);
             url = urlIn(raw);
           } else if (imgs) {
-            kind = 'image';
-            text = `[图片${imgs > 1 ? `×${imgs}` : ''}]`;
+            // 大表情 / 贴纸也走 img，但 props 里有 emoji_type / package_id 这些标记
+            const isEmoji = !!(p.emoji_type || p.image_type || p.package_id || p.resource_type);
+            kind = isEmoji ? 'emoji' : 'image';
+            text = isEmoji ? '[表情]' : `[图片${imgs > 1 ? `×${imgs}` : ''}]`;
           } else {
             continue;
           }
           if (!text) continue;
+          // 群里抖音不一定给 isFromMe：昵称和自己一样也算「我发的」，
+          // 免得把自己刚说的话当成别人说的、回头又回一遍。
+          const nick = isMine(el) ? '' : senderOf(el);
+          const mine = isMine(el) || (!!self && !!nick && nick === self);
           out.push({
-            from: isMine(el) ? 'me' : 'them',
+            from: mine ? 'me' : 'them',
             kind,
             text: cut(text, 220),
             url,
             title,
             author,
+            // 先记下「这一条自己带没带名字」，没带的由下面统一继承
+            who: mine ? '' : nick,
           });
         }
-        // 最新在前 → 时间顺序
-        return out.slice(0, n).reverse();
+        // DOM 是最新在前，倒过来就是时间顺序
+        const ordered = out.slice(0, n).reverse();
+        // 群里的昵称只标在一段连续消息的**最旧那条**上，所以从旧往新走，
+        // 没名字的就沿用上一个说话的人。切了人（新的一段）自然会重新赋值。
+        let lastWho = '';
+        for (const m of ordered) {
+          if (m.from === 'me') {
+            lastWho = '';
+            continue;
+          }
+          if (m.who) lastWho = m.who;
+          else if (lastWho) m.who = lastWho;
+        }
+        return ordered;
+      }, [size, group, selfName])
+      .catch(() => []);
+  }
+
+  /**
+   * 群消息读取：先走和私信同一条路（`msg-item-content`）。
+   * 群里有系统提示、版本差异的气泡没有这个标记，读不到就退回按消息列表的行来解析。
+   * 群里还要分清是谁说的，所以多带一个 who（拿不到就是空串，调用方自己兜底成「有人」）。
+   */
+  async readGroupMessages(page, size = 10) {
+    const selfName = await this.selfNickname().catch(() => '');
+    const base = await this.readMessages(page, size, { group: true, selfName });
+    const rows = base.length ? base : await this.readGroupRows(page, size);
+    // 最后一层兜底：刚发出去的那几句，如果抖音既没给 isFromMe 也没给昵称，
+    // 就按「我发的」算——不然她会把自己刚说的话当成别人说的，回头再回一遍。
+    return rows.map((m) => (m.from === 'them' && this.wasJustSent(m.text) ? { ...m, from: 'me', who: '' } : m));
+  }
+
+  /** 群里没有 `msg-item-content` 标记时的退路：直接按消息列表的行解析。 */
+  async readGroupRows(page, size = 10) {
+    return await page
+      .evaluate((n) => {
+        const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+        const cut = (s, len) => {
+          const a = Array.from(clean(s));
+          return a.length > len ? `${a.slice(0, len).join('')}…` : a.join('');
+        };
+        const list = document.querySelector('[class*="messageMessageListlist"]');
+        if (!list) return [];
+        const rows = Array.from(list.children).slice(-n);
+        const out = [];
+        for (const row of rows) {
+          const rowCls = String(row.className || '');
+          const head = String(row.innerHTML || '').slice(0, 120);
+          // 系统提示（「邀请你加入了群聊」）和时间分隔不是人说的话，跳过
+          if (/GroupNotice|TimeLayout|SystemTip/.test(rowCls) || /GroupNotice/.test(head)) continue;
+          const box = row.querySelector('[class*="messageMessageBox"]') || row;
+          const me = /isFromMe/.test(String(box.className || ''));
+          const content =
+            box.querySelector('[data-e2e="msg-item-content"]') || box.querySelector('[class*="MessageBoxContent"]') || box;
+          const text = cut(content.innerText, 200);
+          if (!text) continue;
+          const nickEl = box.querySelector('[class*="avatarName"], [class*="nickname"], [class*="Nickname"], [class*="userName"]');
+          out.push({
+            from: me ? 'me' : 'them',
+            kind: content.querySelector('img') ? 'image' : 'text',
+            text,
+            url: '',
+            title: '',
+            author: '',
+            who: me ? '' : cut(nickEl?.innerText, 20),
+          });
+        }
+        return out;
       }, size)
       .catch(() => []);
   }
@@ -2293,6 +3740,113 @@ export class DouyinBrowser {
     const msgs = await this.readThread(page, name, size);
     this.scheduleClose(60);
     return msgs;
+  }
+
+  /**
+   * 列出现在有哪些会话（零点击、不跳转会话）。
+   * 抖音网页版把群和私信放在同一个列表里，也没有可靠的「这是群」标记，
+   * 所以这里如实返回名字 + 预览 + 未读，由调用方按名字认群。
+   */
+  async listThreads() {
+    return this.serialize(async () => {
+      const page = await this.getPage();
+      if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，看不了会话列表');
+      if (!/\/chat/.test(page.url())) await this.goto(page, `${ORIGIN}/chat`, 2600);
+      await this.dismissBubbles(page);
+      const rows = await page
+        .evaluate(() => {
+          const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+          /**
+           * 私信会话的 React props 里有 `toParticipantSecUserId`（对方 sec_uid），
+           * 群会话这个字段是空串（实测 2026-11）。比「名字里有没有逗号」可靠得多：
+           * 群没起名时抖音会把成员名拼起来，但起了名的群就不带逗号了。
+           * 拿不到 props 时退回名字启发式。
+           */
+          const conversationMeta = (el) => {
+            const key =
+              Object.keys(el).find((k) => k.indexOf('__reactProps$') === 0) ||
+              Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
+            if (!key) return null;
+            const seen = new Set();
+            let out = null;
+            const walk = (v, d) => {
+              if (out || !v || typeof v !== 'object' || d > 8 || seen.has(v)) return;
+              seen.add(v);
+              if (Object.prototype.hasOwnProperty.call(v, 'toParticipantSecUserId')) {
+                out = { secUid: String(v.toParticipantSecUserId ?? ''), sortOrder: Number(v.sortOrder ?? 0) };
+                return;
+              }
+              for (const k of Object.keys(v)) {
+                if (k === '_owner' || k === 'ref' || k === 'return' || k === 'stateNode' || k === 'child' || k === 'sibling') continue;
+                walk(v[k], d + 1);
+                if (out) return;
+              }
+            };
+            try {
+              walk(el[key], 0);
+            } catch {
+              // props 里有循环引用就算没有
+            }
+            return out;
+          };
+          return Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'))
+            .slice(0, 30)
+            .map((el) => {
+              const lines = (el.innerText || '').split('\n').map(clean).filter(Boolean);
+              const badge = el.querySelector('[class*="unread"], [class*="Unread"]');
+              const unread = Number(clean(badge?.innerText).replace(/\D/g, '')) || 0;
+              const meta = conversationMeta(el);
+              const name = lines[0] || '';
+              const isGroup = meta ? meta.secUid === '' : /,\s/.test(name);
+              return {
+                name,
+                preview: lines.slice(1).join(' ').slice(0, 60),
+                unread,
+                kind: isGroup ? 'group' : 'dm',
+                secUid: meta?.secUid || '',
+                lastAt: meta?.sortOrder || 0,
+              };
+            })
+            .filter((x) => x.name);
+        })
+        .catch(() => []);
+      this.scheduleClose(60);
+      return { ok: true, threads: rows };
+    });
+  }
+
+  /**
+   * 点群邀请链接进群。
+   * 抖音没有「搜群号加入」这条路，只能被邀请或者点别人的邀请链接，
+   * 所以这里只做三件事：打开链接、找到「加入群聊」、点它。
+   */
+  async joinGroup(url) {
+    const link = String(url ?? '').trim();
+    if (!/^https?:\/\//i.test(link)) throw new DouyinError('BAD_LINK', '要一个 http/https 的群邀请链接');
+    return this.serialize(async () => {
+      const page = await this.getPage();
+      if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，进不了群');
+      await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      await humanPause(1400, 2200);
+      const clicked = await page
+        .evaluate(() => {
+          const nodes = Array.from(document.querySelectorAll('button, div, span, a'));
+          const hit = nodes.find((n) => {
+            const t = String(n.textContent || '').replace(/\s+/g, '');
+            if (!/^(加入群聊|加入该群|立即加入|加入)$/.test(t)) return false;
+            const r = n.getBoundingClientRect();
+            return r.width > 40 && r.height > 20;
+          });
+          if (!hit) return false;
+          hit.click();
+          return true;
+        })
+        .catch(() => false);
+      if (!clicked) return { ok: false, code: 'NO_JOIN_BUTTON', url: page.url() };
+      await humanPause(1200, 2000);
+      const body = await page.evaluate(() => (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 200)).catch(() => '');
+      return { ok: true, joined: /已加入|进群|群聊/.test(body), url: page.url() };
+    });
   }
 
   /**
@@ -2342,8 +3896,7 @@ export class DouyinBrowser {
     });
   }
 
-  /** 读会话列表里某个人那一行（零点击）：预览文本 + 未读数。 */
-  async readRow(page, want) {
+  /** 读会话列表里某个人那一行（零点击）：预览文本 + 未读数。 */  async readRow(page, want) {
     return await page
       .evaluate((name) => {
         const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -2362,7 +3915,11 @@ export class DouyinBrowser {
   }
 
   /** 在抖音聊天页回一条私信：按昵称找到会话，点进去输入。 */
-  async replyDm(name, text) {
+  /**
+   * 在聊天页发一条。mention 是「要真的 @ 到的昵称」（群里才有意义）：
+   * 传了就会先从候选面板插一个真 chip，再写正文。
+   */
+  async replyDm(name, text, { mention = '' } = {}) {
     const who = String(name ?? '').trim();
     if (!who) throw new DouyinError('BAD_TARGET', '没有会话昵称，回不了');
     // 私信页正停在这个会话上：不用跳转、不用点会话，直接打字回车。
@@ -2371,9 +3928,19 @@ export class DouyinBrowser {
     if (dm && !dm.isClosed() && this.dmThread === who) {
       const input = await this.waitMsgInput(dm, 3000).catch(() => null);
       if (input) {
-        await this.sendInChat(dm, input, text);
+        await this.sendInChat(dm, input, text, { mention });
         this.lastAction = `dm ${who}`;
-        return { ok: true, sent: true, fast: true };
+        return { ok: true, sent: true, fast: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
+      }
+    }
+    // 群：那个群的监听页正停在群里，同样可以直接在那页打字（零跳转）
+    const slot = this.groupPages?.get?.(who);
+    if (slot?.page && !slot.page.isClosed() && slot.thread === who) {
+      const input = await this.waitMsgInput(slot.page, 3000).catch(() => null);
+      if (input) {
+        await this.sendInChat(slot.page, input, text, { mention });
+        this.lastAction = `group ${who}`;
+        return { ok: true, sent: true, fast: true, group: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
       }
     }
     return this.serialize(async () => {
@@ -2383,22 +3950,112 @@ export class DouyinBrowser {
         // 已经在这个会话里就直接用：省一次整页跳转和点击，回私信快好几秒
         if (this.openThread !== who || !/\/chat/.test(page.url())) {
           if (!/\/chat/.test(page.url())) await this.goto(page, `${ORIGIN}/chat`, 5200);
-          const item = page.locator('[data-e2e="conversation-item"]', { hasText: who }).first();
-          if (!(await item.count())) throw new DouyinError('NO_DM', '聊天列表里找不到这个会话，可能被新消息刷下去了');
-          await item.click({ timeout: 6000 });
+          const ok = await this.clickThread(page, who);
+          if (!ok) throw new DouyinError('NO_DM', '聊天列表里找不到这个会话，可能被新消息刷下去了');
           this.openThread = who;
           // 点完不用干等两秒：下面 waitMsgInput 会一轮一轮等到输入框真的能打字
           await page.waitForTimeout(200);
         }
         const input = await this.waitMsgInput(page, 6000);
         if (!input) throw new DouyinError('NO_INPUT', '没找到输入框，抖音可能改版了');
-        await this.sendInChat(page, input, text);
+        await this.sendInChat(page, input, text, { mention });
         this.lastAction = `dm ${who}`;
-        return { ok: true, sent: true };
+        return { ok: true, sent: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
       } finally {
         this.scheduleClose(60);
       }
     });
+  }
+
+  /**
+   * 点开会话列表里的某个人/某个群。
+   * 不能用 hasText 直接点：群名常常是「主人名, 另一个人, 再一个」，按子串找会
+   * 把发给主人的私信点成群聊。先按标题整串相等找，再退回包含。
+   */
+  async clickThread(page, name) {
+    const want = String(name ?? '').trim();
+    if (!want) return false;
+    const box = await page
+      .evaluate((target) => {
+        const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+        const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
+        const titleOf = (el) => {
+          const t = el.querySelector('[class*="ConversationItemtitle"]');
+          const line = String((el.innerText || '').split('\n')[0] || '');
+          return norm(t?.innerText || line);
+        };
+        let hit = items.find((el) => titleOf(el) === norm(target));
+        if (!hit) {
+          // 群名可能被截断（列表里显示不全），这时才用包含
+          const partial = items.filter((el) => titleOf(el).includes(norm(target)));
+          if (partial.length === 1) hit = partial[0];
+        }
+        if (!hit) return null;
+        hit.scrollIntoView({ block: 'nearest' });
+        const r = hit.getBoundingClientRect();
+        if (r.width < 10 || r.height < 10) return null;
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      }, want)
+      .catch(() => null);
+    if (!box) return false;
+    await page.mouse.click(box.x, box.y).catch(() => {});
+    return true;
+  }
+
+  /**
+   * 找一页停在某个会话上的聊天页：群的监听页优先，其次私信页，都没有就自己开一页点进去。
+   * 返回 { page, input, group, fast }。
+   */
+  async chatPageOf(who) {
+    const name = String(who ?? '').trim();
+    const slot = name ? this.groupPages?.get?.(name) : null;
+    if (slot?.page && !slot.page.isClosed() && slot.thread === name) {
+      const input = await this.waitMsgInput(slot.page, 2500).catch(() => null);
+      if (input) return { page: slot.page, input, group: true, fast: true };
+    }
+    if (this.dmPage && !this.dmPage.isClosed() && (!name || this.dmThread === name)) {
+      const input = await this.waitMsgInput(this.dmPage, 2500).catch(() => null);
+      if (input) return { page: this.dmPage, input, fast: true };
+    }
+    return await this.serialize(async () => {
+      const page = await this.getPage();
+      if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录');
+      const opened = await (async () => {
+        if (!/\/chat/.test(page.url())) await this.goto(page, `${ORIGIN}/chat`, 5200);
+        if (name && this.openThread !== name) {
+          const ok = await this.clickThread(page, name);
+          if (!ok) throw new DouyinError('NO_DM', '聊天列表里找不到这个会话');
+          this.openThread = name;
+          await page.waitForTimeout(200);
+        }
+        const input = await this.waitMsgInput(page, 6000);
+        if (!input) throw new DouyinError('NO_INPUT', '没找到输入框，抖音可能改版了');
+        return { page, input, fast: false };
+      })();
+      return opened;
+    });
+  }
+
+  /** 发一张表情到某个会话（群名 / 昵称 / 留空 = 当前会话）。 */
+  async sendStickerTo(who, { file = '', src = '', label = '' } = {}) {
+    const t = await this.chatPageOf(who);
+    try {
+      const r = await this.sendStickerInChat(t.page, t.input, { file, src, name: label });
+      if (r.ok) this.lastAction = `sticker ${who || 'chat'}`;
+      return r;
+    } finally {
+      if (!t.fast) this.scheduleClose(60);
+    }
+  }
+
+  /** 收藏：打开某个会话的表情面板，把里面的表情存进本地库。 */
+  async collectStickersFrom(who, { limit = 12 } = {}) {
+    const t = await this.chatPageOf(who);
+    try {
+      return await this.collectStickers(t.page, t.input, { limit, source: 'douyin' });
+    } finally {
+      if (!t.fast) this.scheduleClose(60);
+    }
   }
 
   /**
@@ -2492,6 +4149,11 @@ export class DouyinBrowser {
     this.dmPage = null;
     this.dmThread = '';
     this.dmArmedAt = 0;
+    for (const slot of this.groupPages.values()) {
+      if (slot.settle) clearTimeout(slot.settle);
+      await slot.page?.close().catch(() => {});
+    }
+    this.groupPages.clear();
     await this.context?.close().catch(() => {});
     this.context = null;
   }

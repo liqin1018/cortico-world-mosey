@@ -62,6 +62,18 @@ export const DEFAULTS = {
    */
   dmPollSec: 5,
 
+  /** 书库目录；留空用数据目录下的 stroll/books。面板「选文件夹」会写这里。 */
+  booksDir: '',
+
+  /** 盯抖音群：新消息像私信一样立刻叫她。 */
+  groupWatch: true,
+  /**
+   * 要盯的抖音群（群名，逗号分隔，最多 2 个）。**留空 = 自动盯她所在的所有群**（最多 2 个）。
+   * 抖音的群没起名时，会话列表里显示的是成员名拼起来的（「A, B, C」），
+   * 所以一般不用手填——留空就好。
+   */
+  douyinGroups: '',
+
   /** 复用应用里已有的 B站登录资料（通常是小号/桌宠号）。 */
   sharedBiliCookie: true,
   /** 每天给这个小家伙的模型预算，超了就只读不主动出门。 */
@@ -150,6 +162,13 @@ const BASIC = {
         title: '主人抖音（主页链接 / sec_uid / 抖音号）',
         description:
           '最稳的是「主页分享链接」：抖音 App → 我 → 右上角分享 → 复制链接，整段粘进来（分享文案里夹着链接也行）。也可以填 MS4w 开头的 sec_uid。纯抖音号填了也解析不了——抖音搜索页对后台浏览器是空的，这条路走不通。抖音不能给自己发私信，桌宠登录的号要和你不是同一个。',
+      },
+      [P + 'booksDir']: {
+        type: 'string',
+        title: '书库文件夹',
+        description:
+          '她想读的书放这儿（txt / md）。留空就用默认目录。可以直接粘路径，也可以在面板「在读」卡片点「选文件夹」用系统窗口挑。',
+        'x-hot': true,
       },
     },
   },
@@ -399,6 +418,18 @@ const MESSAGES = {
         'x-suffix': ' 秒',
         'x-hot': true,
       },
+      [P + 'groupWatch']: {
+        type: 'boolean',
+        title: '盯着抖音群',
+        description: '群里有人说话就叫她一声。她的号没进任何群时这一项没有影响。',
+        'x-hot': true,
+      },
+      [P + 'douyinGroups']: {
+        type: 'string',
+        title: '要盯的抖音群（可留空）',
+        description:
+          '留空就自动盯她所在的群（最多 2 个）——推荐留空。只有想指定某几个群时才填：填群名，和抖音聊天列表里显示的一字不差，多个用逗号隔开。',
+      },
     },
   },
 };
@@ -441,6 +472,9 @@ export const POLICY_FIELDS = {
   watchPollSec: { type: 'int', min: 5, max: 120 },
   dmWatch: { type: 'boolean' },
   dmPollSec: { type: 'int', min: 3, max: 300 },
+  booksDir: { type: 'string', max: 400 },
+  groupWatch: { type: 'boolean' },
+  douyinGroups: { type: 'string', max: 200 },
   tokenDailyBudget: { type: 'int', min: 1000, max: 50000 },
   commentMaxChars: { type: 'int', min: 20, max: 300 },
   riskPauseHours: { type: 'int', min: 1, max: 168 },

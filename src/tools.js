@@ -4,7 +4,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll',
     description:
-      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站/抖音链接都行，/note/ 图文也行）；comments 只读评论区；inbox 看谁回了你（评论/@/私信都算；抖音私信带 recent 最近十几句，含分享的视频/图文链接，还有 pending/said 表示主人连着发了几句）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
+      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站/抖音链接都行，/note/ 图文也行）；comments 只读评论区；inbox 看谁回了你（评论/@/私信都算；抖音私信带 recent 最近十几句，含分享的视频/图文链接，还有 pending/said 表示主人连着发了几句）；groups 看抖音会话列表（私信和群都在里面，会标出哪些是群、正在盯哪几个）；join_group 用群邀请链接进群（url 参数）；stickers 看本地表情包库（query 按名字/标签筛，没有就空）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
     tags: ['read'],
     parameters: {
       type: 'object',
@@ -12,18 +12,19 @@ export const TOOL_DECLS = [
       properties: {
         action: {
           type: 'string',
-          enum: ['status', 'brief', 'feed', 'following', 'open', 'comments', 'inbox', 'search', 'weekly', 'books', 'read', 'note', 'login', 'history', 'whoami', 'watch'],
+          enum: ['status', 'brief', 'feed', 'following', 'open', 'comments', 'inbox', 'search', 'weekly', 'books', 'read', 'note', 'login', 'history', 'whoami', 'watch', 'groups', 'join_group', 'stickers'],
           description: '要做什么。',
         },
         platform: { type: 'string', enum: ['bilibili', 'douyin'], description: '去哪个平台；open 会从链接自动判断。' },
         url: { type: 'string', description: '视频 / 动态 / 专栏链接（open 用）。' },
         id: { type: 'string', description: 'BV 号、av 号、动态 ID、cv 号或抖音视频 ID（open 用）。' },
-        query: { type: 'string', description: '搜索词（search 用）。' },
+        query: { type: 'string', description: '搜索词（search 用）；stickers 用它按名字/标签筛。' },
         n: { type: 'integer', minimum: 1, maximum: 20, description: '要几条，默认 6。' },
         days: { type: 'integer', minimum: 1, maximum: 30, description: 'weekly 看最近几天，默认 7。' },
         book: { type: 'string', description: 'read 用：书名（不带后缀也行）；不填就接着上次那本。' },
         chars: { type: 'integer', minimum: 200, maximum: 2000, description: 'read 一次读多少字，默认 900。' },
         text: { type: 'string', description: 'note 用：要记下来的那句摘抄。' },
+        tag: { type: 'string', description: 'stickers 用：只看带这个标签的表情包。' },
         frames: { type: 'integer', minimum: 0, maximum: 3, description: '抖音抽几帧；默认 0，最省 token。' },
         watch_action: {
           type: 'string',
@@ -37,7 +38,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll_act',
     description:
-      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态）、dm、save（B站稍后再看）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（评论 rpid）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。不要自己批准，不要绕过额度。',
+      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态）、dm、save（B站稍后再看）、sticker（发表情包）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（评论 rpid）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
     tags: ['act', 'speak'],
     parameters: {
       type: 'object',
@@ -45,17 +46,30 @@ export const TOOL_DECLS = [
       properties: {
         action: {
           type: 'string',
-          enum: ['like', 'unlike', 'follow', 'unfollow', 'comment', 'reply', 'post', 'dm', 'save', 'approve', 'reject'],
+          enum: ['like', 'unlike', 'follow', 'unfollow', 'comment', 'reply', 'post', 'dm', 'save', 'approve', 'reject', 'sticker', 'collect_stickers', 'sticker_name'],
         },
         platform: { type: 'string', enum: ['bilibili', 'douyin'] },
         target: {
           type: 'string',
           description:
-            '视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID；私信时不用填——只会发给主人（填了也只能是主人）。',
+            '视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID；私信/发表情包时不用填——默认只会发给主人。要发到抖音群就把 target 写成群名：只写群名的一部分（比如某个成员名）就行，只有一个群时写「群」也算。collect_stickers 也用它指定去哪个群/会话里收。',
         },
-        text: { type: 'string', description: '评论/动态/私信正文。评论不超过 120 字。' },
+        text: {
+          type: 'string',
+          description:
+            '评论/动态/私信正文。评论不超过 120 字。sticker 用它挑表情（名字、序号或 id，留空＝随机一张）；sticker_name 用它当新名字（配 target=表情 id）。',
+        },
         reply_to: { type: 'string', description: '回复评论时，被回复的评论 ID（rpid）。' },
-        mention_owner: { type: 'boolean', description: '公开内容里 @ 主人；默认 false。' },
+        mention_owner: {
+          type: 'boolean',
+          description:
+            '真的 @ 主人（B站评论/动态、抖音评论、抖音群消息都支持）。评论和群消息会在候选面板里选中人插成带 uid 的 chip。**正文里不要自己手写 @昵称**：手打的 @ 只是普通字符，会被染成蓝色但对方收不到通知，还会和真 chip 重复；真带了也会被自动剥掉。',
+        },
+        mention: {
+          type: 'string',
+          description:
+            '群里 @ 谁的昵称（照抄群成员列表，比如「大萌神」）。@主人不用填这个，用 mention_owner: true —— 系统知道主人的抖音昵称。不要填「你」「主人」这种称呼，也不要自己写 @ 符号。',
+        },
         draft_id: { type: 'string', description: 'approve/reject 用。' },
         preview: { type: 'boolean', description: 'true = 只出草稿，不发送。' },
       },

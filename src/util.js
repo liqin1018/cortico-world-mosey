@@ -1,6 +1,6 @@
 /** 小工具：时间、格式化、URL 白名单、人类化等待。 */
 
-import { spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 
 export const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 
@@ -164,6 +164,117 @@ export function openInBrowser(raw) {
   return { ok: true, url };
 }
 
+/**
+ * PowerShell 的 stdout 走的是控制台代码页（中文机器上是 GBK），
+ * Node 按 UTF-8 解就把 `E:\视频` 读成 `E:\��Ƶ`——面板上那串乱码就是这么来的，
+ * 而且还会被当成目录名 mkdir 出来一个乱码文件夹。
+ * 所以跨进程只传 base64（纯 ASCII），Node 这边再按 UTF-16 还原，绕开代码页。
+ */
+function psEncode(text) {
+  return Buffer.from(String(text ?? ''), 'utf16le').toString('base64');
+}
+
+function psDecode(b64) {
+  const raw = String(b64 ?? '').trim();
+  if (!raw) return '';
+  try {
+    return Buffer.from(raw, 'base64').toString('utf16le');
+  } catch {
+    return '';
+  }
+}
+
+/** 路径里带 U+FFFD（= 解码失败留下的替换符）基本就是被代码页坑过的乱码。 */
+export function looksBrokenPath(value) {
+  return /[\uFFFD]/.test(String(value ?? ''));
+}
+
+/**
+ * 把「被 GBK→UTF-8 错解」的路径还原成盘上真实存在的那个目录。
+ * 做法：拿同级目录名做一次 GBK 字节 → UTF-8 解码，跟坏字符串比对，唯一命中才算数。
+ * 只在真的坏了的时候调一次，找不到就返回空串（调用方退回默认目录）。
+ */
+export function repairMojibakePath(bad) {
+  const broken = String(bad ?? '').trim();
+  if (process.platform !== 'win32' || !looksBrokenPath(broken)) return '';
+  const script = [
+    `$bad = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${psEncode(broken)}'))`,
+    '$root = [IO.Path]::GetPathRoot($bad)',
+    'if (-not $root) { exit }',
+    '$rest = $bad.Substring($root.Length)',
+    '$hit = @()',
+    `try { foreach ($d in [IO.Directory]::GetDirectories($root)) { $n = [IO.Path]::GetFileName($d); $m = [Text.Encoding]::UTF8.GetString([Text.Encoding]::GetEncoding(936).GetBytes($n)); if ($m -eq $rest) { $hit += $d } } } catch {}`,
+    "if ($hit.Count -eq 1) { [Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hit[0]))) }",
+  ].join('; ');
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], {
+      timeout: 6000,
+      windowsHide: true,
+      encoding: 'utf8',
+    });
+    const fixed = psDecode(out);
+    return fixed && !looksBrokenPath(fixed) ? fixed : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 弹系统的「选择文件夹」窗口，返回选中的绝对路径；取消或非 Windows 返回空串。
+ * 面板只能拿到字符串路径，弹窗只能在 Node 这边开，所以走 PowerShell 的 FolderBrowserDialog。
+ */
+export function pickFolder(description = '选择文件夹') {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') return resolve('');
+    const safe = String(description).replace(/'/g, "''");
+    const script = [
+      'Add-Type -AssemblyName System.Windows.Forms',
+      '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
+      `$d.Description = '${safe}'`,
+      '$d.ShowNewFolderButton = $true',
+      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($d.SelectedPath))) }',
+    ].join('; ');
+    try {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-STA', '-Command', script],
+        { timeout: 300000, windowsHide: true, encoding: 'utf8' },
+        (error, stdout) => resolve(error ? '' : psDecode(stdout)),
+      );
+    } catch {
+      resolve('');
+    }
+  });
+}
+
+/**
+ * 在资源管理器里打开一个目录（不做递归、不动文件）。
+ * 以前直接 spawn explorer.exe：路径里带中文/特殊字符时它常常一声不吭地什么都不做，
+ * 所以改成让 shell 自己按「双击文件夹」的动作打开（Invoke-Item），路径用 base64 传。
+ */
+export function openFolder(dir) {
+  const target = String(dir ?? '').trim();
+  if (!target) return { ok: false, error: '没有目录。' };
+  if (process.platform === 'win32') {
+    const script = `$p = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${psEncode(target)}')); if (Test-Path -LiteralPath $p) { Invoke-Item -LiteralPath $p }`;
+    try {
+      execFile('powershell.exe', ['-NoProfile', '-Command', script], { timeout: 8000, windowsHide: true }, () => {});
+      return { ok: true, dir: target };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  }
+  const [cmd, args] = process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]];
+  try {
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => {});
+    child.unref();
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) };
+  }
+  return { ok: true, dir: target };
+}
+
 export function parseBvid(value) {
   const text = String(value ?? '');
   const direct = /\b(BV[0-9A-Za-z]{10})\b/.exec(text);
@@ -246,6 +357,17 @@ export function stripAtName(text, name) {
   const escaped = who.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return s
     .replace(new RegExp(`@${escaped}[ \\t]?`, 'g'), '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * 手打的「@你 / @主人」：她不知道主人在抖音叫什么时就会这么写。
+ * 这几个字不是昵称，拿去候选面板里永远找不到人；正文里留着也只是个假 @。
+ */
+export function stripAtPlaceholder(text) {
+  return String(text ?? '')
+    .replace(/@(你|您|主人|主人你|老板)(?=[\s，。！？、,.!?~～…]|$)/g, '')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
 }

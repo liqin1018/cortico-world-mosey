@@ -162,6 +162,20 @@ function cut(text, max) {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
+/**
+ * 路径太长会把三列网格撑爆、压到旁边「这周」上（2026-11 反馈）。
+ * 显示只留最后两级，完整路径放 title，鼠标悬停能看到。
+ */
+function shortPath(dir, keep = 2) {
+  const s = String(dir ?? '').trim();
+  if (!s) return '';
+  if (s.length <= 30) return s;
+  const parts = s.split(/[\\/]+/).filter(Boolean);
+  if (parts.length <= keep) return s;
+  const sep = s.includes('\\') ? '\\' : '/';
+  return `…${sep}${parts.slice(-keep).join(sep)}`;
+}
+
 export default {
   panels: {
     stroll: {
@@ -439,8 +453,45 @@ export default {
         const bookBar = el('i');
         bookBarWrap.append(bookBar);
         const bookMeta = el('span', '', 'stroll-token');
-        const bookHint = el('p', '把 txt 放进书库，她就会一段一段地读。', 'stroll-muted');
-        bookCard.append(bookHead, bookTitle, bookBarWrap, bookMeta, bookHint);
+        const bookHint = el('p', '把 txt 放进书库，她就会一段一段地读。', 'stroll-muted stroll-life-note');
+        const bookActions = el('div', undefined, 'stroll-life-actions');
+        let bookDirNow = '';
+
+        const bookPick = button(
+          '选文件夹',
+          async () => {
+            const old = bookPick.textContent;
+            bookPick.disabled = true;
+            bookPick.textContent = '选择中…';
+            try {
+              const r = await ctx.invoke('books_pick');
+              if (r?.ok && r.dir) {
+                bookDirNow = r.dir;
+                bookHint.textContent = `书库：${shortPath(r.dir)}`;
+                bookHint.title = r.dir;
+                refresh();
+              } else if (r?.error) {
+                bookHint.textContent = r.error;
+              }
+            } catch (error) {
+              bookHint.textContent = `选不了文件夹：${error?.message ?? error}`;
+            } finally {
+              bookPick.disabled = false;
+              bookPick.textContent = old;
+            }
+          },
+          'ghost xs',
+        );
+        const bookOpen = button(
+          '打开',
+          async () => {
+            const r = await ctx.invoke('books_open').catch(() => null);
+            if (r && r.ok === false && r.error) bookHint.textContent = r.error;
+          },
+          'ghost xs',
+        );
+        bookActions.append(bookPick, bookOpen);
+        bookCard.append(bookHead, bookTitle, bookBarWrap, bookMeta, bookHint, bookActions);
 
         const weekCard = el('article', undefined, 'stroll-life-card');
         const weekHead = el('div', undefined, 'stroll-life-head');
@@ -868,6 +919,11 @@ export default {
           }
 
           const books = data?.books;
+          // 路径只显示最后两级（完整路径在 title 里）：长路径会把卡片撑破、压到「这周」上
+          if (books?.dir) {
+            bookDirNow = String(books.dir);
+            bookHint.title = bookDirNow;
+          }
           if (books?.current) {
             bookTitle.textContent = String(books.current.name).replace(/\.(txt|md|markdown)$/i, '');
             bookPct.textContent = `${books.current.percent}%`;
@@ -880,7 +936,7 @@ export default {
             bookPct.textContent = '';
             bookBar.style.width = '0%';
             bookMeta.textContent = '';
-            bookHint.textContent = books?.dir ? `把 txt 放进 ${books.dir}` : '把 txt 放进书库目录';
+            bookHint.textContent = bookDirNow ? `把 txt 放进 ${shortPath(bookDirNow)}` : '把 txt 放进书库目录';
           }
 
           const weekly = data?.weekly;

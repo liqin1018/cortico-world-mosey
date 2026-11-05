@@ -31,6 +31,10 @@ export const DEFAULTS = {
   mustComment: false,
   mustFollow: false,
   mustPost: false,
+  /** 最多认几个群（名单 + 发送）；常驻监听页另算 */
+  maxGroups: 6,
+  /** 最多常驻几个群监听页（每个占一个后台标签页） */
+  groupTabs: 3,
 
   quietFrom: 23,
   quietTo: 8,
@@ -453,7 +457,26 @@ const MESSAGES = {
         type: 'string',
         title: '要盯的抖音群（可留空）',
         description:
-          '留空就自动盯她所在的群（最多 2 个）——推荐留空。只有想指定某几个群时才填：填群名，和抖音聊天列表里显示的一字不差，多个用逗号隔开。',
+          '留空就自动盯她所在的群——推荐留空。只有想指定某几个群时才填：填群名，和抖音聊天列表里显示的一字不差，多个用逗号隔开。',
+      },
+      [P + 'maxGroups']: {
+        type: 'integer',
+        title: '最多认几个群',
+        description: '名单里最多保留几个群。这个数决定「能不能给第 N 个群发消息」，不决定常驻标签页数量。',
+        minimum: 1,
+        maximum: 10,
+        'x-suffix': ' 个',
+        'x-hot': true,
+      },
+      [P + 'groupTabs']: {
+        type: 'integer',
+        title: '最多常驻几个群监听页',
+        description:
+          '每个常驻群会开一个后台标签页（约 100-150MB 内存）。超过这个数的群仍然能发消息，但发的时候才临时点进去，不会一直挂着。',
+        minimum: 1,
+        maximum: 8,
+        'x-suffix': ' 个',
+        'x-hot': true,
       },
     },
   },
@@ -485,6 +508,8 @@ export const POLICY_FIELDS = {
   mustComment: { type: 'boolean' },
   mustFollow: { type: 'boolean' },
   mustPost: { type: 'boolean' },
+  maxGroups: { type: 'int', min: 1, max: 10 },
+  groupTabs: { type: 'int', min: 1, max: 8 },
   quietFrom: { type: 'int', min: 0, max: 23 },
   quietTo: { type: 'int', min: 0, max: 23 },
   minGapSeconds: { type: 'int', min: 10, max: 600 },

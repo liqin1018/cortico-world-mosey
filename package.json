@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-mosey",
-  "version": "1.14.2",
+  "version": "1.15.0",
   "type": "module",
   "description": "摸鱼（Mosey）：让 Coopanion 的桌宠自己去抖音和 B站逛一圈。评论和私信都能收能回；关注流、周报、本地书库；按额度点赞、评论、关注、发动态。默认人审，三把工具、少 token。\n\nQQ 交流群：745879632",
   "license": "MIT",

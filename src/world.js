@@ -308,10 +308,21 @@ export class StrollWorld {
    * 光靠分隔符分不清。做法是：把配置切成片段，拿去和自动识别出的真实群名比对，
    * 命中的用真实群名；一个都没命中才把片段当成群名直接用（手填的场合）。
    */
+  /** 名单里最多保留几个群（用户可配，默认 6）。 */
+  maxGroupsCap() {
+    return clamp(Math.round(Number(this.cfg.maxGroups ?? 6) || 6), 1, 10);
+  }
+
+  /** 最多给几个群常驻监听页（用户可配，默认 3）。 */
+  groupTabsCap() {
+    return clamp(Math.round(Number(this.cfg.groupTabs ?? 3) || 3), 1, 8);
+  }
+
   groupNames() {
+    const cap = this.maxGroupsCap();
     const raw = String(this.cfg.douyinGroups ?? '').trim();
-    const detected = (this.groupAuto?.names ?? []).slice(0, 4);
-    if (!raw) return detected.slice(0, 3);
+    const detected = (this.groupAuto?.names ?? []).slice(0, cap);
+    if (!raw) return detected.slice(0, cap);
     const fragments = raw
       .split(/[,，、;；\n]+/)
       .map((s) => s.trim())
@@ -324,9 +335,10 @@ export class StrollWorld {
       const m = this.matchGroup(detected, f);
       if (m && !hit.includes(m)) hit.push(m);
     }
-    if (hit.length) return hit.slice(0, 2);
+    // 以前这里写死 slice(0,2)：手填群名后反而只能认 2 个。现在跟 maxGroups 一致
+    if (hit.length) return hit.slice(0, cap);
     // 还没识别到群（或手填的名字对不上）：先按片段当群名，挂载时会再核一次
-    return fragments.slice(0, 2);
+    return fragments.slice(0, cap);
   }
 
   /** 群名比较：忽略空白和大小写，允许「包含」——这样她只写「小月月」也能对上。 */
@@ -458,7 +470,7 @@ export class StrollWorld {
     // 虚拟列表偶尔会读少一个群：15 分钟内还认它，别把它踢下线
     // （踢了会把它的 tab 关掉，下一拍再重开，来回折腾）
     const keep = Object.keys(seenAt).filter((n) => now - Number(seenAt[n] ?? 0) < 15 * 60 * 1000);
-    const names = [...new Set([...labels, ...keep])].slice(0, 3);
+    const names = [...new Set([...labels, ...keep])].slice(0, this.maxGroupsCap());
     const before = this.groupAuto?.names ?? [];
     this.groupAuto = { at: now, names, next: now + ttlMs, seenAt };
     if (JSON.stringify(names) !== JSON.stringify(before)) {
@@ -473,9 +485,11 @@ export class StrollWorld {
     if (!this.groupWatchOn()) return;
     const names = await this.resolveGroups().catch(() => []);
     if (!names.length) return;
+    // 名单可以有很多个，但常驻监听页只给前 groupTabs 个；其余的群发消息时再临时点进去
+    const watch = names.slice(0, this.groupTabsCap());
     this.groupArmBusy = true;
     try {
-      for (const name of names) {
+      for (const name of watch) {
         if (this.douyin.groupArmed?.(name)) continue;
         const slot = this.douyin.groupSlot?.(name);
         // 连续挂不上的群要退避：两个群都挂不上时，不能每 30 秒把两个聊天页各重开一遍
@@ -497,7 +511,7 @@ export class StrollWorld {
         }
       }
       // 不在名单里的群（退群/换了群）把它的 tab 收掉，别一直挂着占内存
-      await this.douyin.pruneGroupPages?.(names).catch(() => {});
+      await this.douyin.pruneGroupPages?.(watch).catch(() => {});
     } finally {
       this.groupArmBusy = false;
       /**

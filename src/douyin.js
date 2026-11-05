@@ -143,25 +143,77 @@ function approxTime(label, index = 0) {
   return now - index * 1000;
 }
 
-const RISK_TEXT = /(完成验证|安全验证|操作频繁|账号异常|访问过于频繁|请稍后再试|captcha|verify)/i;
-
 /**
- * 一次往返把整页的「验证/登录墙」状态问清楚。
- * 以前每个检查点各查一次 body.innerText()，最多查三次；这里合并成一次。
- * 注意必须用 innerText 而不是 textContent：textContent 会把 <script> 里的
- * 打包代码一起读进来，那里面本来就有 verify/captcha 字样，实测全是误报。
+ * 一次往返把「验证/登录墙」状态问清楚。
+ *
+ * 以前是读整个 `document.body.innerText`。那玩意儿会强制整页重排：
+ * 聊天记录一多就是几百毫秒，而它每次发完消息都要跑一遍，直接拖慢回复。
+ * 验证/限流只会出现在弹层、toast、验证码 iframe 里，所以只查这几处。
+ *
+ * 1.8.7 第一版查得太宽（`[class*=verify]` + 不看 iframe 可不可见），
+ * 抖音页面里常驻一个**隐藏的**验证 iframe，结果每次发完都报「要验证」——
+ * 主人看到的就是「抖音把我拦下了」。现在：iframe 必须真的显示在屏幕上，
+ * 文本只认那几句明确的话，并且把「到底命中了什么」一起返回，方便下次定位。
  */
 async function bodyFlags(page) {
   return page
     .evaluate(() => {
-      const t = document.body ? document.body.innerText || '' : '';
-      return {
-        risk: /完成验证|安全验证|操作频繁|账号异常|访问过于频繁|请稍后再试|captcha|verify/i.test(t),
-        verify: /短信验证码|为确保是本人操作|身份验证|完成验证|安全验证/.test(t),
-        login: /登录后|请先登录|扫码登录|立即登录/.test(t),
+      const visible = (n, minW = 8, minH = 8) => {
+        const r = n.getBoundingClientRect();
+        if (r.width < minW || r.height < minH) return false;
+        const st = getComputedStyle(n);
+        if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity) < 0.05) return false;
+        return r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
       };
+      let hit = '';
+      // 整页被跳到验证页
+      if (/\/verify|captcha/i.test(location.href)) hit = `url:${location.href.slice(0, 80)}`;
+      // 验证码 iframe：必须真的显示出来，抖音会常驻一个 0×0 的隐藏验证 iframe
+      if (!hit) {
+        for (const f of Array.from(document.querySelectorAll('iframe'))) {
+          const src = String(f.getAttribute('src') || '');
+          if (!/captcha|verify/i.test(src)) continue;
+          if (!visible(f, 160, 80)) continue;
+          hit = `iframe:${src.slice(0, 70)}`;
+          break;
+        }
+      }
+      /**
+       * 弹层 / toast：只认明确的几句话。
+       * 不要加英文 captcha / verify —— 中文界面上出现这两个词基本都是代码或误伤。
+       */
+      const RE = /完成验证|安全验证|短信验证码|为确保是本人操作|身份验证|操作频繁|账号异常|访问过于频繁|请稍后再试/;
+      if (!hit) {
+        const boxes = Array.from(
+          document.querySelectorAll('.semi-modal-content, [role="dialog"], [class*="toast"], [class*="Toast"]'),
+        ).slice(0, 10);
+        for (const b of boxes) {
+          if (!visible(b, 120, 36)) continue;
+          const t = String(b.innerText || '').replace(/\s+/g, ' ').trim();
+          if (!t || t.length > 300) continue;
+          const m = RE.exec(t);
+          if (m) {
+            hit = `${m[0]}@${String(b.className || '').slice(0, 36)}`;
+            break;
+          }
+        }
+      }
+      // 登录墙：只找那几个按钮，不读整页文本
+      let login = false;
+      const btns = Array.from(document.querySelectorAll('button, [role="button"], a')).slice(0, 150);
+      for (const b of btns) {
+        const s = String(b.textContent || '').replace(/\s+/g, '');
+        if (!s || s.length > 8) continue;
+        if (!/^(扫码登录|立即登录|登录|登录后|请先登录)$/.test(s)) continue;
+        if (!visible(b)) continue;
+        login = true;
+        break;
+      }
+      // 分清「要验证码」和「只是限流」：主人看到的说法完全不一样
+      const kind = !hit ? '' : /完成验证|安全验证|短信验证码|为确保是本人操作|身份验证|captcha|verify/i.test(hit) ? 'verify' : 'rate';
+      return { risk: !!hit, verify: kind === 'verify', login, hit, kind };
     })
-    .catch(() => ({ risk: false, verify: false, login: false }));
+    .catch(() => ({ risk: false, verify: false, login: false, hit: '', kind: '' }));
 }
 
 /**
@@ -544,9 +596,23 @@ export class DouyinBrowser {
       clearTimeout(this.closeTimer);
       this.closeTimer = null;
     }
+    /**
+     * 兜底超时：Playwright 的 page.evaluate 是**没有超时**的（setDefaultTimeout 只管网页元素），
+     * 标签页一旦卡住（渲染进程崩了、抖音把标签页冻了），这个串行队列就会永远堵在第一个任务上，
+     * 后面所有私信/发送/评论全都排队等死——外面看起来就是「桌宠不动了 / 死机」。
+     * 群一多，页面就多，撞上这种卡死的概率也就上去了。
+     */
+    let timer = null;
     try {
-      return await fn();
+      if (this.holdOpen) return await fn(); // 登录窗要等人扫码，不能掐
+      const ms = Math.max(60000, Number(this.cfg?.opTimeoutMs ?? 240000) || 240000);
+      const guard = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new DouyinError('STUCK', '抖音页面太久没响应，这一轮先放弃')), ms);
+        timer.unref?.();
+      });
+      return await Promise.race([fn(), guard]);
     } finally {
+      if (timer) clearTimeout(timer);
       this.busy -= 1;
     }
   }
@@ -683,21 +749,39 @@ export class DouyinBrowser {
   async getPage() {
     // 沿用当前的窗口模式：开着的登录窗不能被一次隐式 launch 关掉重开
     const context = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });
-    if (this.page && !this.page.isClosed()) return this.page;
-    // 启动时自带一个 about:blank，直接用它；另开一个的话那个空页永远没人关，
-    // 浏览器进程会一直驻留（实测能挂一小时、十几个进程），下次启动还会抢 profile。
-    const blank = context.pages().find((p) => !p.isClosed() && p.url() === 'about:blank');
+    if (this.page && !this.page.isClosed() && !this.page.__strollRole) return this.page;
+    if (this.page?.__strollRole) this.page = null;
+    /**
+     * 启动时自带一个 about:blank，直接用它；另开一个的话那个空页永远没人关，
+     * 浏览器进程会一直驻留（实测能挂一小时、十几个进程），下次启动还会抢 profile。
+     *
+     * 但**群聊/私信 tab 刚建出来时也是 about:blank**（newPage 之后那一小段，以及 goto 还没提交时）。
+     * 以前这里会把它当主页抢走：两个群一开，主页面可能变成某个群的聊天页，
+     * 之后评论/私信全在这个页上乱跳，群监听也跟着错位——看着就像「死机」。
+     * 所以建群页/私信页时都打了 __strollRole，这里必须跳过它们。
+     */
+    const blank = context.pages().find((p) => p && !p.isClosed() && p.url() === 'about:blank' && !p.__strollRole);
     this.page = blank ?? (await context.newPage());
+    this.page.__strollRole = '';
     this.page.setDefaultTimeout(20000);
     return this.page;
   }
 
+  /** 把一次风险命中翻译成人话，顺手记一笔；限流时进入两分钟冷却，别让她连着重试。 */
+  riskError(f, where = '操作') {
+    const why = String(f?.hit || '页面提示').slice(0, 60);
+    if (f?.kind === 'rate') {
+      this.rateUntil = Date.now() + 2 * 60 * 1000;
+      this.policy.noteRisk('DOUYIN_RATE', `${where}后限流（${why}）`);
+      return new DouyinError('RISK', `抖音限流了（${why}），等两分钟再发，别连着重试。`);
+    }
+    this.policy.noteRisk('DOUYIN_VERIFY', `${where}后要验证（${why}）`);
+    return new DouyinError('RISK', `抖音要验证（${why}），得主人在手机上过一下验证码。`);
+  }
+
   async checkRisk(page) {
     const f = await bodyFlags(page);
-    if (f.risk) {
-      this.policy.noteRisk('DOUYIN_VERIFY', '抖音出现验证/频繁提示');
-      throw new DouyinError('RISK', '抖音弹出验证或提示操作频繁，已经停手。');
-    }
+    if (f.risk) throw this.riskError(f, '刷抖音');
   }
 
   async goto(page, url, waitMs = 4200) {
@@ -1302,10 +1386,20 @@ export class DouyinBrowser {
     if (!page || page.isClosed()) {
       if (page) await page.close().catch(() => {});
       page = await ctx.newPage();
+      // 标记归属：主页 getPage() 不能把它当成自己的 about:blank 空页抢走
+      page.__strollRole = 'dm';
       page.setDefaultTimeout(20000);
       this.dmPage = page;
       this.dmThread = '';
       this.dmArmedAt = 0;
+      page.on('crash', () => {
+        page.__strollCrashed = true;
+        if (this.dmPage === page) {
+          this.dmPage = null;
+          this.dmThread = '';
+          this.dmArmedAt = 0;
+        }
+      });
       page.on('close', () => {
         if (this.dmPage === page) {
           this.dmPage = null;
@@ -1446,7 +1540,19 @@ export class DouyinBrowser {
     if (!key) return null;
     let slot = this.groupPages.get(key);
     if (!slot) {
-      slot = { page: null, thread: '', hit: null, busy: false, queued: false, settle: null, armedAt: 0, arming: null };
+      slot = {
+        page: null,
+        thread: '',
+        hit: null,
+        busy: false,
+        queued: false,
+        settle: null,
+        armedAt: 0,
+        arming: null,
+        // 连续失败次数 / 下次再试的时间：两个群都挂不上时不能每 30 秒重开一遍页面
+        failCount: 0,
+        nextTryAt: 0,
+      };
       this.groupPages.set(key, slot);
     }
     return slot;
@@ -1491,8 +1597,18 @@ export class DouyinBrowser {
     }
     if (!page) {
       page = await ctx.newPage();
+      // 标记归属：主页 getPage() 不能把它当 about:blank 空页抢走
+      page.__strollRole = 'group';
       page.setDefaultTimeout(20000);
       slot.page = page;
+      page.on('crash', () => {
+        page.__strollCrashed = true;
+        if (slot.page === page) {
+          slot.page = null;
+          slot.thread = '';
+          slot.armedAt = 0;
+        }
+      });
       page.on('close', () => {
         if (slot.page === page) {
           slot.page = null;
@@ -1530,21 +1646,27 @@ export class DouyinBrowser {
       return { ok: false, code: loggedIn ? 'NO_LIST' : 'LOGIN_REQUIRED' };
     }
 
+    // 先把会话 id 打到列表行上：两个群同名时，clickThread 要靠它才点得准
+    await this.readThreadRows(page).catch(() => []);
+
     if (slot.thread !== who) {
-      const item = page.locator('[data-e2e="conversation-item"]', { hasText: who }).first();
+      /**
+       * 用 clickThread 而不是 `locator(hasText: 群名)`。
+       * hasText 是**子串**匹配：两个群的标题都带「小月月一直在玩」时，
+       * 它可能把第二个群点成第一个群；而且标题被截断时又永远匹配不上。
+       * clickThread 先按整串相等找，再退回「唯一包含」，两个群也分得清。
+       */
       const deadline = Date.now() + 20000;
+      let picked = false;
       while (Date.now() < deadline) {
-        if (await item.count().catch(() => 0)) break;
+        picked = await this.clickThread(page, who);
+        if (picked) break;
         await page.waitForTimeout(350);
       }
-      if (!(await item.count().catch(() => 0))) {
+      if (!picked) {
         await this.dismissBubbles(page);
         return { ok: false, code: 'NO_THREAD' };
       }
-      await item.scrollIntoViewIfNeeded().catch(() => {});
-      await item.click({ timeout: 8000 }).catch(async () => {
-        await item.evaluate((el) => el.click()).catch(() => {});
-      });
       slot.thread = who;
       // 主页面的「当前会话」跟这个 tab 不是一回事，别互相污染
       this.openThread = '';
@@ -1583,7 +1705,11 @@ export class DouyinBrowser {
     try {
       const page = slot.page;
       if (!page || page.isClosed()) return;
-      const messages = await this.readGroupMessages(page, 10);
+      // page.evaluate 没有超时：标签页一卡住，slot.busy 会永远 true，这个群就再也不更新了
+      const messages = await Promise.race([
+        this.readGroupMessages(page, 10),
+        new Promise((resolve) => setTimeout(() => resolve([]), 8000)),
+      ]).catch(() => []);
       if (!messages.length) return;
       await slot.hit(messages, { sig: slot.pendingSig, group: name });
     } catch (error) {
@@ -1610,6 +1736,15 @@ export class DouyinBrowser {
       if (slot.settle) clearTimeout(slot.settle);
       this.groupPages.delete(one);
       if (page && !page.isClosed()) await page.close().catch(() => {});
+    }
+  }
+
+  /** 只保留这些群的监听 tab，其余收掉（换了群/退群时别把聊天 tab 一直留着）。 */
+  async pruneGroupPages(keep = []) {
+    const want = new Set((keep ?? []).map((n) => String(n ?? '').trim()).filter(Boolean));
+    for (const name of Array.from(this.groupPages.keys())) {
+      if (want.has(name)) continue;
+      await this.releaseGroupPage(name).catch(() => {});
     }
   }
 
@@ -1690,10 +1825,7 @@ export class DouyinBrowser {
       }
       if (this.isDigged(after) !== on) {
         const f = await bodyFlags(page);
-        if (f.risk) {
-          this.policy.noteRisk('DOUYIN_VERIFY', '点赞后出现验证');
-          throw new DouyinError('RISK', '点赞后出现验证/频繁提示，已停手。');
-        }
+        if (f.risk) throw this.riskError(f, '点赞');
         if (f.verify) {
           throw new DouyinError('VERIFY_REQUIRED', '抖音要求短信验证：在面板点「登录抖音」开窗手动完成一次。');
         }
@@ -2078,10 +2210,7 @@ export class DouyinBrowser {
           '抖音要求短信验证（不是封号）。在面板点「登录抖音」开窗，手动发一条评论并按提示完成验证；之后自动化才能继续。',
         );
       }
-      if (flags.risk) {
-        this.policy.noteRisk('DOUYIN_VERIFY', '发评论后出现验证');
-        throw new DouyinError('RISK', '发评论后出现验证/频繁提示，已停手。');
-      }
+      if (flags.risk) throw this.riskError(flags, '发评论');
       const left = await input.evaluate((el) => (el.innerText || el.value || '').trim()).catch(() => '');
       const posted = await page
         .evaluate((t) => {
@@ -2446,11 +2575,12 @@ export class DouyinBrowser {
         const el = loc.nth(i);
         if (await el.isVisible().catch(() => false)) return el;
       }
-      await page.waitForTimeout(400);
+      // 120ms 一轮：刚点开会话时输入框通常 100-300ms 就挂上了，
+      // 以前 400ms 一轮，最坏白等 0.4 秒——回消息的体感差距就在这儿。
+      await page.waitForTimeout(120);
     }
     return null;
   }
-
   /**
    * 在聊天输入框里插入**真正的 @**（结构化 chip）。
    *
@@ -2815,6 +2945,11 @@ export class DouyinBrowser {
    * contenteditable 清空后会剩一个零宽字符，trim() 去不掉，所以要自己剥。
    */
   async sendInChat(page, input, text, { mention = '' } = {}) {
+    // 刚被限流过：直接告诉她还要等多久，别再去页面上试（越试越糟）
+    if (Number(this.rateUntil ?? 0) > Date.now()) {
+      const left = Math.ceil((Number(this.rateUntil) - Date.now()) / 1000);
+      throw new DouyinError('RATE_WAIT', `抖音刚限流，${left} 秒后再发。`);
+    }
     const read = () =>
       input
         .evaluate((el) => String(el.value ?? el.textContent ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim())
@@ -2825,7 +2960,7 @@ export class DouyinBrowser {
     if (mention) body = stripAtName(body, mention);
     // 「@你 / @主人」不是昵称，留着也只是一个假 @
     body = stripAtPlaceholder(stripLeadingFakeAt(body));
-    await input.click({ timeout: 6000 }).catch(() => {});
+    await input.click({ timeout: 6000, force: true }).catch(() => {});
     let mentioned = false;
     if (mention) {
       mentioned = await this.mentionInChat(page, input, mention).catch(() => false);
@@ -2868,10 +3003,7 @@ export class DouyinBrowser {
       throw new DouyinError('NOT_SENT', '消息还留在输入框里，没发出去（可能被限流，或对方设置了陌生人限制）');
     }
     const f = await bodyFlags(page);
-    if (f.risk) {
-      this.policy.noteRisk('DOUYIN_VERIFY', '发私信后出现验证');
-      throw new DouyinError('RISK', '发私信后出现验证，已停手。');
-    }
+    if (f.risk) throw this.riskError(f, '发私信');
     // 记一笔自己刚发出去的话：群里用来兜底区分「我发的」和「别人发的」
     this.noteSent(text);
     return true;
@@ -3537,21 +3669,98 @@ export class DouyinBrowser {
         // MessageBoxContentisFromMe），用「包含」匹配才对得上。
         const isMine = (el) => !!(el.closest && el.closest('[class*="isFromMe"]'));
         /**
-         * 群里要分清是谁说的。实测（2026-11）昵称在 `MessageBoxMessageTitleavatarName`，
-         * 而且**只出现在一段连续消息的最上面那条**——也就是 DOM 里最旧的那一条
-         * （消息列表是 column-reverse，DOM 首元素是最新的）。其余条目完全不带名字，
-         * 所以这里拿不到就返回空串，交给下面「从旧往新继承」那一步补。
+         * 这一条消息自己的容器：从内容往上爬，**爬到「再上一层就会包住两条消息」为止**。
+         * 不能直接用 `closest('[class*=messageMessageBox]')`：有些版本那个类会套住一整段消息，
+         * 里面的 querySelector 永远抓到最上面那个人的名字——于是群里所有人说的话都被标成同一个人
+         * （线上就是这样，全标成了主人）。
+         */
+        const rowOf = (el) => {
+          let row = el.parentElement;
+          for (let i = 0; i < 6 && row?.parentElement; i += 1) {
+            const up = row.parentElement;
+            if (up.querySelectorAll('[data-e2e="msg-item-content"]').length > 1) break;
+            row = up;
+          }
+          return row;
+        };
+        /**
+         * 群里要分清是谁说的。昵称按优先级一个个找，**不能写成一串选择器**：
+         * `querySelector('a, b')` 返回的是文档里最靠前的那个，不是列表里第一个命中的，
+         * 页面上任何一个更早出现的 nickname 都会被误当成发言人。
          */
         const senderOf = (el) => {
           if (!withSender) return '';
-          const row = el.closest('[class*="messageMessageBox"]') || el.parentElement;
+          const row = rowOf(el);
           if (!row) return '';
-          const cand = row.querySelector(
-            '[class*="avatarName"], [class*="nickname"], [class*="Nickname"], [class*="userName"], [class*="UserName"]',
-          );
-          const t = String(cand?.innerText || '').replace(/\s+/g, ' ').trim();
-          // 昵称后面常跟「群主 / 管理员」角色标签，混进 innerText 会变成「小月月群主」
-          return Array.from(t.replace(/(群主|管理员|群成员)$/, '')).slice(0, 20).join('');
+          const sels = [
+            '[class*="MessageBoxMessageTitleavatarName"]',
+            '[class*="avatarName"]',
+            '[class*="MessageBoxMessageTitle"]',
+            '[class*="nickname"]',
+            '[class*="Nickname"]',
+            '[class*="userName"]',
+            '[class*="UserName"]',
+          ];
+          let name = '';
+          for (const s of sels) {
+            const node = row.querySelector(s);
+            const t = String(node?.innerText ?? '').replace(/\s+/g, ' ').trim();
+            if (t) {
+              name = t;
+              break;
+            }
+          }
+          if (!name) {
+            const av = row.querySelector('img[alt], [class*="avatar"][title]');
+            name = String(av?.getAttribute('alt') || av?.getAttribute('title') || '').trim();
+          }
+          /**
+           * 最后一层：这条消息自己的 React props。抖音的消息模型里带发送者信息，
+           * 但字段名各版本不一样，只认几个明确叫昵称的键，别乱抓（名片/视频作者也有名字字段）。
+           */
+          if (!name) {
+            const key = Object.keys(el).find((k) => k.indexOf('__reactProps$') === 0);
+            if (key) {
+              const seen = new Set();
+              const walk = (v, d) => {
+                if (name || !v || typeof v !== 'object' || d > 7 || seen.has(v)) return;
+                seen.add(v);
+                for (const k of Object.keys(v)) {
+                  if (k === '_owner' || k === 'ref' || k === 'return' || k === 'stateNode') continue;
+                  const val = v[k];
+                  if (typeof val === 'string') {
+                    if (/^(nickname|nickName|userName|displayName|senderName)$/i.test(k)) {
+                      const t = val.trim();
+                      if (t && t.length <= 24) {
+                        name = t;
+                        return;
+                      }
+                    }
+                  } else {
+                    walk(val, d + 1);
+                  }
+                  if (name) return;
+                }
+              };
+              try {
+                walk(el[key], 0);
+              } catch {
+                // props 里有循环引用就算了
+              }
+            }
+          }
+          // 角色标签可能拼在名字前面（「群主 小月月一直在玩」）也可能在后面
+          name = name
+            .replace(/^(群主|管理员|群成员|成员)\s*/u, '')
+            .replace(/\s*(群主|管理员|群成员|成员)$/u, '')
+            .trim();
+          const arr = Array.from(name);
+          return arr.length > 24 ? arr.slice(0, 24).join('') : name;
+        };
+        /** 这一条是不是「新一段消息」的开头（有自己的头像）。用来判断名字能不能往下继承。 */
+        const startsRun = (el) => {
+          const row = rowOf(el);
+          return !!(row && row.querySelector('[class*="avatar"] img, img[class*="avatar"], [class*="avatar"]'));
         };
         const parsedOf = (el) => {
           const key = Object.keys(el).find((k) => k.indexOf('__reactProps$') === 0);
@@ -3588,7 +3797,9 @@ export class DouyinBrowser {
           const arr = Array.from(t);
           return arr.length > n ? `${arr.slice(0, n).join('')}…` : t;
         };
-        const rows = Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]'));
+        // 只解析最新的这些：DOM 是最新在前，整屏几百条全解析（每条都要走一遍 React props）
+        // 纯属浪费，而且 MutationObserver 每抖一下都要跑一遍。
+        const rows = Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]')).slice(0, Math.max(n * 2, 12));
         const out = [];
         for (const el of rows) {
           const p = parsedOf(el) || {};
@@ -3641,6 +3852,8 @@ export class DouyinBrowser {
             author,
             // 先记下「这一条自己带没带名字」，没带的由下面统一继承
             who: mine ? '' : nick,
+            // 这一条是不是新一段消息的开头：是的话不能沿用上一个人的名字
+            runStart: mine ? false : startsRun(el),
           });
         }
         // DOM 是最新在前，倒过来就是时间顺序
@@ -3654,8 +3867,13 @@ export class DouyinBrowser {
             continue;
           }
           if (m.who) lastWho = m.who;
-          else if (lastWho) m.who = lastWho;
+          else if (m.runStart) {
+            // 新的一段开始了，但这一版没读到名字：宁可标成「有人」，
+            // 也不能沿用上一个人的名字——线上就是这样把别人说的话全算成了主人。
+            lastWho = '';
+          } else if (lastWho) m.who = lastWho;
         }
+        for (const m of ordered) delete m.runStart;
         return ordered;
       }, [size, group, selfName])
       .catch(() => []);
@@ -3672,7 +3890,44 @@ export class DouyinBrowser {
     const rows = base.length ? base : await this.readGroupRows(page, size);
     // 最后一层兜底：刚发出去的那几句，如果抖音既没给 isFromMe 也没给昵称，
     // 就按「我发的」算——不然她会把自己刚说的话当成别人说的，回头再回一遍。
-    return rows.map((m) => (m.from === 'them' && this.wasJustSent(m.text) ? { ...m, from: 'me', who: '' } : m));
+    const out = rows.map((m) => (m.from === 'them' && this.wasJustSent(m.text) ? { ...m, from: 'me', who: '' } : m));
+    /**
+     * 一段里「别人说的话」全标成同一个人 = 昵称没读对（线上就是这样把三个人说的话
+     * 全算成了主人）。这时候留一份现场，下次照着真实结构改，不用再猜。
+     */
+    const theirs = out.filter((m) => m.from === 'them');
+    const names = new Set(theirs.map((m) => m.who).filter(Boolean));
+    if (theirs.length >= 3 && names.size === 1) this.dumpGroupWhoOnce(page, out).catch(() => {});
+    return out;
+  }
+
+  /**
+   * 发言人认错时留证：把消息列表最后几行的 HTML 存一份。
+   * 10 分钟最多存一次，别把磁盘写满。
+   */
+  async dumpGroupWhoOnce(page, rows) {
+    if (Date.now() - Number(this._whoDumpAt ?? 0) < 10 * 60 * 1000) return '';
+    this._whoDumpAt = Date.now();
+    const html = await page
+      .evaluate(() => {
+        const list = document.querySelector('[class*="messageMessageListlist"]');
+        const kids = list ? Array.from(list.children).slice(-6) : [];
+        return kids
+          .map((r) => String(r.outerHTML || '').slice(0, 4500))
+          .join('\n<!-- ---- -->\n')
+          .slice(0, 20000);
+      })
+      .catch(() => '');
+    if (!html) return '';
+    try {
+      const dir = path.join(this.dataDir, 'stroll', 'debug');
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `group-who-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+      fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), rows, html }, null, 1));
+      return file;
+    } catch {
+      return '';
+    }
   }
 
   /** 群里没有 `msg-item-content` 标记时的退路：直接按消息列表的行解析。 */
@@ -3699,7 +3954,26 @@ export class DouyinBrowser {
             box.querySelector('[data-e2e="msg-item-content"]') || box.querySelector('[class*="MessageBoxContent"]') || box;
           const text = cut(content.innerText, 200);
           if (!text) continue;
-          const nickEl = box.querySelector('[class*="avatarName"], [class*="nickname"], [class*="Nickname"], [class*="userName"]');
+          const nickOf = (el) => {
+            const sels = [
+              '[class*="MessageBoxMessageTitleavatarName"]',
+              '[class*="avatarName"]',
+              '[class*="MessageBoxMessageTitle"]',
+              '[class*="nickname"]',
+              '[class*="Nickname"]',
+              '[class*="userName"]',
+              '[class*="UserName"]',
+            ];
+            for (const s of sels) {
+              const node = el.querySelector(s);
+              const t = clean(node?.innerText);
+              if (t) {
+                // 角色标签可能在前也可能在后
+                return t.replace(/^(群主|管理员|群成员|成员)\s*/, '').replace(/\s*(群主|管理员|群成员|成员)$/, '');
+              }
+            }
+            return '';
+          };
           out.push({
             from: me ? 'me' : 'them',
             kind: content.querySelector('img') ? 'image' : 'text',
@@ -3707,8 +3981,18 @@ export class DouyinBrowser {
             url: '',
             title: '',
             author: '',
-            who: me ? '' : cut(nickEl?.innerText, 20),
+            who: me ? '' : nickOf(box),
+            runStart: me ? false : !!box.querySelector('[class*="avatar"]'),
           });
+        }
+        // 和 readMessages 一样：新一段没读到名字就别沿用上一个人的
+        let last = '';
+        for (const m of out) {
+          if (m.from === 'me') { last = ''; continue; }
+          if (m.who) last = m.who;
+          else if (m.runStart) last = '';
+          else if (last) m.who = last;
+          delete m.runStart;
         }
         return out;
       }, size)
@@ -3742,76 +4026,152 @@ export class DouyinBrowser {
     return msgs;
   }
 
+  /** 读会话列表里的行（纯 DOM，不导航、不点击）。 */
+  async readThreadRows(page) {
+    return await page
+      .evaluate(() => {
+        const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+        /**
+         * 私信会话的 React props 里有 `toParticipantSecUserId`（对方 sec_uid），
+         * 群会话这个字段是空串（实测 2026-11）。比「名字里有没有逗号」可靠得多：
+         * 群没起名时抖音会把成员名拼起来，但起了名的群就不带逗号了。
+         * 拿不到 props 时退回形状启发式。
+         */
+        const conversationMeta = (el) => {
+          const key =
+            Object.keys(el).find((k) => k.indexOf('__reactProps$') === 0) ||
+            Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
+          if (!key) return null;
+          const seen = new Set();
+          const acc = { secUid: '', sortOrder: 0, cid: '', hasSec: false };
+          const walk = (v, d) => {
+            if (!v || typeof v !== 'object' || d > 8 || seen.has(v)) return;
+            seen.add(v);
+            // 会话 id：两个群同名时（同一批人建的两个群，标题一模一样）只能靠它区分
+            if (!acc.cid) {
+              const cid = v.conversationId ?? v.conversationShortId ?? v.convId;
+              if (typeof cid === 'string' && cid) acc.cid = cid;
+            }
+            if (Object.prototype.hasOwnProperty.call(v, 'toParticipantSecUserId')) {
+              acc.secUid = String(v.toParticipantSecUserId ?? '');
+              acc.sortOrder = Number(v.sortOrder ?? 0);
+              acc.hasSec = true;
+              return;
+            }
+            for (const k of Object.keys(v)) {
+              if (k === '_owner' || k === 'ref' || k === 'return' || k === 'stateNode' || k === 'child' || k === 'sibling') continue;
+              walk(v[k], d + 1);
+            }
+          };
+          try {
+            walk(el[key], 0);
+          } catch {
+            // props 里有循环引用就算没有
+          }
+          return acc.hasSec || acc.cid ? acc : null;
+        };
+        return Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'))
+          .slice(0, 60)
+          .map((el) => {
+            const lines = (el.innerText || '').split('\n').map(clean).filter(Boolean);
+            const badge = el.querySelector('[class*="unread"], [class*="Unread"]');
+            const unread = Number(clean(badge?.innerText).replace(/\D/g, '')) || 0;
+            const meta = conversationMeta(el);
+            const name = lines[0] || '';
+            /**
+             * 群判据（按可靠程度）：
+             * 1) props 里 toParticipantSecUserId 是空串 —— 实测最准；
+             * 2) 行里有多个头像（群头像是几个人的头像拼的）；
+             * 3) 名字是成员名用逗号拼起来的（没起名的群）；
+             * 4) 行里有群图标/群角标。
+             * 2-4 只在拿不到 props 时才用，免得把普通私信当群。
+             */
+            const avatars = el.querySelectorAll('img').length;
+            const groupMark = !!el.querySelector(
+              '[class*="groupIcon"], [class*="GroupIcon"], [class*="teamIcon"], [class*="groupTag"], [class*="GroupTag"]',
+            );
+            const nameParts = name.split(/[,，、]/).map((s) => clean(s)).filter(Boolean);
+            const looksGroup = avatars >= 2 || groupMark || nameParts.length >= 2;
+            const isGroup = meta?.hasSec ? meta.secUid === '' : looksGroup;
+            // 把会话 id 打到 DOM 上：两个群同名时，点会话要靠它才分得清
+            if (meta?.cid) el.setAttribute('data-stroll-cid', meta.cid);
+            return {
+              name,
+              preview: lines.slice(1).join(' ').slice(0, 60),
+              unread,
+              kind: isGroup ? 'group' : 'dm',
+              secUid: meta?.secUid || '',
+              cid: meta?.cid || '',
+              lastAt: meta?.sortOrder || 0,
+            };
+          })
+          .filter((x) => x.name);
+      })
+      .catch(() => []);
+  }
+
+  /** 把会话列表滚到顶/底：抖音的列表是虚拟的，不滚的话只有看得见的那几条。 */
+  async scrollThreadList(page, to = 'bottom') {
+    const moved = await page
+      .evaluate((dir) => {
+        const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
+        if (!items.length) return false;
+        let box = items[0].parentElement;
+        for (let i = 0; i < 6 && box; i += 1) {
+          if (box.scrollHeight > box.clientHeight + 24) break;
+          box = box.parentElement;
+        }
+        if (!box) return false;
+        const target = dir === 'bottom' ? box.scrollHeight : 0;
+        if (Math.abs(box.scrollTop - target) < 4) return false;
+        box.scrollTop = target;
+        box.dispatchEvent(new Event('scroll', { bubbles: true }));
+        return true;
+      }, to)
+      .catch(() => false);
+    if (moved) await page.waitForTimeout(420);
+    return moved;
+  }
+
+  /** 读全部会话行。deep=true 时上下各滚一遍，把虚拟列表外面的也捞出来。 */
+  async allThreadRows(page, { deep = false } = {}) {
+    const out = new Map();
+    const add = (rows) => {
+      for (const r of rows) if (r?.name) out.set(r.name, { ...(out.get(r.name) ?? {}), ...r });
+    };
+    add(await this.readThreadRows(page));
+    if (deep) {
+      await this.scrollThreadList(page, 'bottom');
+      add(await this.readThreadRows(page));
+      await this.scrollThreadList(page, 'top');
+      add(await this.readThreadRows(page));
+    }
+    return Array.from(out.values());
+  }
+
   /**
    * 列出现在有哪些会话（零点击、不跳转会话）。
-   * 抖音网页版把群和私信放在同一个列表里，也没有可靠的「这是群」标记，
-   * 所以这里如实返回名字 + 预览 + 未读，由调用方按名字认群。
+   * 抖音网页版把群和私信放在同一个列表里，所以两边都返回，由调用方按 kind / 名字认群。
+   * deep=true 会滚动列表，把虚拟列表里看不见的会话也读出来。
    */
-  async listThreads() {
+  async listThreads({ deep = false } = {}) {
+    // 已经有页面停在 /chat（私信页、群监听页）就直接读它：
+    // 不为了一份列表把主页面从正在看的视频上拽到 /chat
+    const live = [this.dmPage, ...Array.from(this.groupPages?.values?.() ?? []).map((s) => s.page), this.page].find(
+      (p) => p && !p.isClosed() && /\/chat/.test(p.url()),
+    );
+    if (live) {
+      const rows = await this.allThreadRows(live, { deep });
+      if (rows.length) return { ok: true, threads: rows, via: 'live' };
+    }
     return this.serialize(async () => {
       const page = await this.getPage();
       if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，看不了会话列表');
       if (!/\/chat/.test(page.url())) await this.goto(page, `${ORIGIN}/chat`, 2600);
       await this.dismissBubbles(page);
-      const rows = await page
-        .evaluate(() => {
-          const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
-          /**
-           * 私信会话的 React props 里有 `toParticipantSecUserId`（对方 sec_uid），
-           * 群会话这个字段是空串（实测 2026-11）。比「名字里有没有逗号」可靠得多：
-           * 群没起名时抖音会把成员名拼起来，但起了名的群就不带逗号了。
-           * 拿不到 props 时退回名字启发式。
-           */
-          const conversationMeta = (el) => {
-            const key =
-              Object.keys(el).find((k) => k.indexOf('__reactProps$') === 0) ||
-              Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
-            if (!key) return null;
-            const seen = new Set();
-            let out = null;
-            const walk = (v, d) => {
-              if (out || !v || typeof v !== 'object' || d > 8 || seen.has(v)) return;
-              seen.add(v);
-              if (Object.prototype.hasOwnProperty.call(v, 'toParticipantSecUserId')) {
-                out = { secUid: String(v.toParticipantSecUserId ?? ''), sortOrder: Number(v.sortOrder ?? 0) };
-                return;
-              }
-              for (const k of Object.keys(v)) {
-                if (k === '_owner' || k === 'ref' || k === 'return' || k === 'stateNode' || k === 'child' || k === 'sibling') continue;
-                walk(v[k], d + 1);
-                if (out) return;
-              }
-            };
-            try {
-              walk(el[key], 0);
-            } catch {
-              // props 里有循环引用就算没有
-            }
-            return out;
-          };
-          return Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'))
-            .slice(0, 30)
-            .map((el) => {
-              const lines = (el.innerText || '').split('\n').map(clean).filter(Boolean);
-              const badge = el.querySelector('[class*="unread"], [class*="Unread"]');
-              const unread = Number(clean(badge?.innerText).replace(/\D/g, '')) || 0;
-              const meta = conversationMeta(el);
-              const name = lines[0] || '';
-              const isGroup = meta ? meta.secUid === '' : /,\s/.test(name);
-              return {
-                name,
-                preview: lines.slice(1).join(' ').slice(0, 60),
-                unread,
-                kind: isGroup ? 'group' : 'dm',
-                secUid: meta?.secUid || '',
-                lastAt: meta?.sortOrder || 0,
-              };
-            })
-            .filter((x) => x.name);
-        })
-        .catch(() => []);
+      const rows = await this.allThreadRows(page, { deep });
       this.scheduleClose(60);
-      return { ok: true, threads: rows };
+      return { ok: true, threads: rows, via: 'main' };
     });
   }
 
@@ -3922,25 +4282,43 @@ export class DouyinBrowser {
   async replyDm(name, text, { mention = '' } = {}) {
     const who = String(name ?? '').trim();
     if (!who) throw new DouyinError('BAD_TARGET', '没有会话昵称，回不了');
+    // 各段耗时带上：主人在追「一秒内」，得知道慢在哪一段（挂在回执里，不额外打日志）
+    const t0 = Date.now();
     // 私信页正停在这个会话上：不用跳转、不用点会话，直接打字回车。
     // 这是「秒回」的关键一段——省掉整页导航（6-8 秒）和点会话后的固定停顿（2.4 秒）。
     const dm = this.dmPage;
     if (dm && !dm.isClosed() && this.dmThread === who) {
+      await this.ensureThreadOpen(dm, who);
+      const t1 = Date.now();
       const input = await this.waitMsgInput(dm, 3000).catch(() => null);
       if (input) {
+        const t2 = Date.now();
         await this.sendInChat(dm, input, text, { mention });
         this.lastAction = `dm ${who}`;
-        return { ok: true, sent: true, fast: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
+        return {
+          ok: true, sent: true, fast: true,
+          ms: { prep: t1 - t0, input: t2 - t1, send: Date.now() - t2, total: Date.now() - t0 },
+          mentioned: mention ? !!this.lastMention : null,
+          mentionDebug: this.lastMention ? '' : this.lastMentionDump || '',
+        };
       }
     }
     // 群：那个群的监听页正停在群里，同样可以直接在那页打字（零跳转）
     const slot = this.groupPages?.get?.(who);
     if (slot?.page && !slot.page.isClosed() && slot.thread === who) {
+      await this.ensureThreadOpen(slot.page, who);
+      const t1 = Date.now();
       const input = await this.waitMsgInput(slot.page, 3000).catch(() => null);
       if (input) {
+        const t2 = Date.now();
         await this.sendInChat(slot.page, input, text, { mention });
         this.lastAction = `group ${who}`;
-        return { ok: true, sent: true, fast: true, group: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
+        return {
+          ok: true, sent: true, fast: true, group: true,
+          ms: { prep: t1 - t0, input: t2 - t1, send: Date.now() - t2, total: Date.now() - t0 },
+          mentioned: mention ? !!this.lastMention : null,
+          mentionDebug: this.lastMention ? '' : this.lastMentionDump || '',
+        };
       }
     }
     return this.serialize(async () => {
@@ -3975,31 +4353,101 @@ export class DouyinBrowser {
   async clickThread(page, name) {
     const want = String(name ?? '').trim();
     if (!want) return false;
+    /**
+     * 两个群同名时（同一批人建的两个群，抖音没起名，标题就是同一串成员名），
+     * 光凭标题永远点不到第二个。resolveGroups 会给它们加「#2」后缀，
+     * 并在读列表时把会话 id 打到 DOM 上——这里优先按会话 id 点。
+     */
+    const m = /^(.*?)\s*#(\d+)$/.exec(want);
+    const base = (m ? m[1] : want).trim();
+    const nth = m ? Math.max(1, Number(m[2])) : 0;
+    const cid = String(this.threadCids?.[want] ?? '');
     const box = await page
-      .evaluate((target) => {
-        const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
-        const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
-        const titleOf = (el) => {
-          const t = el.querySelector('[class*="ConversationItemtitle"]');
-          const line = String((el.innerText || '').split('\n')[0] || '');
-          return norm(t?.innerText || line);
-        };
-        let hit = items.find((el) => titleOf(el) === norm(target));
-        if (!hit) {
-          // 群名可能被截断（列表里显示不全），这时才用包含
-          const partial = items.filter((el) => titleOf(el).includes(norm(target)));
-          if (partial.length === 1) hit = partial[0];
-        }
-        if (!hit) return null;
-        hit.scrollIntoView({ block: 'nearest' });
-        const r = hit.getBoundingClientRect();
-        if (r.width < 10 || r.height < 10) return null;
-        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-      }, want)
+      .evaluate(
+        ({ target, nth, cid }) => {
+          const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+          const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
+          const titleOf = (el) => {
+            const t = el.querySelector('[class*="ConversationItemtitle"]');
+            const line = String((el.innerText || '').split('\n')[0] || '');
+            return norm(t?.innerText || line);
+          };
+          let hit = null;
+          if (cid) hit = items.find((el) => el.getAttribute('data-stroll-cid') === cid) ?? null;
+          if (!hit) {
+            const exact = items.filter((el) => titleOf(el) === norm(target));
+            if (nth > 0) hit = exact[nth - 1] ?? null;
+            else hit = exact[0] ?? null;
+          }
+          if (!hit) {
+            // 群名可能被截断（列表里显示不全），这时才用包含
+            const partial = items.filter((el) => titleOf(el).includes(norm(target)));
+            if (partial.length === 1) hit = partial[0];
+          }
+          if (!hit) return null;
+          hit.scrollIntoView({ block: 'nearest' });
+          const r = hit.getBoundingClientRect();
+          if (r.width < 10 || r.height < 10) return null;
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        },
+        { target: base, nth, cid },
+      )
       .catch(() => null);
     if (!box) return false;
     await page.mouse.click(box.x, box.y).catch(() => {});
     return true;
+  }
+
+  /** 读聊天页顶部那个会话标题（认不出就返回空串，调用方当「不校验」处理）。 */
+  async currentChatTitle(page) {
+    return await page
+      .evaluate(() => {
+        const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+        const nodes = document.querySelectorAll(
+          '[data-e2e="chat-title"], [data-e2e="conversation-title"], [class*="ConversationHeader"], [class*="ChatHeader"], [class*="conversationHeader"], [class*="chatHeader"]',
+        );
+        for (const n of nodes) {
+          const r = n.getBoundingClientRect();
+          if (r.width < 40 || r.height < 12 || r.y > window.innerHeight * 0.6) continue;
+          const t = clean(n.innerText);
+          if (t && t.length <= 60) return t;
+        }
+        return '';
+      })
+      .catch(() => '');
+  }
+
+  /** 会话标题比对：忽略空白、大小写和同名群的「#2」后缀；认不出标题时算匹配（别误伤）。 */
+  threadTitleMatches(title, who) {
+    const norm = (s) =>
+      String(s ?? '')
+        .replace(/\s*#\d+$/, '')
+        // 标题常带群人数：「测试3（3）」「测试3 3人」
+        .replace(/[（(]\s*\d+\s*[)）]\s*$/, '')
+        .replace(/^\d+\s*人\s*/, '')
+        .replace(/[\s\u3000]+/g, '')
+        .toLowerCase();
+    const t = norm(title);
+    const w = norm(who);
+    if (!t || !w) return true;
+    // 群标题（成员名用逗号拼）和单个人的昵称不是一回事：
+    // 主人的昵称本身是群名的一部分，不区分就会把「私信页」当成「群页」。
+    const groupLike = (s) => /[,，、]/.test(s);
+    if (groupLike(t) !== groupLike(w)) return false;
+    return t === w || w.includes(t) || t.startsWith(w);
+  }
+
+  /**
+   * 发之前确认这一页还停在目标会话上。
+   * 群页是常驻的，抖音可能自己切到别的会话（新群、刷新、消息跳转）；
+   * 不确认就往当前输入框里打字，话会落到另一个群里——看起来「发了」，群里却没有。
+   */
+  async ensureThreadOpen(page, who) {
+    const title = await this.currentChatTitle(page).catch(() => '');
+    if (!title || this.threadTitleMatches(title, who)) return true;
+    const ok = await this.clickThread(page, who).catch(() => false);
+    if (ok) await page.waitForTimeout(120);
+    return ok;
   }
 
   /**

@@ -12,6 +12,9 @@ export const STROLL = {
       timezone: ctx.timezone,
       dataDir: ctx.dataDir,
       persist: (patch) => ctx.persist(patch),
+      // 之前没接宿主日志：群监听/私信挂载这些关键事件在 core.log 里一条都看不到，
+      // 出问题只能靠猜。宿主有 ctx.log 就接上（worlds.stroll 前缀）。
+      log: ctx.log,
     }),
   /** 配置里的中文下拉：值仍是英文，显示给主人看的是中文。 */
   configOptions: (kind, language) => {

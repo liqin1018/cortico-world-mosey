@@ -68,7 +68,11 @@ export class StrollWorld {
     this.timeZone = timezone || 'Asia/Shanghai';
     this.dataDir = dataDir;
     this.persist = persist;
-    this.log = log;
+    this.log = log ?? {
+      // 宿主没给 logger 也别让日志消失：至少进 stdout，core.log 里能看到
+      info: (...args) => console.log('[stroll]', ...args),
+      warn: (...args) => console.warn('[stroll]', ...args),
+    };
     this.host = null;
     this.store = new Store(path.join(dataDir, 'stroll'), this.timeZone).load();
     this.store.data.autoSessions ??= {};
@@ -103,8 +107,16 @@ export class StrollWorld {
     /** 群聊观察器：挂的时候防并发，以及上次尝试的时间（失败退避用）。 */
     this.groupArmBusy = false;
     this.groupArmAt = 0;
-    /** 自动识别出来的群名缓存：{ at, names }。10 分钟刷一次，dmBeat 不会反复读页面。 */
-    this.groupAuto = { at: 0, names: [] };
+    this.groupDeepAt = 0;
+    /** 自动识别出来的群名缓存：{ at, names, next, seenAt }。2 分钟刷一次，dmBeat 不会反复读页面。 */
+    this.groupAuto = { at: 0, names: [], next: 0, seenAt: {} };
+    /**
+     * 上一次推给她的**群**消息是哪个群：{ group, at }。
+     * 她回话时经常漏 target——有这个上下文，就能判断「这条本该回群」，
+     * 而不是悄悄发给主人私信（以前就是这么把群回复变成私信的）。
+     * 主人自己发私信、或者群消息已经回过了，就清掉。
+     */
+    this.lastGroupPoke = null;
     /** 上一次推「该出门溜达了」的时间：那个窗口里她做的动作算自己出门，按 20 秒节奏。 */
     this.autoWalkAt = 0;
     this.running = false;
@@ -239,17 +251,17 @@ export class StrollWorld {
   groupNames() {
     const raw = String(this.cfg.douyinGroups ?? '').trim();
     const detected = (this.groupAuto?.names ?? []).slice(0, 4);
-    if (!raw) return detected.slice(0, 2);
+    if (!raw) return detected.slice(0, 3);
     const fragments = raw
       .split(/[,，、;；\n]+/)
       .map((s) => s.trim())
       .filter(Boolean);
     const hit = [];
     // 整条配置先当成一个群名比一次（群名自带逗号时这一步就命中）
-    const whole = detected.find((n) => this.sameGroup(n, raw));
+    const whole = this.matchGroup(detected, raw);
     if (whole) hit.push(whole);
     for (const f of fragments) {
-      const m = detected.find((n) => this.sameGroup(n, f));
+      const m = this.matchGroup(detected, f);
       if (m && !hit.includes(m)) hit.push(m);
     }
     if (hit.length) return hit.slice(0, 2);
@@ -270,6 +282,42 @@ export class StrollWorld {
     return x === y || x.includes(y) || y.includes(x);
   }
 
+  /** 群名的比较键：去掉空白、大小写，以及同名群加的「#2」后缀。 */
+  groupKey(name) {
+    return String(name ?? '')
+      .replace(/\s*#\d+$/, '')
+      .replace(/[\s\u3000]+/g, '')
+      .toLowerCase();
+  }
+
+  /**
+   * 在已知群名里挑目标：**整串相等优先，其次「唯一包含」**。
+   * 两个群共用成员时（「A, 穹, 大萌神」和「A, 穹, 阿猫」），
+   * 只写「A」两个都像——这时候返回 null，宁可让她问清楚，也不能把话发错群。
+   */
+  matchGroup(names, wanted) {
+    const norm = (s) =>
+      String(s ?? '')
+        .replace(/[\s\u3000]+/g, '')
+        .replace(/\(\d+\)$|（\d+）$/, '')
+        .toLowerCase();
+    const key = norm(wanted);
+    if (!key) return null;
+    const list = (names ?? []).filter(Boolean);
+    const exact = list.find((n) => norm(n) === key);
+    if (exact) return exact;
+    /**
+     * 只允许「她写的是群名的一部分」：写「大萌神」→ 命中「A, 穹, 大萌神」。
+     *
+     * **反过来绝对不行**：她写的是更长的群名（第二个群）时，
+     * 拿它去 `key.includes(群一)` 会命中更短的那个群一——
+     * 于是本该发到群二的话静静发进了群一，回执还写「发出去了」。
+     * 这正是「第二个群怎么回都没动静」的来源之一。
+     */
+    const part = list.filter((n) => norm(n).includes(key));
+    return part.length === 1 ? part[0] : null;
+  }
+
   /** 群监听的开关 + 平台开关是否都允许。 */
   groupWatchOn(live = this.liveConfig() ?? {}) {
     if (live.groupWatch === false || this.cfg.groupWatch === false) return false;
@@ -279,28 +327,83 @@ export class StrollWorld {
 
   /**
    * 自动认出她在哪些群里：会话列表里 `kind === 'group'` 的那些。
-   * 结果缓存在内存里（默认 10 分钟），dmBeat 每 5 秒一拍不会反复去读页面。
+   *
+   * 缓存 2 分钟（以前 10 分钟：主人刚把她拉进第二个群时，名单要等十分钟才更新，
+   * 这期间她回群会被当成「没这个群」）。force=true 时**滚动列表做深度读取**，
+   * 因为抖音的会话列表是虚拟的，不滚就只有看得见的那几条。
    */
-  async resolveGroups(force = false) {
+  async resolveGroups(force = false, { deep = false } = {}) {
     if (!this.groupWatchOn()) return [];
-    const ttl = 10 * 60 * 1000;
-    const cache = this.groupAuto ?? { at: 0, names: [], next: 0 };
-    // next 是显式的下次可重试时间；老缓存只有 at，就按 at + 10 分钟算
+    /**
+     * 有页面正停在 /chat 时，读一次只是几毫秒的 DOM 扫描——45 秒刷一次，
+     * 主人刚把她拉进新群也能很快发现。没有常驻聊天页时得靠主页面导航过去，
+     * 那就别刷太勤（5 分钟），免得把她正在看的视频顶掉。
+     */
+    const liveChat = [this.douyin?.dmPage, ...(this.douyin?.groupPages?.values?.() ?? [])].some(
+      (p) => p && !p.isClosed() && /\/chat/.test(p.url()),
+    );
+    const ttl = liveChat ? 45 * 1000 : 5 * 60 * 1000;
+    const cache = this.groupAuto ?? { at: 0, names: [], next: 0, seenAt: {} };
+    // next 是显式的下次可重试时间；老缓存只有 at，就按 at + 2 分钟算
     const nextAt = Number(cache.next ?? 0) || Number(cache.at ?? 0) + ttl;
     if (!force && Date.now() < nextAt) return this.groupNames();
-    const res = await this.douyin.listThreads().catch(() => null);
-    if (!res?.ok) {
-      // 读不到（没登录 / 页面还没起来）：留个 2 分钟的重试窗口，
-      // 不然 dmBeat 每 5 秒就会去拉一次会话列表，白白折腾抖音。
-      this.groupAuto = { at: cache.at ?? 0, names: cache.names ?? [], next: Date.now() + 2 * 60 * 1000 };
-      return this.groupNames();
+    // 几个地方会同时问（心跳、发送前解析群名）：共用同一次读页面，
+    // 别让它们各自去 goto /chat —— 那正是把聊天页折腾死的来源之一
+    if (this.groupResolving) return this.groupResolving;
+    this.groupResolving = (async () => {
+      const res = await this.douyin.listThreads({ deep: deep || !!force }).catch(() => null);
+      if (!res?.ok) {
+        // 读不到（没登录 / 页面还没起来）：留个 2 分钟的重试窗口，
+        // 不然 dmBeat 每 5 秒就会去拉一次会话列表，白白折腾抖音。
+        this.groupAuto = {
+          at: cache.at ?? 0,
+          names: cache.names ?? [],
+          next: Date.now() + 2 * 60 * 1000,
+          seenAt: cache.seenAt ?? {},
+        };
+        return this.groupNames();
+      }
+      return this.absorbGroups(res.threads, { via: res.via, ttlMs: ttl });
+    })().finally(() => {
+      this.groupResolving = null;
+    });
+    return this.groupResolving;
+  }
+
+  /**
+   * 把一次会话列表读数里的群挑出来写进缓存。
+   *
+   * 两个群同名很常见：同一批人建的两个群、都没起名，抖音就把成员名拼成一样的标题。
+   * 光看标题永远只认得出「一个」群，第二个群既盯不上、也点不开。
+   * 所以同名时按出现顺序加「#2」后缀，并把会话 id 记下来，点击时按 id 精确定位。
+   */
+  absorbGroups(threads, { via = '', ttlMs = 2 * 60 * 1000 } = {}) {
+    const detected = (threads ?? []).filter((t) => t.kind === 'group' && t.name);
+    const cids = { ...(this.groupCids ?? {}) };
+    const dup = new Map();
+    const labels = [];
+    for (const t of detected) {
+      const k = this.groupKey(t.name);
+      const n = (dup.get(k) ?? 0) + 1;
+      dup.set(k, n);
+      const label = n === 1 ? t.name : `${t.name} #${n}`;
+      labels.push(label);
+      if (t.cid) cids[label] = t.cid;
     }
-    const names = (res.threads ?? [])
-      .filter((t) => t.kind === 'group')
-      .map((t) => t.name)
-      .slice(0, 2);
-    this.groupAuto = { at: Date.now(), names, next: Date.now() + ttl };
-    if (names.length && !(cache.names ?? []).length) this.log?.info?.('stroll groups detected', { groups: names });
+    this.groupCids = cids;
+    if (this.douyin) this.douyin.threadCids = cids;
+    const now = Date.now();
+    const seenAt = { ...(this.groupAuto?.seenAt ?? {}) };
+    for (const n of labels) seenAt[n] = now;
+    // 虚拟列表偶尔会读少一个群：15 分钟内还认它，别把它踢下线
+    // （踢了会把它的 tab 关掉，下一拍再重开，来回折腾）
+    const keep = Object.keys(seenAt).filter((n) => now - Number(seenAt[n] ?? 0) < 15 * 60 * 1000);
+    const names = [...new Set([...labels, ...keep])].slice(0, 3);
+    const before = this.groupAuto?.names ?? [];
+    this.groupAuto = { at: now, names, next: now + ttlMs, seenAt };
+    if (JSON.stringify(names) !== JSON.stringify(before)) {
+      this.log?.info?.('stroll groups detected', { groups: names, total: (threads ?? []).length, via });
+    }
     return this.groupNames();
   }
 
@@ -314,14 +417,27 @@ export class StrollWorld {
     try {
       for (const name of names) {
         if (this.douyin.groupArmed?.(name)) continue;
+        const slot = this.douyin.groupSlot?.(name);
+        // 连续挂不上的群要退避：两个群都挂不上时，不能每 30 秒把两个聊天页各重开一遍
+        if (slot?.nextTryAt && Date.now() < slot.nextTryAt) continue;
         const res = await this.douyin.watchGroup(name, (messages) => this.onGroupPoke(messages, name)).catch(() => null);
         if (res?.ok) {
+          if (slot) {
+            slot.failCount = 0;
+            slot.nextTryAt = 0;
+          }
           this.log?.info?.('stroll group watch armed', { group: name });
           await this.seedGroupBaseline(name).catch(() => {});
         } else {
-          this.log?.warn?.('stroll group watch failed', { group: name, code: res?.code });
+          if (slot) {
+            slot.failCount = Math.min(5, Number(slot.failCount ?? 0) + 1);
+            slot.nextTryAt = Date.now() + Math.min(10 * 60 * 1000, 30 * 1000 * 2 ** (slot.failCount - 1));
+          }
+          this.log?.warn?.('stroll group watch failed', { group: name, code: res?.code, fails: slot?.failCount });
         }
       }
+      // 不在名单里的群（退群/换了群）把它的 tab 收掉，别一直挂着占内存
+      await this.douyin.pruneGroupPages?.(names).catch(() => {});
     } finally {
       this.groupArmBusy = false;
     }
@@ -387,7 +503,11 @@ export class StrollWorld {
     const slot = this.douyin.groupPages?.get?.(name);
     const page = slot?.page;
     if (!page || page.isClosed()) return;
-    const messages = await this.douyin.readGroupMessages(page, 10).catch(() => []);
+    // 带超时：这里卡住会把 armGroupPush 整个堵死（groupArmBusy 一直 true，第二个群永远挂不上）
+    const messages = await Promise.race([
+      this.douyin.readGroupMessages(page, 10).catch(() => []),
+      new Promise((resolve) => setTimeout(() => resolve([]), 8000)),
+    ]);
     if (!messages.length) return;
     const { fp, last, tailKeys } = this.groupTailFp(messages);
     this.store.data.dmSeen = {
@@ -423,11 +543,13 @@ export class StrollWorld {
     // 否则下次会把这几条自己的话当成别人的新消息推给她。
     saveSeen({ fp, last, tail: tailKeys, at: Date.now() });
     if (!tail.length) return;
+    // 记下「这次说的是哪个群」：她回话时漏了 target 也能判断出该回群
+    this.lastGroupPoke = { group, at: Date.now() };
     const lines = tail.map((m) => `${m.who || '有人'}：${m.url ? `${m.text}（${m.url}）` : m.text}`);
     const body =
-      `抖音群「${group}」里刚有人说话：\n${lines.join('\n')}\n` +
-      `想接就调 stroll_act action=dm platform=douyin target=${group} text=... 发到群里（target 可以只写群名的一部分，比如某个成员名）。` +
-      '不想接就别理，群消息不用每条都回。';
+      `群「${group}」有人说话：\n${lines.join('\n')}\n` +
+      `回群：stroll_act action=dm platform=douyin target=${group} text=…` +
+      '（target 原样照抄群名；不用每条都回）';
     if (await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'interrupt')) return;
     if (await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'flush')) return;
     await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'debounce');
@@ -443,12 +565,30 @@ export class StrollWorld {
   stopDmWatch() {
     if (this.dmTimer) clearInterval(this.dmTimer);
     this.dmTimer = null;
+    // 万一上一拍还卡在某个页面调用里，标记要清掉，不然重新开监听会一直跳过心跳
+    this.dmBeatBusy = false;
     this.douyin.keepWarm?.(false);
   }
 
   /** 心跳：按设置里的开关和间隔决定这一拍要不要真去看。 */
   async dmBeat() {
     if (!this.running) return;
+    /**
+     * 绝不叠着跑。这一拍里有「解析群名 → 给每个群开/点会话页」这种十几秒的活，
+     * 而定时器是 5 秒一次：群一多（两个群），上一拍还没跑完下一拍就进来，
+     * 两个心跳同时对同一个聊天页做 goto / evaluate，页面直接被折腾死——
+     * 表现就是「拉进第二个群之后整个桌宠卡住不动」。
+     */
+    if (this.dmBeatBusy) return;
+    this.dmBeatBusy = true;
+    try {
+      await this.dmBeatOnce();
+    } finally {
+      this.dmBeatBusy = false;
+    }
+  }
+
+  async dmBeatOnce() {
     const live = this.liveConfig() ?? {};
     if (!this.dmWatchOn(live)) {
       // 主人在设置里关掉了：把后台页面放掉，别白占内存
@@ -467,9 +607,12 @@ export class StrollWorld {
       }
     }
     // 群聊：观察器掉了就补挂（30 秒最多试一次）。
-    // 群名留空时靠自动识别，所以这里先解析一次（有 10 分钟缓存，不会反复读页面）。
+    // 群名留空时靠自动识别；每 3 分钟滚动会话列表做一次深度读取，
+    // 这样刚被拉进的新群不用等旧名单过期就能被发现。
     if (useDy && this.groupWatchOn(live) && Date.now() - Number(this.groupArmAt ?? 0) > 30000) {
-      const names = await this.resolveGroups().catch(() => []);
+      const deep = Date.now() - Number(this.groupDeepAt ?? 0) > 3 * 60 * 1000;
+      if (deep) this.groupDeepAt = Date.now();
+      const names = await this.resolveGroups(false, { deep }).catch(() => []);
       const missing = names.filter((n) => !this.douyin.groupArmed?.(n));
       if (missing.length) {
         this.groupArmAt = Date.now();
@@ -514,6 +657,8 @@ export class StrollWorld {
   /** 把「主人发私信了」这件事推给她。攒一批一起推，别一条一条地叫。 */
   async pushDm(fresh) {
     if (!fresh?.length) return false;
+    // 主人在私信里说话了：接下来的回话对象是主人，不再是群
+    this.lastGroupPoke = null;
     // 主人刚点过单：接下来三分钟她做的动作都算「主人让的」，不套她自己出门的节奏，
     // 也不该因为给主人回私信就把后面的评论卡住（以前就是这里卡 90 秒）。
     this.store.data.ownerAskAt = Date.now();
@@ -521,11 +666,14 @@ export class StrollWorld {
     if (Number(this.store.data.risk?.strikes ?? 0) > 0) this.store.data.risk.strikes = 0;
     this.store.save();
     const lines = fresh.map((x) => `${PLATFORM_NAMES[x.platform] ?? x.platform}·${x.who}：${x.text}`);
+    /**
+     * 推给她的文字要短：这段话会进模型的上下文，越长首字越慢。
+     * 以前每条都带一大段「别先查 status/feed…」，现在压成两句，实测能省一点推理时间。
+     */
     const body =
-      `主人刚给你发私信了：\n${lines.join('\n')}\n` +
-      '别等下次出门，也别先查 status/feed：现在就一句短的（1-2 句，像平时说话），' +
-      '直接 stroll_act action=dm 发出去（platform 照上面那个来；私信主人不占额度，也不用等批准）。' +
-      '连发几句的要一句一句都接住，别只回最后一条；带链接的把链接里的东西看一眼再说。';
+      `主人私信你：\n${lines.join('\n')}\n` +
+      '现在就回一句短的，别查 status/feed。' +
+      (fresh[0].platform === 'douyin' ? '抖音记得 target=主人。' : '');
     const meta = { platform: fresh[0].platform, count: fresh.length };
     // interrupt 最急（当场把她叫起来）；宿主不认这个值就退到 flush / debounce，别让消息掉地上
     if (await this.push('stroll.reply', body, meta, 'interrupt')) return true;
@@ -933,12 +1081,10 @@ export class StrollWorld {
     if (action === 'weekly') return JSON.stringify(this.weeklyReport(args.days));
     if (action === 'books') return JSON.stringify(this.listBooks());
     if (action === 'groups') {
-      const list = await this.douyin.listThreads().catch((error) => ({ ok: false, error: error?.message ?? '读不到会话列表' }));
+      const list = await this.douyin.listThreads({ deep: true }).catch((error) => ({ ok: false, error: error?.message ?? '读不到会话列表' }));
       if (!list.ok) return JSON.stringify({ ok: false, error: list.error ?? '读不到会话列表' });
       // 顺手刷新一次自动识别（用户可能就是来问「我在哪些群」）
-      if (list.threads?.some((t) => t.kind === 'group')) {
-        this.groupAuto = { at: Date.now(), names: list.threads.filter((t) => t.kind === 'group').map((t) => t.name).slice(0, 2) };
-      }
+      if (list.threads?.some((t) => t.kind === 'group')) this.absorbGroups(list.threads, { via: 'groups' });
       return JSON.stringify({
         ok: true,
         watched: this.groupNames(),
@@ -2030,10 +2176,21 @@ export class StrollWorld {
    */
   async stickerTargetOf(raw) {
     const wanted = String(raw ?? '').trim();
-    const groups = await this.resolveGroups().catch(() => this.groupNames());
-    if (wanted) {
-      const hit = groups.find((g) => this.sameGroup(g, wanted));
+    const OWNER_ALIAS = /^(主人|主人私信|私信|私聊|owner|dm|你|您)$/i;
+    let groups = await this.resolveGroups().catch(() => this.groupNames());
+    if (wanted && !OWNER_ALIAS.test(wanted)) {
+      let hit = this.matchGroup(groups, wanted);
+      if (!hit) {
+        // 名单可能是旧的（刚被拉进新群）：强刷一次再认，别把群名当成「不认识的人」
+        groups = await this.resolveGroups(true, { deep: true }).catch(() => groups);
+        hit = this.matchGroup(groups, wanted);
+      }
       if (hit) return { ok: true, who: hit, group: true };
+      const list = groups.length ? groups.map((g) => `「${g}」`).join(' 或 ') : '（现在一个群都没认出来）';
+      return {
+        ok: false,
+        error: `没认出「${wanted}」是哪个群，表情没发。现在认得出：${list}。要发到主人私信就写 target=主人。`,
+      };
     }
     const owner = this.douyinOwner();
     if (owner.sameAsSelf) {
@@ -2045,9 +2202,6 @@ export class StrollWorld {
     const name = String(owner.name ?? '').trim();
     if (!name) {
       return { ok: false, error: '还不知道主人在抖音的昵称。先让主人在面板点一次「绑定这个号」。' };
-    }
-    if (wanted && !this.sameGroup(wanted, name)) {
-      return { ok: false, error: `表情只能发到 ${groups.length ? groups.map((g) => `「${g}」或`).join('') : ''}主人私信，不能发给「${wanted}」。` };
     }
     return { ok: true, who: name, group: false };
   }
@@ -2374,13 +2528,54 @@ export class StrollWorld {
         target = String(targetRaw || owner).trim();
         if (target !== owner) return { ok: false, error: '私信只发主人，不发别人。' };
       } else {
-        // 群聊：target 写群名。只认「认出来的群」，免得她随手把消息发到别人的会话里。
-        // 匹配放宽成「包含」：群没起名时标题是「A, B, C」，让她抄一遍不现实；
-        // 只写其中一个成员名，或干脆写「群」（只有一个群时）也能对上。
-        const groups = await this.resolveGroups().catch(() => this.groupNames());
-        const wanted = String(targetRaw).trim();
-        let asGroup = groups.find((g) => this.sameGroup(g, wanted));
-        if (!asGroup && groups.length === 1 && /^(群|群聊|那个群|抖音群|group|the group)$/i.test(wanted)) asGroup = groups[0];
+        /**
+         * 群聊：target 写群名；target 写「主人 / 私信」= 明确要私信主人。
+         *
+         * 以前这里有个很坑的静默回退：target 给了群名但没认出来（群还没被识别、
+         * 名字写错、名单过期），代码会一路掉到最后「私信主人」——她以为发到群里了，
+         * 其实发进了主人的私信，群里当然一条都没有。现在只要 target 不是空的、
+         * 又不是「主人」，认不出群就报错，绝不改道。
+         */
+        let groups = await this.resolveGroups().catch(() => this.groupNames());
+        const wantedRaw = String(targetRaw ?? '').trim();
+        const OWNER_ALIAS = /^(主人|主人私信|私信|私聊|owner|dm|你|您)$/i;
+        const ownerNick = String(this.douyinOwner().name ?? '').trim();
+        const flat = (s) => String(s ?? '').replace(/\s+/g, '').toLowerCase();
+        /**
+         * target 写的是**主人的抖音昵称**时，按私信主人处理，别去群名单里找。
+         * 线上踩过：她回群话时写了「小月月一直在玩」（主人的名字），
+         * 而群标题恰好包含这个名字——于是话被发进了一个群，她以为在私信主人。
+         */
+        const toOwnerDm = OWNER_ALIAS.test(wantedRaw) || (!!ownerNick && !!wantedRaw && flat(wantedRaw) === flat(ownerNick));
+        const wanted = toOwnerDm ? '' : wantedRaw;
+        // 上一次推送是哪个群：她回群消息时经常漏 target，这个上下文能兜住
+        const pokedGroup =
+          this.lastGroupPoke && Date.now() - Number(this.lastGroupPoke.at ?? 0) < 10 * 60 * 1000
+            ? String(this.lastGroupPoke.group ?? '')
+            : '';
+        let asGroup = wanted ? this.matchGroup(groups, wanted) : null;
+        if (!asGroup && wanted && groups.length === 1 && /^(群|群聊|那个群|抖音群|group|the group)$/i.test(wanted)) {
+          asGroup = groups[0];
+        }
+        if (!asGroup && wanted) {
+          // 名单可能是旧的（主人刚把她拉进新群）：滚动会话列表强刷一次再认
+          groups = await this.resolveGroups(true, { deep: true }).catch(() => groups);
+          asGroup = this.matchGroup(groups, wanted);
+        }
+        if (!asGroup && wanted && pokedGroup && this.matchGroup([pokedGroup], wanted)) asGroup = pokedGroup;
+        if (!asGroup && !wanted && pokedGroup) {
+          return {
+            ok: false,
+            error: `刚才那条是群「${truncate(pokedGroup, 24)}」里的消息，不是私信。要回群就把 target 写成群名（照着推送里给的写）；要私信主人就写 target=主人。`,
+          };
+        }
+        if (!asGroup && wanted) {
+          const list = groups.length ? groups.map((g) => `「${g}」`).join(' 或 ') : '（现在一个群都没认出来）';
+          return {
+            ok: false,
+            error: `没认出「${wanted}」是哪个群。现在认得出：${list}。要回群就照抄群名（或只写其中一个成员名）；要私信主人就写 target=主人。`,
+          };
+        }
         if (asGroup) {
           // 要真 @ 人就得知道那个人在群里的昵称；不知道就直说，别让她手打一个假 @。
           // 默认 @ 主人；也可以用 args.mention 指定群里的别人。
@@ -2428,12 +2623,6 @@ export class StrollWorld {
           if (!check.ok) return check;
           return { ok: true, action, platform, target: asGroup, text: body, free: true, group: true, mention: wantMention };
         }
-        if (wanted && groups.length) {
-          return {
-            ok: false,
-            error: `能发到 ${groups.map((g) => `「${g}」`).join(' 或 ')}，不是「${wanted}」。群里只发主人这边的群，别的会话不发。`,
-          };
-        }
         const owner = await this.ensureDouyinOwner();
         if (!owner.ok) return owner;
         if (this.douyinOwner().sameAsSelf) {
@@ -2443,7 +2632,7 @@ export class StrollWorld {
               '抖音主人绑的就是她现在登录的那个号，抖音不能给自己发私信。要么给桌宠换一个号登录，要么这条私信走面板说。',
           };
         }
-        target = String(targetRaw || owner.secUid).trim();
+        target = toOwnerDm ? owner.secUid : String(targetRaw || owner.secUid).trim();
         if (target !== owner.secUid) return { ok: false, error: '私信只发主人，不发别人。' };
       }
       // 只发给主人的私信不限量：不进每日额度，也不受「同一个对象一天一次」限制
@@ -2550,6 +2739,7 @@ export class StrollWorld {
 
   async executePlan(plan, source) {
     const { action, platform, target, text } = plan;
+    const t0 = Date.now();
     try {
       let result;
       if (action === 'like' || action === 'unlike') {
@@ -2595,6 +2785,9 @@ export class StrollWorld {
         return { ok: false, code: 'UNKNOWN_ACTION', error: '不认识的动作。' };
       }
 
+      // 记总耗时：主人在追「一秒内回复」，得能看出是发送慢还是别的地方慢
+      if (result && typeof result === 'object') result = { ...result, msTotal: Date.now() - t0 };
+
       this.policy.consume(action, platform, target, {
         quotaAction: this.capAction(action),
         countQuota: !plan.free,
@@ -2608,7 +2801,19 @@ export class StrollWorld {
         extra: result,
         tags: plan.mentionOwner ? [] : [],
       });
-      const receipt = { ok: true, action, platform, target, group: !!plan.group, result, receipt: this.receiptText(action, platform, result, plan) };
+      const receipt = {
+        ok: true,
+        action,
+        platform,
+        target,
+        group: !!plan.group,
+        // 发到哪儿要写死：她以前会把「私信主人」当成「发到群里」
+        ...(action === 'dm' ? { to: plan.group ? 'group' : 'owner' } : {}),
+        result,
+        receipt: this.receiptText(action, platform, result, plan),
+      };
+      // 群里的这句已经回掉了：上下文清掉，别让她下一条（可能是私信主人）被当成回群
+      if (plan.group) this.lastGroupPoke = null;
       if (source === 'operator') {
         await this.push('stroll.sent', `${this.receiptText(action, platform, result, plan)}`, { action, platform, target }, 'flush');
       }
@@ -2657,7 +2862,7 @@ export class StrollWorld {
     }
     if (action === 'post') return `${p} 动态发出去了${result.dynamicId ? `（${result.dynamicId}）` : ''}`;
     if (action === 'dm') {
-      if (!plan.group) return `${p} 私信发出去了`;
+      if (!plan.group) return `${p} 私信发给主人了（不是群）`;
       const name = truncate(String(plan.target ?? ''), 16);
       if (plan.mention) {
         // 群里 @ 只有在插成 chip 时才真的会通知对方；插不上就如实说，别让主人以为提到了

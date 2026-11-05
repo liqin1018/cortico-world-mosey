@@ -60,7 +60,7 @@ export const DEFAULTS = {
    * 抖音现在走页面事件通道（新消息一进 DOM 就回调），轮询只是防掉线的兜底，
    * 所以可以设得比过去小很多：抖音那边几乎不花代价，B站是 HTTP 也就几十毫秒。
    */
-  dmPollSec: 5,
+  dmPollSec: 3,
 
   /** 书库目录；留空用数据目录下的 stroll/books。面板「选文件夹」会写这里。 */
   booksDir: '',

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,7 @@ import { CONFIG_GROUPS, validatePolicyPatch } from './config.js';
 import {
   dayKey,
   hourOf,
+  imageMimeOf,
   looksBrokenPath,
   nowIso,
   openFolder,
@@ -37,6 +39,7 @@ const ACTION_NAMES = {
   post: '发动态',
   dm: '私信',
   sticker: '表情包',
+  image: '图片',
   save: '稍后再看',
 };
 
@@ -117,6 +120,8 @@ export class StrollWorld {
      * 主人自己发私信、或者群消息已经回过了，就清掉。
      */
     this.lastGroupPoke = null;
+    /** 上一次推私信的时间：主人刚说过话就以私信为准，别被随后进来的群消息抢走上下文。 */
+    this.lastDmPoke = { at: 0 };
     /** 上一次推「该出门溜达了」的时间：那个窗口里她做的动作算自己出门，按 20 秒节奏。 */
     this.autoWalkAt = 0;
     this.running = false;
@@ -440,6 +445,11 @@ export class StrollWorld {
       await this.douyin.pruneGroupPages?.(names).catch(() => {});
     } finally {
       this.groupArmBusy = false;
+      /**
+       * 开新群/挂群页的这段时间里，私信监听可能被挤掉（页面被切走、观察器丢了）。
+       * 顺手补挂一次：不然「新开了群之后私信不回」会一直持续到下一轮心跳。
+       */
+      if (this.dmWatchOn() && !this.douyin.dmArmed?.()) this.armDmPush().catch(() => {});
     }
   }
 
@@ -546,13 +556,28 @@ export class StrollWorld {
     // 记下「这次说的是哪个群」：她回话时漏了 target 也能判断出该回群
     this.lastGroupPoke = { group, at: Date.now() };
     const lines = tail.map((m) => `${m.who || '有人'}：${m.url ? `${m.text}（${m.url}）` : m.text}`);
+    // 群友发的图也一起带上：不然她只知道「有张图」，看不见内容
+    const urls = tail.flatMap((m) => (m.image ? [m.image] : []));
+    const blobs = urls.length
+      ? await this.imageBlobsSoon(urls, { platform: 'douyin', label: '群里的图片' })
+      : null;
+    const savedLine = blobs?.saved?.length
+      ? `\n图已存到本地：${blobs.saved.map((f) => f.name).join('、')}（要转发就用 stroll_act action=image file=<这个名字>）`
+      : '';
     const body =
       `群「${group}」有人说话：\n${lines.join('\n')}\n` +
       `回群：stroll_act action=dm platform=douyin target=${group} text=…` +
-      '（target 原样照抄群名；不用每条都回）';
-    if (await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'interrupt')) return;
-    if (await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'flush')) return;
-    await this.push('stroll.reply', body, { platform: 'douyin', group, count: tail.length }, 'debounce');
+      '（target 原样照抄群名；不用每条都回）' +
+      savedLine;
+    if (!urls.length && tail.some((m) => m.kind === 'image' || m.kind === 'emoji')) {
+      this.log?.warn?.('stroll image url missing (group)', { group, kinds: tail.map((m) => m.kind) });
+    } else if (urls.length && !blobs?.length) {
+      this.log?.warn?.('stroll image fetch failed (group)', { group, urls: urls.slice(0, 2) });
+    }
+    const meta = { platform: 'douyin', group, count: tail.length, images: urls.length };
+    if (await this.push('stroll.reply', body, meta, 'interrupt', blobs)) return;
+    if (await this.push('stroll.reply', body, meta, 'flush', blobs)) return;
+    await this.push('stroll.reply', body, meta, 'debounce', blobs);
   }
 
   /** 私信监听到底该不该干活：总开关、私信开关、平台开关都得是开的。 */
@@ -619,7 +644,7 @@ export class StrollWorld {
         this.armGroupPush().catch(() => {});
       }
     }
-    const sec = Math.max(3, Number(live.dmPollSec ?? this.cfg.dmPollSec ?? 5) || 5);
+    const sec = Math.max(3, Number(live.dmPollSec ?? this.cfg.dmPollSec ?? 3) || 3);
     if (Date.now() - Number(this.dmLastAt ?? 0) < sec * 1000 - 800) return;
     this.dmLastAt = Date.now();
     await this.watchDms();
@@ -659,6 +684,7 @@ export class StrollWorld {
     if (!fresh?.length) return false;
     // 主人在私信里说话了：接下来的回话对象是主人，不再是群
     this.lastGroupPoke = null;
+    this.lastDmPoke = { at: Date.now() };
     // 主人刚点过单：接下来三分钟她做的动作都算「主人让的」，不套她自己出门的节奏，
     // 也不该因为给主人回私信就把后面的评论卡住（以前就是这里卡 90 秒）。
     this.store.data.ownerAskAt = Date.now();
@@ -670,15 +696,30 @@ export class StrollWorld {
      * 推给她的文字要短：这段话会进模型的上下文，越长首字越慢。
      * 以前每条都带一大段「别先查 status/feed…」，现在压成两句，实测能省一点推理时间。
      */
+    // 带图私信：下载成附件一起推过去（最多两张，别把一条推送撑爆）
+    const urls = fresh.flatMap((x) => x.images ?? []);
+    const blobs = urls.length
+      ? await this.imageBlobsSoon(urls, { platform: fresh[0].platform, label: '私信图片' })
+      : null;
+    // 收到的图已存到本地：告诉她文件名，想转发时才能用 action=image file=<名字>
+    const savedLine = blobs?.saved?.length
+      ? `\n图已存到本地：${blobs.saved.map((f) => f.name).join('、')}（要转发就用 stroll_act action=image file=<这个名字>）`
+      : '';
     const body =
       `主人私信你：\n${lines.join('\n')}\n` +
       '现在就回一句短的，别查 status/feed。' +
-      (fresh[0].platform === 'douyin' ? '抖音记得 target=主人。' : '');
-    const meta = { platform: fresh[0].platform, count: fresh.length };
+      (fresh[0].platform === 'douyin' ? '抖音记得 target=主人。' : '') +
+      savedLine;
+    if (!urls.length && /\[图片\]|\[表情\]/.test(lines.join(' '))) {
+      this.log?.warn?.('stroll image url missing (dm)', { who: fresh[0].who });
+    } else if (urls.length && !blobs?.length) {
+      this.log?.warn?.('stroll image fetch failed (dm)', { urls: urls.slice(0, 2) });
+    }
+    const meta = { platform: fresh[0].platform, count: fresh.length, images: urls.length };
     // interrupt 最急（当场把她叫起来）；宿主不认这个值就退到 flush / debounce，别让消息掉地上
-    if (await this.push('stroll.reply', body, meta, 'interrupt')) return true;
-    if (await this.push('stroll.reply', body, meta, 'flush')) return true;
-    return this.push('stroll.reply', body, meta, 'debounce');
+    if (await this.push('stroll.reply', body, meta, 'interrupt', blobs)) return true;
+    if (await this.push('stroll.reply', body, meta, 'flush', blobs)) return true;
+    return this.push('stroll.reply', body, meta, 'debounce', blobs);
   }
 
   /**
@@ -717,7 +758,15 @@ export class StrollWorld {
     this.store.save();
     // 第一次跑、或者这条已经放了好几分钟（上个版本的旧消息）：只记基线，不叫她
     if (!seen || old) return [];
-    return [{ platform: 'bilibili', who: this.cfg.ownerName || '主人', text: body || '（发来一条非文字消息）' }];
+    const images = tail.flatMap((m) => (m.image ? [m.image] : []));
+    return [
+      {
+        platform: 'bilibili',
+        who: this.cfg.ownerName || '主人',
+        text: body || '（发来一条非文字消息）',
+        images,
+      },
+    ];
   }
 
   /** 抖音私信：读会话末尾连着的那几句主人说的话。 */
@@ -769,29 +818,140 @@ export class StrollWorld {
       platform: 'douyin',
       who: name,
       text: tail.map((m) => (m.url ? `${m.text}（${m.url}）` : m.text)).join(' / '),
+      // 主人发来的图片：推的时候下载成附件，她才能真的看见
+      images: tail.flatMap((m) => (m.image ? [m.image] : [])),
     };
   }
 
-  async push(type, text, meta = {}, trigger = 'debounce') {
+  async push(type, text, meta = {}, trigger = 'debounce', blobs = null) {
     if (!this.host) return false;
     try {
-      await this.host.pushEvent(
-        {
-          type,
-          source: this.id,
-          ts: nowIso(this.timeZone),
-          text,
-          senderKey: `stroll:${type}`,
-          origin: 'internal',
-          meta,
-        },
-        { trigger },
-      );
+      const event = {
+        type,
+        source: this.id,
+        ts: nowIso(this.timeZone),
+        text,
+        senderKey: `stroll:${type}`,
+        origin: 'internal',
+        meta,
+        // 图片附件：宿主会按模型接受的 MIME 类型附上；不接受就用 fallbackText
+        ...(blobs?.length ? { blobs } : {}),
+      };
+      try {
+        await this.host.pushEvent(event, { trigger });
+      } catch (error) {
+        // 老宿主可能不认 blobs：别因为一张图把整条消息丢了
+        if (!blobs?.length) throw error;
+        const { blobs: _drop, ...plain } = event;
+        this.log?.warn?.('stroll push with blobs failed, retry plain', { type, message: error?.message });
+        await this.host.pushEvent(plain, { trigger });
+      }
       return true;
     } catch (error) {
       this.log?.warn?.('stroll push failed', { type, trigger, message: error?.message });
       return false;
     }
+  }
+
+  /** 带时间预算的取图：超时就不带图先推，别为了一张图把回复拖慢。 */
+  async imageBlobsSoon(urls, opts = {}, ms = 3000) {
+    if (!urls?.length) return null;
+    return Promise.race([
+      this.imageBlobs(urls, opts).catch(() => []),
+      new Promise((resolve) => setTimeout(() => resolve(null), ms)),
+    ]);
+  }
+
+  /** 收到的图存这里：和「图片工坊」分开，但发图时两边都能挑。 */
+  mediaInbox() {
+    return path.join(this.dataDir, 'stroll', 'media');
+  }
+
+  /**
+   * 把一张收到的图存到本地，返回 {name, path, kb}。
+   * 文件名按内容 hash（recv-1a2b3c4d.jpg）：同一张图重复收到只存一份。
+   */
+  saveImageBytes(bytes) {
+    const mime = imageMimeOf(bytes);
+    if (!mime) return null;
+    const ext = mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1];
+    const hash = crypto.createHash('sha1').update(bytes).digest('hex').slice(0, 8);
+    const name = `recv-${hash}.${ext}`;
+    const file = path.join(this.mediaInbox(), name);
+    try {
+      if (!fs.existsSync(file)) {
+        fs.mkdirSync(this.mediaInbox(), { recursive: true });
+        fs.writeFileSync(file, bytes);
+      }
+      return { name, path: file, kb: Math.round(bytes.length / 1024) };
+    } catch (error) {
+      this.log?.warn?.('stroll image save failed', { name, message: error?.message });
+      return null;
+    }
+  }
+
+  /**
+   * 把几条消息里的图片下载成附件（最多 limit 张），顺手存到本地收件箱。
+   * 单张上限 6MB：宿主那边模型附件也有体积限制，太大反而整条丢掉。
+   */
+  async imageBlobs(urls, { limit = 2, maxBytes = 6 * 1024 * 1024, platform = 'douyin', label = '图片', save = true } = {}) {
+    const list = (urls ?? [])
+      .filter((u) => typeof u === 'string' && (/^https?:/.test(u) || /^data:image\//.test(u)))
+      .slice(0, limit);
+    const blobs = [];
+    const files = [];
+    for (const url of list) {
+      let bytes = null;
+      if (url.startsWith('data:image/')) {
+        // 页面里直读出来的 dataURL（blob 图走的就是这条路）
+        const m = /^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i.exec(url);
+        if (m) bytes = Buffer.from(m[2], 'base64');
+      } else {
+        bytes =
+          platform === 'bilibili'
+            ? await this.bili.imageBytes(url).catch(() => null)
+            : await this.douyin.imageBytes(url).catch(() => null);
+      }
+      if (!bytes || !bytes.length) {
+        this.log?.warn?.('stroll image download empty', { url: url.slice(0, 90), platform });
+        continue;
+      }
+      if (bytes.length > maxBytes) {
+        this.log?.warn?.('stroll image too big', { url: url.slice(0, 90), kb: Math.round(bytes.length / 1024) });
+        continue;
+      }
+      const mime = imageMimeOf(bytes);
+      if (!mime) {
+        this.log?.warn?.('stroll image mime unknown', { url: url.slice(0, 90), head: Buffer.from(bytes).subarray(0, 12).toString('hex') });
+        continue;
+      }
+      // 收到的 webp 落盘时就转成 jpg：发出去时不用再转一次，也避开抖音上传框不收 webp 的坑
+      let saveBytes = bytes;
+      if (save && mime === 'image/webp' && platform === 'douyin') {
+        const page =
+          (this.douyin.dmPage && !this.douyin.dmPage.isClosed() ? this.douyin.dmPage : null) ||
+          (this.douyin.page && !this.douyin.page.isClosed() ? this.douyin.page : null);
+        const jpg = page ? await this.douyin.toJpegBytes(page, bytes).catch(() => null) : null;
+        if (jpg) saveBytes = jpg;
+      }
+      const saved = save ? this.saveImageBytes(saveBytes) : null;
+      if (saved) files.push(saved);
+      blobs.push({
+        bytes,
+        mime,
+        name: `${label}-${blobs.length + 1}`,
+        fallbackText: `（${label} ${blobs.length + 1}：${Math.round(bytes.length / 1024)}KB ${mime}${saved ? `，已存为 ${saved.name}` : ''}）`,
+      });
+    }
+    // 数组上挂一份「存到哪了」，调用方拼推送文案用（宿主只读 blobs 的每一项，不会看这个属性）
+    blobs.saved = files;
+    if (blobs.length) {
+      this.log?.info?.('stroll image attached', {
+        count: blobs.length,
+        kb: blobs.map((b) => Math.round(b.bytes.length / 1024)),
+      });
+    }
+    return blobs;
   }
 
   /* ---------------- prompt ---------------- */
@@ -1055,9 +1215,35 @@ export class StrollWorld {
     if (action === 'inbox') return JSON.stringify(await this.inbox(args.platform, args.n));
     if (action === 'comments') {
       const url = String(args.url ?? args.id ?? args.target ?? '').trim();
-      if (!url) return JSON.stringify({ ok: false, error: '给个 B站视频/动态/专栏链接。' });
+      if (!url) return JSON.stringify({ ok: false, error: '给个视频/动态/专栏链接。' });
+      const plat = String(args.platform ?? '').trim() || (/douyin\.com|iesdouyin/i.test(url) ? 'douyin' : 'bilibili');
+      if (plat === 'douyin') {
+        const id = parseDouyinId(url);
+        if (!id) return JSON.stringify({ ok: false, error: '给个抖音视频链接或视频 ID。' });
+        const list = await this.douyin.commentList(id, { pages: 1 }).catch(() => null);
+        if (!list) return JSON.stringify({ ok: false, error: '读不到抖音评论区（要登录，或者正被限流）。' });
+        const items = list.slice(0, clamp(args.n ?? 10, 1, 20)).map((c) => ({
+          user: c.nick,
+          text: c.text || (c.images?.length ? '[图片评论]' : ''),
+          like: c.digg,
+          at: c.create,
+          // 图片评论：URL 也给她，同时最多挑两张真的附上去
+          images: c.images ?? [],
+        }));
+        const blobs = await this.imageBlobs(items.flatMap((x) => x.images), {
+          limit: 2,
+          platform: 'douyin',
+          label: '评论图片',
+        }).catch(() => []);
+        return { text: JSON.stringify({ ok: true, platform: 'douyin', id, items }), ...(blobs.length ? { blobs } : {}) };
+      }
       const data = await this.bili.commentsOf(url, clamp(args.n ?? 10, 1, 20));
-      return JSON.stringify({ ok: true, ...data });
+      const blobs = await this.imageBlobs((data.items ?? []).flatMap((c) => c.pictures ?? []), {
+        limit: 2,
+        platform: 'bilibili',
+        label: '评论图片',
+      }).catch(() => []);
+      return { text: JSON.stringify({ ok: true, ...data }), ...(blobs.length ? { blobs } : {}) };
     }
     if (action === 'search') {
       if (!String(args.query ?? '').trim()) return JSON.stringify({ ok: false, error: '给个搜索词。' });
@@ -1099,6 +1285,27 @@ export class StrollWorld {
     }
     if (action === 'read') return JSON.stringify(this.readBook({ name: args.book, chars: args.chars }));
     if (action === 'note') return JSON.stringify(this.noteBook(args.text));
+    if (action === 'images') {
+      // 能发的图：自己画的 + 别人发来存下的
+      const files = this.listImageFiles().map((x) => ({
+        file: x.f,
+        id: (x.f.match(/([0-9a-f]{6,})\./i) ?? [])[1] ?? x.f.replace(/\.[^.]+$/, ''),
+        kb: x.kb,
+        at: new Date(x.at).toISOString(),
+        source: x.source === 'recv' ? '收到的' : '画的',
+      }));
+      const q = String(args.query ?? '').trim().toLowerCase();
+      const hit = q
+        ? files.filter((x) => x.file.toLowerCase().includes(q) || x.id.toLowerCase().includes(q))
+        : files;
+      return JSON.stringify({
+        ok: true,
+        drawDir: this.workshopDir(),
+        recvDir: this.mediaInbox(),
+        total: files.length,
+        items: hit.slice(0, 20),
+      });
+    }
     if (action === 'stickers') {
       const list = this.stickers.list({
         query: String(args.query ?? '').trim(),
@@ -1128,8 +1335,9 @@ export class StrollWorld {
         draftId: args.draft_id ?? null,
       });
     }
-    // 表情包：聊天行为，和私信一样直接发，不占公开额度、不进草稿箱
+    // 表情包 / 自己画的图：聊天行为，和私信一样直接发，不占公开额度、不进草稿箱
     if (action === 'sticker') return JSON.stringify(await this.sendStickerAct(args));
+    if (action === 'image') return JSON.stringify(await this.sendImageAct(args));
     if (action === 'collect_stickers') return JSON.stringify(await this.collectStickersAct(args));
     if (action === 'sticker_name') return JSON.stringify(this.nameStickerAct(args));
     const plan = await this.buildPlan(action, args, { byOwner: this.ownerNearby() });
@@ -2264,6 +2472,146 @@ export class StrollWorld {
     };
   }
 
+  /** 图片工坊的产物目录（她画好的图都在这里）。 */
+  workshopDir() {
+    // 图片工坊默认放 workspace/media；换版本后如果换了位置，退到 workspace 也还能找到
+    const media = path.join(this.dataDir, 'workspace', 'media');
+    return fs.existsSync(media) ? media : path.join(this.dataDir, 'workspace');
+  }
+
+  /**
+   * 找一张要发的图：
+   *   - 直接给绝对路径（图片工坊面板「复制路径」拿到的那种）
+   *   - 给文件名或 id 片段（ab6899f7）
+   *   - 什么都不给：用最新的一张
+   */
+  resolveWorkshopImage(raw) {
+    const s = String(raw ?? '')
+      .trim()
+      .replace(/^["'“”]+|["'“”]+$/g, '');
+    if (s && fs.existsSync(s) && fs.statSync(s).isFile()) {
+      return { ok: true, path: s, name: path.basename(s), from: 'path' };
+    }
+    const files = this.listImageFiles();
+    if (!files.length) {
+      return { ok: false, error: `还没有可发的图（画好的在 ${this.workshopDir()}，收到的在 ${this.mediaInbox()}）` };
+    }
+    const key = s.toLowerCase();
+    const hit = key ? files.find((x) => x.f.toLowerCase().includes(key)) : files[0];
+    if (!hit) {
+      return { ok: false, error: `没找到「${s}」。现有的：${files.slice(0, 5).map((x) => x.f).join('、')}` };
+    }
+    return { ok: true, path: path.join(hit.dir, hit.f), name: hit.f, from: key ? 'match' : 'latest' };
+  }
+
+  /**
+   * 能发的图：图片工坊画的 + 收到的图存下来的。按时间从新到旧。
+   * source: draw=画的，recv=别人发来的。
+   */
+  listImageFiles() {
+    const dirs = [
+      { dir: this.workshopDir(), source: 'draw' },
+      { dir: this.mediaInbox(), source: 'recv' },
+    ];
+    const out = [];
+    for (const { dir, source } of dirs) {
+      let names = [];
+      try {
+        names = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const f of names) {
+        if (!/\.(jpe?g|png|webp|gif)$/i.test(f)) continue;
+        const full = path.join(dir, f);
+        try {
+          const st = fs.statSync(full);
+          if (!st.isFile()) continue;
+          out.push({ f, dir, source, at: st.mtimeMs, kb: Math.round(st.size / 1024) });
+        } catch {
+          // 文件刚好被删了，跳过
+        }
+      }
+    }
+    return out.sort((a, b) => b.at - a.at);
+  }
+
+  /**
+   * 发一张本地图片：私信 / 群聊走聊天上传；评论区走抖音的图片评论。
+   * 图片工坊画的图就是普通 jpg，直接塞给上传框。
+   */
+  async sendImageAct(args) {
+    if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
+    const pick = this.resolveWorkshopImage(args.file ?? args.path ?? args.id ?? '');
+    if (!pick.ok) return pick;
+    const caption = String(args.text ?? '').trim().slice(0, 100);
+    const targetRaw = String(args.target ?? '').trim();
+    const where = String(args.where ?? '').trim().toLowerCase();
+    const isComment =
+      where === 'comment' || where === '评论区' || /douyin\.com\/(video|note)|^\d{15,}$/i.test(targetRaw);
+    const fileName = path.basename(pick.path);
+
+    if (isComment) {
+      if (approvalFor(this.cfg, 'comment') !== 'auto') {
+        return {
+          ok: false,
+          code: 'NEED_APPROVAL',
+          error: '评论区发图属于公开动作，当前审批不是 auto；图片草稿面板还不支持，先把审批调成 auto 再发。',
+        };
+      }
+      const check = this.policy.check('comment', 'douyin', targetRaw, { quotaAction: 'comment' });
+      if (!check.ok) return check;
+      const r = await this.douyin
+        .commentImage(targetRaw, pick.path, { text: caption })
+        .catch((error) => ({ ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) }));
+      this.store.addAction({
+        platform: 'douyin',
+        action: 'image',
+        target: targetRaw,
+        title: '评论区',
+        text: `[图片] ${fileName}${caption ? ` ${caption}` : ''}`,
+        result: r.ok ? 'ok' : 'fail',
+        extra: { file: pick.path, where: 'comment', via: r.via, code: r.code ?? '' },
+      });
+      this.store.save();
+      return {
+        ...r,
+        file: pick.path,
+        where: 'comment',
+        receipt: r.ok ? '图片评论发出去了' : `图片评论没发出去：${r.error ?? r.code ?? ''}`,
+      };
+    }
+
+    const target = await this.stickerTargetOf(targetRaw);
+    if (!target.ok) return target;
+    const check = this.policy.check('dm', 'douyin', target.who, { quotaAction: 'dm', free: true });
+    if (!check.ok) return check;
+    const r = await this.douyin
+      .sendStickerTo(target.who, { file: pick.path, label: fileName })
+      .catch((error) => ({ ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) }));
+    this.store.addAction({
+      platform: 'douyin',
+      action: 'image',
+      target: target.who,
+      title: target.who,
+      text: `[图片] ${fileName}`,
+      result: r.ok ? 'ok' : 'fail',
+      extra: { file: pick.path, via: r.via, code: r.code ?? '' },
+    });
+    this.store.save();
+    this.log?.[r.ok ? 'info' : 'warn']?.(
+      `发图 ${fileName} → ${target.who}${r.ok ? '' : ` 失败：${r.code ?? ''} ${r.error ?? ''}`}`,
+    );
+    return {
+      ...r,
+      file: pick.path,
+      to: target.group ? 'group' : 'owner',
+      receipt: r.ok
+        ? `图片发给${target.group ? `群「${target.who}」` : '主人'}了`
+        : `图片没发出去：${r.error ?? r.code ?? ''}`,
+    };
+  }
+
   async collectStickersAct(args) {
     if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
     const paused = this.policy.paused();
@@ -2548,9 +2896,12 @@ export class StrollWorld {
          */
         const toOwnerDm = OWNER_ALIAS.test(wantedRaw) || (!!ownerNick && !!wantedRaw && flat(wantedRaw) === flat(ownerNick));
         const wanted = toOwnerDm ? '' : wantedRaw;
-        // 上一次推送是哪个群：她回群消息时经常漏 target，这个上下文能兜住
+        // 上一次推送是哪个群：她回群消息时经常漏 target，这个上下文能兜住。
+        // 但主人刚发过私信（90 秒内）时以私信为准——否则「主人先私信、群里紧接着有人说话」
+        // 会把回私信的那条判成「该回群」，看起来就是「私聊不理我」。
+        const dmFresh = Date.now() - Number(this.lastDmPoke?.at ?? 0) < 90 * 1000;
         const pokedGroup =
-          this.lastGroupPoke && Date.now() - Number(this.lastGroupPoke.at ?? 0) < 10 * 60 * 1000
+          !dmFresh && this.lastGroupPoke && Date.now() - Number(this.lastGroupPoke.at ?? 0) < 10 * 60 * 1000
             ? String(this.lastGroupPoke.group ?? '')
             : '';
         let asGroup = wanted ? this.matchGroup(groups, wanted) : null;

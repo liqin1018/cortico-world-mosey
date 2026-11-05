@@ -371,3 +371,18 @@ export function stripAtPlaceholder(text) {
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
 }
+
+/**
+ * 从文件头判断图片类型。
+ * 宿主的图片附件要带 mime，而抖音/B站的 CDN 地址里不一定有后缀（还有 webp/avif 伪装），
+ * 所以只信字节头，不信 URL。
+ */
+export function imageMimeOf(input) {
+  const b = Buffer.isBuffer(input) ? input : Buffer.from(input ?? []);
+  if (b.length < 12) return '';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+  if (b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return '';
+}

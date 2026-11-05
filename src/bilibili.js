@@ -295,7 +295,10 @@ export class Bilibili {
     const cached = this.cache.get(key);
     if (opts.cacheMs && cached && cached.until > Date.now()) return structuredClone(cached.value);
 
-    const wait = Math.max(0, this.lastRequest + 650 - Date.now());
+    // 650ms 是给「刷列表/翻评论」防 412 用的；发私信、发评论这种一次性的动作
+    // 没必要时时等满 650ms，调用点用 minGapMs 单独给预算。
+    const gap = Math.max(0, Number(opts.minGapMs ?? 650));
+    const wait = Math.max(0, this.lastRequest + gap - Date.now());
     if (wait) await new Promise((r) => setTimeout(r, wait));
     this.lastRequest = Date.now();
 
@@ -763,6 +766,10 @@ export class Bilibili {
       at: Number(r.ctime ?? 0),
       // 评论里真正 @ 到的人（不是正文里那个 @ 字符）
       mentions: (r.content?.members ?? []).map((m) => String(m.mid ?? '')),
+      // 带图评论：B站把图片放在 content.pictures[].img_src
+      pictures: (r.content?.pictures ?? [])
+        .map((p) => String(p?.img_src ?? ''))
+        .filter((u) => /^https?:/.test(u)),
     }));
   }
 
@@ -929,22 +936,47 @@ export class Bilibili {
     );
     return (data.messages ?? [])
       .map((m) => {
-        let body = '';
+        let obj = {};
         try {
-          body = JSON.parse(m.content ?? '{}').content ?? '';
+          obj = JSON.parse(m.content ?? '{}') ?? {};
         } catch {
-          body = '';
+          obj = {};
         }
+        const body = obj.content ?? '';
+        // msg_type 2 = 图片；图片消息的 URL 在 content.url 里
+        const type = Number(m.msg_type ?? 0);
+        const pic = String(obj.url ?? '') || String(Array.isArray(obj.image_urls) ? obj.image_urls[0] : '');
+        const isPic = type === 2 || (!body && /^https?:/.test(pic));
         return {
           at: Number(m.timestamp ?? 0) * 1000,
           from: String(m.sender_uid ?? ''),
-          type: Number(m.msg_type ?? 0),
-          text: stripTags(body),
+          type,
+          text: stripTags(body) || (isPic ? '[图片]' : ''),
+          image: isPic ? pic : '',
           key: String(m.msg_key ?? ''),
         };
       })
       .filter((m) => m.text)
       .sort((a, b) => a.at - b.at);
+  }
+
+  /** 下载一张图（B站图床一般不需要 cookie，带 Referer 就够）。 */
+  async imageBytes(url) {
+    const u = String(url ?? '').trim();
+    if (!/^https?:/.test(u)) return null;
+    try {
+      const r = await fetch(u, {
+        headers: {
+          Referer: 'https://www.bilibili.com/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+        },
+      });
+      if (!r.ok) return null;
+      const buf = Buffer.from(await r.arrayBuffer());
+      return buf.length ? buf : null;
+    } catch {
+      return null;
+    }
   }
 
   async inbox(limit = 8) {
@@ -1166,6 +1198,7 @@ export class Bilibili {
     const data = await this.request('/x/v2/reply/add', body, {
       post: true,
       cacheMs: 0,
+      minGapMs: 150,
       referer: target.url || ORIGIN,
       origin: ORIGIN,
     });
@@ -1176,14 +1209,18 @@ export class Bilibili {
       // add 接口的响应不一定带 members，先看，看不到就发布后回查一次
       mentioned = members.some((m) => String(m.mid ?? '') === ownerUid) ? true : null;
     }
-    let visibility = 'unknown';
-    if (rpid) {
-      await new Promise((r) => setTimeout(r, 1200));
+    /**
+     * 以前这里固定 sleep(1200) 再回查可见性——评论慢 1.2 秒全耗在这。
+     * 现在：只有「@ 了主人、但响应里看不出有没有 @ 上」才回查一次；
+     * 其它情况拿到 rpid 就算发出去了，可见性交给面板的 inbox/comments 后看。
+     */
+    let visibility = 'unchecked';
+    if (rpid && mentionOwner && mentioned === null) {
       try {
         const pub = await this.replyList(target.type, target.oid, 20, 0, 0);
         const mine = pub.find((r) => r.rpid === rpid);
         visibility = mine ? 'public' : 'unknown';
-        if (mentioned === null && mine) mentioned = (mine.mentions ?? []).includes(ownerUid);
+        if (mine) mentioned = (mine.mentions ?? []).includes(ownerUid);
       } catch {
         visibility = 'unknown';
       }
@@ -1242,7 +1279,8 @@ export class Bilibili {
   }
 
   async dm(uid, text) {
-    const nav = await this.nav(true);
+    // 登录信息 5 分钟缓存就够了，没必要每发一条都强制拉一次 nav（省一个 650ms 的请求）
+    const nav = await this.nav();
     if (!nav?.isLogin || !nav.mid) throw new BiliError('LOGIN_REQUIRED', '发私信需要 B站登录');
     if (!uid) throw new BiliError('NO_OWNER', '没设主人 UID');
     if (String(uid) === String(nav.mid)) {
@@ -1263,6 +1301,7 @@ export class Bilibili {
       post: true,
       base: 'https://api.vc.bilibili.com',
       cacheMs: 0,
+      minGapMs: 120,
       referer: 'https://message.bilibili.com/',
       origin: 'https://message.bilibili.com',
     });

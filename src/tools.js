@@ -4,7 +4,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll',
     description:
-      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站/抖音链接都行，/note/ 图文也行）；comments 只读评论区；inbox 看谁回了你（评论/@/私信都算；抖音私信带 recent 最近十几句，含分享的视频/图文链接，还有 pending/said 表示主人连着发了几句）；groups 看抖音会话列表（私信和群都在里面，会标出哪些是群、正在盯哪几个）；join_group 用群邀请链接进群（url 参数）；stickers 看本地表情包库（query 按名字/标签筛，没有就空）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
+      '出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站/抖音链接都行，/note/ 图文也行）；comments 只读评论区（B站/抖音，链接自动判断；带图评论会附最多两张图）；inbox 看谁回了你（评论/@/私信都算；抖音私信带 recent 最近十几句，含分享的视频/图文链接，还有 pending/said 表示主人连着发了几句）；groups 看抖音会话列表（私信和群都在里面，会标出哪些是群、正在盯哪几个）；join_group 用群邀请链接进群（url 参数）；stickers 看本地表情包库（query 按名字/标签筛，没有就空），images 看能发的图（自己画的 + 别人发来存下的，发图前用它确认有哪些）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。',
     tags: ['read'],
     parameters: {
       type: 'object',
@@ -12,7 +12,7 @@ export const TOOL_DECLS = [
       properties: {
         action: {
           type: 'string',
-          enum: ['status', 'brief', 'feed', 'following', 'open', 'comments', 'inbox', 'search', 'weekly', 'books', 'read', 'note', 'login', 'history', 'whoami', 'watch', 'groups', 'join_group', 'stickers'],
+          enum: ['status', 'brief', 'feed', 'following', 'open', 'comments', 'inbox', 'search', 'weekly', 'books', 'read', 'note', 'login', 'history', 'whoami', 'watch', 'groups', 'join_group', 'stickers', 'images'],
           description: '要做什么。',
         },
         platform: { type: 'string', enum: ['bilibili', 'douyin'], description: '去哪个平台；open 会从链接自动判断。' },
@@ -38,7 +38,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll_act',
     description:
-      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态）、dm、save（B站稍后再看）、sticker（发表情包）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（评论 rpid）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
+      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态）、dm、save（B站稍后再看）、sticker（发表情包）、image（把自己画的图/本地图片发到抖音私信、群聊或评论区）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（评论 rpid）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
     tags: ['act', 'speak'],
     parameters: {
       type: 'object',
@@ -46,18 +46,28 @@ export const TOOL_DECLS = [
       properties: {
         action: {
           type: 'string',
-          enum: ['like', 'unlike', 'follow', 'unfollow', 'comment', 'reply', 'post', 'dm', 'save', 'approve', 'reject', 'sticker', 'collect_stickers', 'sticker_name'],
+          enum: ['like', 'unlike', 'follow', 'unfollow', 'comment', 'reply', 'post', 'dm', 'save', 'approve', 'reject', 'sticker', 'image', 'collect_stickers', 'sticker_name'],
         },
         platform: { type: 'string', enum: ['bilibili', 'douyin'] },
         target: {
           type: 'string',
           description:
-            '视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID。发抖音私信给主人就把 target 写成「主人」（或「私信」）；在抖音群里说话就把 target 写成群名（照抄推送/`groups` 里给的名字，同名群会带 #2）；只有一个群时写「群」也算。刚回过群消息又没写 target，会被要求写清楚——不会再自动发成私信。collect_stickers 也用它指定去哪个群/会话里收。',
+            '视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID。发抖音私信给主人就把 target 写成「主人」（或「私信」）；在抖音群里说话就把 target 写成群名（照抄推送/`groups` 里给的名字，同名群会带 #2）；只有一个群时写「群」也算。刚回过群消息又没写 target，会被要求写清楚——不会再自动发成私信。image 发评论区时，target 写视频链接（或配 where=comment）。collect_stickers 也用它指定去哪个群/会话里收。',
         },
         text: {
           type: 'string',
           description:
             '评论/动态/私信正文。评论不超过 120 字。sticker 用它挑表情（名字、序号或 id，留空＝随机一张）；sticker_name 用它当新名字（配 target=表情 id）。',
+        },
+        file: {
+          type: 'string',
+          description:
+            'image 用：本地图片路径（图片工坊面板「复制路径」拿到的那种），或者文件名/id 片段（如 ab6899f7）。留空＝用图片工坊最新的一张。',
+        },
+        where: {
+          type: 'string',
+          enum: ['chat', 'comment'],
+          description: 'image 用：chat 发到私信/群（默认），comment 发到评论区（这时 target 要给视频链接）。',
         },
         reply_to: { type: 'string', description: '回复评论时，被回复的评论 ID（rpid）。' },
         mention_owner: {

@@ -10,7 +10,20 @@ import { StrollWorld } from '../src/world.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = path.join(root, '.smoke-data');
-fs.rmSync(tmp, { recursive: true, force: true });
+// 上一次的浏览器 profile 可能还被系统锁着。删不掉就别硬跑——带着脏目录跑会卡在启动浏览器那步。
+let cleared = false;
+for (let i = 0; i < 6 && !cleared; i += 1) {
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    cleared = true;
+  } catch (e) {
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+if (!cleared) {
+  console.error(`删不掉 ${tmp}（多半是上次的浏览器进程还占着）。先关掉再重跑，或手动删除该目录。`);
+  process.exit(1);
+}
 fs.mkdirSync(tmp, { recursive: true });
 
 const cfg = {
@@ -46,7 +59,7 @@ check('dm 不排队审批', approvalFor({ ...cfg, approval: 'confirm', allowDm: 
 check('dry_run 仍然拦 dm', approvalFor({ ...cfg, approval: 'dry_run', allowDm: true }, 'dm') === 'draft');
 
 // 私信监听的默认节奏：默认走页面事件通道，轮询只是兜底，所以默认值要小
-check('私信兜底轮询 5 秒', DEFAULTS.dmPollSec === 5 && DEFAULTS.dmWatch === true);
+check('私信兜底轮询 3 秒', DEFAULTS.dmPollSec === 3 && DEFAULTS.dmWatch === true);
 // 去重口径：末尾连着几句都要一起接住；同一批不重复推；末尾是自己发的不推
 const batch = [
   { from: 'them', kind: 'text', text: '在吗' },
@@ -362,4 +375,17 @@ check('policy set', policy.ok === true && cfg.dailyLikes === 4 && cfg.ownerUid =
 
 console.log(checks.map(([n, ok]) => `${ok ? 'ok' : 'NO'}  ${n}`).join('\n'));
 console.log(`\n${checks.length} checks passed`);
-fs.rmSync(tmp, { recursive: true, force: true });
+// 必须 stop：world 里有 tick / 私信轮询 / watch 三个 interval，不停就会挂住事件循环，
+// 进程退不出去（浏览器也不关），最后连 .smoke-data 都删不掉。
+await world.stop();
+// Windows 上浏览器进程释放 profile 有延迟，直接删会 EBUSY。重试几次，实在删不掉就算了，
+// 别让清理失败把「97 项都过了」变成退出码 1。
+for (let i = 0; i < 8; i += 1) {
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    break;
+  } catch (e) {
+    if (i === 7) console.log(`(清理临时目录失败，可手动删除 ${tmp}：${e.code || e.message})`);
+    else await new Promise((r) => setTimeout(r, 250));
+  }
+}

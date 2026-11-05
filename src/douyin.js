@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { formatCount, formatDuration, humanPause, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
+import { formatCount, formatDuration, humanPause, imageMimeOf, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
 
 const ORIGIN = 'https://www.douyin.com';
 
@@ -759,8 +759,14 @@ export class DouyinBrowser {
      * 以前这里会把它当主页抢走：两个群一开，主页面可能变成某个群的聊天页，
      * 之后评论/私信全在这个页上乱跳，群监听也跟着错位——看着就像「死机」。
      * 所以建群页/私信页时都打了 __strollRole，这里必须跳过它们。
+     *
+     * 还有一个更窄的窗口：`ctx.newPage()` 已经返回、但 `__strollRole` 还没打上的那几毫秒。
+     * 有人开新群时正好有私信要回，就会撞上。用 `_reserving` 把这段窗口堵死：
+     * 正在建页的时候，getPage 宁可自己再开一个，也不去认领别人的空页。
      */
-    const blank = context.pages().find((p) => p && !p.isClosed() && p.url() === 'about:blank' && !p.__strollRole);
+    const blank = this._reserving
+      ? null
+      : context.pages().find((p) => p && !p.isClosed() && p.url() === 'about:blank' && !p.__strollRole);
     this.page = blank ?? (await context.newPage());
     this.page.__strollRole = '';
     this.page.setDefaultTimeout(20000);
@@ -1385,9 +1391,14 @@ export class DouyinBrowser {
     let page = this.dmPage;
     if (!page || page.isClosed()) {
       if (page) await page.close().catch(() => {});
-      page = await ctx.newPage();
-      // 标记归属：主页 getPage() 不能把它当成自己的 about:blank 空页抢走
-      page.__strollRole = 'dm';
+      this._reserving = Number(this._reserving ?? 0) + 1;
+      try {
+        page = await ctx.newPage();
+        // 标记归属：主页 getPage() 不能把它当成自己的 about:blank 空页抢走
+        page.__strollRole = 'dm';
+      } finally {
+        this._reserving = Math.max(0, Number(this._reserving ?? 0) - 1);
+      }
       page.setDefaultTimeout(20000);
       this.dmPage = page;
       this.dmThread = '';
@@ -1596,9 +1607,14 @@ export class DouyinBrowser {
       page = null;
     }
     if (!page) {
-      page = await ctx.newPage();
-      // 标记归属：主页 getPage() 不能把它当 about:blank 空页抢走
-      page.__strollRole = 'group';
+      this._reserving = Number(this._reserving ?? 0) + 1;
+      try {
+        page = await ctx.newPage();
+        // 标记归属：主页 getPage() 不能把它当 about:blank 空页抢走
+        page.__strollRole = 'group';
+      } finally {
+        this._reserving = Math.max(0, Number(this._reserving ?? 0) - 1);
+      }
       page.setDefaultTimeout(20000);
       slot.page = page;
       page.on('crash', () => {
@@ -2086,6 +2102,105 @@ export class DouyinBrowser {
     return r;
   }
 
+  /**
+   * 评论区发图：点开评论框 → 塞图片 →（可选）配一句正文 → 发送。
+   *
+   * 抖音网页版评论区的发图入口不是每个版本都有：先找输入区附近隐藏的 input[type=file]，
+   * 没有就点工具条里像「图片」的按钮再找一次。都找不到就明确报错并留 dump，
+   * 不去硬调发布接口——图片评论要额外的上传 token，猜接口只会更糟。
+   */
+  async commentImage(idOrUrl, filePath, { text = '' } = {}) {
+    if (!fs.existsSync(filePath)) throw new DouyinError('NO_FILE', `找不到文件：${filePath}`);
+    const id = await this.idOf(idOrUrl);
+    if (!id) throw new DouyinError('BAD_ID', '不是有效的抖音视频');
+    return this.serialize(async () => {
+      const page = await this.getPage();
+      if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，发不了评论');
+      await this.ensureVideo(page, id, { note: /\/note\//.test(String(idOrUrl)), quick: true });
+      let input = await this.findCommentInput(page);
+      if (!input) input = await this.openCommentEditor(page);
+      if (!input) throw new DouyinError('NO_INPUT', '没找到评论输入框（页面可能改版，或这条视频关了评论）');
+      await input.click({ force: true, timeout: 6000 }).catch(() => {});
+
+      const published = page
+        .waitForResponse((r) => /\/comment\/publish/.test(r.url()), { timeout: 15000 })
+        .then(async (r) => (await r.json().catch(() => null))?.comment ?? null)
+        .catch(() => null);
+
+      // webp/heic 评论区也不一定收，统一转 jpeg
+      const payload = await this.normalizeImageForUpload(page, filePath);
+      let fed = await this.feedFileInput(page, payload, input);
+      if (!fed) {
+        const btn = await this.findCommentImageButton(page, input);
+        if (btn) {
+          await btn.click({ force: true }).catch(() => {});
+          await page.waitForTimeout(220);
+          fed = await this.feedFileInput(page, payload, input);
+        }
+      }
+      if (!fed) {
+        const dump = await this.dumpChatDebug(page, 'comment-image', { id });
+        throw new DouyinError(
+          'NO_IMAGE_ENTRY',
+          `抖音网页版评论区没找到发图入口（可能不支持图片评论）。现场：${dump || '（dump 失败）'}`,
+        );
+      }
+      // 等预览贴上来（有的版本上传完要 0.5-1 秒）
+      await page.waitForTimeout(600);
+      if (text) await input.type(text, { delay: 22 }).catch(() => {});
+      await humanPause(120, 220);
+      await input.press('Enter').catch(() => {});
+      let left = '';
+      for (let i = 0; i < 12; i += 1) {
+        await page.waitForTimeout(80);
+        left = await input.evaluate((el) => (el.innerText || el.value || '').trim()).catch(() => '');
+        if (!left) break;
+      }
+      if (left) {
+        const send = await this.findSendButton(page);
+        if (send) await send.click({ force: true, timeout: 5000 }).catch(() => {});
+        for (let i = 0; i < 10; i += 1) {
+          await page.waitForTimeout(80);
+          left = await input.evaluate((el) => (el.innerText || el.value || '').trim()).catch(() => '');
+          if (!left) break;
+        }
+      }
+      const flags = await bodyFlags(page);
+      if (flags.verify) throw new DouyinError('VERIFY_REQUIRED', '抖音要求短信验证，先在手机上过一下。');
+      if (flags.risk) throw this.riskError(flags, '发图片评论');
+      const pub = await Promise.race([published, page.waitForTimeout(1800).then(() => null)]);
+      this.lastAction = `comment image ${id}`;
+      return {
+        ok: true,
+        via: 'comment-image',
+        confirmed: !!pub,
+        cid: String(pub?.cid ?? ''),
+        status: Number(pub?.status ?? 0),
+        note: pub ? '' : '发出去了但没拿到回执，去评论区看一眼再下结论。',
+      };
+    });
+  }
+
+  /** 评论工具条里那个「图片」按钮（有些版本是 label + 隐藏 input，feedFileInput 已经能直接命中）。 */
+  async findCommentImageButton(page, input) {
+    const h = await page
+      .evaluateHandle((ed) => {
+        const scope = ed.closest('[id*="comment-input-container"]') || ed.parentElement?.parentElement || document;
+        const cands = Array.from(
+          scope.querySelectorAll('button, [role="button"], label, [class*="upload"], [class*="Upload"], [class*="image"], [class*="Image"]'),
+        );
+        return (
+          cands.find((n) => {
+            if (n === ed || n.contains(ed)) return false;
+            const label = String(n.getAttribute('aria-label') || n.getAttribute('title') || n.textContent || '');
+            return /图片|照片|image|photo|上传/i.test(label);
+          }) || null
+        );
+      }, input)
+      .catch(() => null);
+    return h ? h.asElement() : null;
+  }
+
   async comment(idOrUrl, text, { mention = '' } = {}) {
     return this.serialize(async () => {
       const id = await this.idOf(idOrUrl);
@@ -2385,6 +2500,13 @@ export class DouyinBrowser {
                 digg: Number(c.digg_count ?? 0),
                 status: Number(c.status ?? 0),
                 extra: Array.isArray(c.text_extra) ? c.text_extra.map((e) => ({ type: e.type, sec_uid: e.sec_uid, user_id: e.user_id })) : [],
+                // 抖音评论也能发图 / 大表情：把图源带上，读评论时可以真的看见
+                images: [
+                  ...(Array.isArray(c.image_list) ? c.image_list : []),
+                  ...(c.sticker ? [c.sticker] : []),
+                ]
+                  .map((im) => im?.origin_url?.url_list?.[0] || im?.url_list?.[0] || im?.static_url?.url_list?.[0] || '')
+                  .filter((u) => typeof u === 'string' && /^https?:/.test(u)),
               });
             }
             if (!d.has_more || !d.comments.length) break;
@@ -2944,6 +3066,30 @@ export class DouyinBrowser {
    * 在已经打开的聊天框里把话发出去，并确认真的发出去了。
    * contenteditable 清空后会剩一个零宽字符，trim() 去不掉，所以要自己剥。
    */
+  /** 一次 CDP insertText 把整段正文塞进编辑器；没落进去返回 false（调用方退回逐字输入）。 */
+  async insertTextFast(page, input, text) {
+    try {
+      this._cdp ??= new Map();
+      let cdp = this._cdp.get(page);
+      if (!cdp) {
+        cdp = await page.context().newCDPSession(page);
+        this._cdp.set(page, cdp);
+      }
+      await cdp.send('Input.insertText', { text: String(text ?? '') });
+      await page.waitForTimeout(25);
+      const got = await input
+        .evaluate((el) => String(el.innerText || el.value || '').replace(/[\u200B-\u200D\uFEFF]/g, ''))
+        .catch(() => '');
+      const head = String(text ?? '').slice(0, 6);
+      const ok = !!got && got.includes(head);
+      if (!ok) this._cdp.delete(page);
+      return ok;
+    } catch {
+      this._cdp?.delete(page);
+      return false;
+    }
+  }
+
   async sendInChat(page, input, text, { mention = '' } = {}) {
     // 刚被限流过：直接告诉她还要等多久，别再去页面上试（越试越糟）
     if (Number(this.rateUntil ?? 0) > Date.now()) {
@@ -2965,14 +3111,17 @@ export class DouyinBrowser {
     if (mention) {
       mentioned = await this.mentionInChat(page, input, mention).catch(() => false);
     }
-    // 打字快一点：8ms/字 打 20 个字只要 0.16 秒（以前 24ms 要 0.5 秒）。
-    // 抖音输入框不看按键节奏，看的是「最后一个输入事件之后有没有变化」，所以还能再快。
+    // 先试「整段插入」：Slate 编辑器认 beforeinput/input，一次事件就落进去，
+    // 20 个字从 200ms+ 降到 ~20ms。编辑器没接住（还是空的）再退回逐字输入。
     if (body) {
-      if (mentioned) {
-        // mentionInChat 收尾已经在 chip 后面补了空格，这里直接接正文
-        await page.keyboard.type(body, { delay: 8 });
-      } else {
-        await input.pressSequentially(body, { delay: 8 });
+      const pasted = await this.insertTextFast(page, input, body);
+      if (!pasted) {
+        if (mentioned) {
+          // mentionInChat 收尾已经在 chip 后面补了空格，这里直接接正文
+          await page.keyboard.type(body, { delay: 0 });
+        } else {
+          await input.pressSequentially(body, { delay: 0 });
+        }
       }
     }
     this.lastMention = mentioned;
@@ -3223,20 +3372,54 @@ export class DouyinBrowser {
     return { ok: false, code: 'NO_STICKER', error: '表情面板里没有这张，也没有本地文件可发。' };
   }
 
+  /** 抖音聊天上传只稳收 jpg/png/gif/mp4；webp/heic 转成 jpeg 再传（顺便缩到 1280，传得更快）。 */
+  async normalizeImageForUpload(page, filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (/^\.(jpe?g|png|gif|mp4)$/.test(ext)) return filePath;
+    try {
+      const bytes = fs.readFileSync(filePath);
+      const jpg = await this.toJpegBytes(page, bytes);
+      if (!jpg) return filePath;
+      return { name: `${path.basename(filePath, ext)}.jpg`, mimeType: 'image/jpeg', buffer: jpg };
+    } catch {
+      return filePath;
+    }
+  }
+
   /**
    * 把本地图片当附件发进聊天：点工具按钮 → 接住系统文件选择框 → 等预览 → 发送。
    * 表情包发出去是图片消息，不是「收藏表情」；能点面板时优先走面板。
    */
   async sendChatImage(page, input, filePath) {
     if (!fs.existsSync(filePath)) return { ok: false, code: 'NO_FILE', error: `找不到文件：${filePath}` };
+    // 抖音对图片上传有节流：刚失败过就先等一会儿，别连着试（她 12:57-12:58 连试三次，越试越发不出去）
+    if (Number(this._imgSendUntil ?? 0) > Date.now()) {
+      return {
+        ok: false,
+        code: 'IMAGE_COOLDOWN',
+        error: `刚才发图被挡了一下，等 ${Math.ceil((Number(this._imgSendUntil) - Date.now()) / 1000)} 秒再发`,
+      };
+    }
     // 上一轮可能把表情面板留在屏幕上（它是个 semi-modal，会挡住输入区），先关掉
     await this.closeChatModals(page);
+    // webp/heic 抖音聊天上传不一定收：统一转成 jpeg（顺便缩到 1280），传上去更快更稳
+    const payload = await this.normalizeImageForUpload(page, filePath);
     // 最先试输入区里直接挂着的隐藏 input[type=file]：实测抖音的输入栏里一直有两个，
     // 塞文件就走上传，不用点图标、不用接系统文件框（点图标要等 700ms，还可能点空）。
     // 必须在选文件之前记指纹：有的版本 setFiles 当场就把消息发出去了
     const before = await this.chatSig(page);
-    if (await this.feedFileInput(page, filePath, input)) {
-      return await this.afterImagePicked(page, input, before);
+    const done = async () => {
+      const r = await this.afterImagePicked(page, input, before);
+      // 失败冷却 90 秒；成功也留 2.5 秒间隔——上传接口对连续调用很敏感
+      this._imgSendUntil = r.ok ? Date.now() + 2500 : Date.now() + 90 * 1000;
+      return r;
+    };
+    if (await this.feedFileInput(page, payload, input)) {
+      // 选上了不等于接住了：700ms 内没预览就说明喂错了 input（抖音有两个），换另一个再试一次
+      if (await this.waitPreview(page, input, 700)) return await done();
+      if (await this.feedReplaceInput(page, payload)) {
+        if (await this.waitPreview(page, input, 700)) return await done();
+      }
     }
     const cands = await this.chatToolbar(page, input);
     // 已经知道哪个是表情按钮了，就别再去点它（点开面板还要再关，白等一秒）
@@ -3256,14 +3439,14 @@ export class DouyinBrowser {
       // 抖音多数版本不弹系统框，只在按钮旁边挂一个隐藏的 input[type=file]。
       // 先给它 120ms 挂上去，找到了就直接喂文件，不用等 filechooser 超时（省半秒）。
       await page.waitForTimeout(120);
-      if (await this.feedFileInput(page, filePath, input)) {
+      if (await this.feedFileInput(page, payload, input)) {
         chooserPromise.then((ch) => ch?.setFiles([]).catch(() => {})).catch(() => {});
-        return await this.afterImagePicked(page, input, before);
+        return await done();
       }
       const chooser = await chooserPromise;
       if (chooser) {
-        await chooser.setFiles(filePath).catch(() => {});
-        return await this.afterImagePicked(page, input, before);
+        await chooser.setFiles(payload).catch(() => {});
+        return await done();
       }
       await page.keyboard.press('Escape').catch(() => {});
       await page.waitForTimeout(60);
@@ -3298,6 +3481,38 @@ export class DouyinBrowser {
    * 判据用 chatSig（图片消息不一定带 msg-item-content，只数那个会漏——实测图片其实已经发出去了，
    * 却因为数不到又按了一次回车，弹「不能发送空白消息」）。
    */
+  /** 输入区里出现图片预览（缩略图）没有。 */
+  async hasPreview(page, input) {
+    return await input
+      .evaluate((el) => {
+        const box = el.closest('[data-e2e="msg-input"]') || el;
+        return Array.from(box.querySelectorAll('img')).some((im) => {
+          const r = im.getBoundingClientRect();
+          return r.width >= 24 && r.height >= 24;
+        });
+      })
+      .catch(() => false);
+  }
+
+  async waitPreview(page, input, ms = 600) {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (await this.hasPreview(page, input)) return true;
+      await page.waitForTimeout(80);
+    }
+    return false;
+  }
+
+  /** 抖音输入栏里有两个 file input，第一个没反应时试 replace 那个。 */
+  async feedReplaceInput(page, payload) {
+    const loc = page.locator('input.semi-upload-hidden-input-replace').first();
+    if (!(await loc.count().catch(() => 0))) return false;
+    return await loc
+      .setInputFiles(payload)
+      .then(() => true)
+      .catch(() => false);
+  }
+
   async afterImagePicked(page, input, before) {
     const changed = async () => (await this.chatSig(page)) !== before;
     /**
@@ -3309,7 +3524,7 @@ export class DouyinBrowser {
     const modalSend = () =>
       page.locator('.semi-modal-wrap button:has-text("发送"), .semi-modal-wrap [role="button"]:has-text("发送")').last();
     let viaModal = false;
-    let until = Date.now() + 4000;
+    let until = Date.now() + 6000;
     while (Date.now() < until) {
       await page.waitForTimeout(100);
       if (await changed()) return { ok: true, via: viaModal ? 'upload+modal' : 'upload' };
@@ -3324,18 +3539,9 @@ export class DouyinBrowser {
     }
     // 有的版本不弹确认框：图挂在输入区当预览，得再点一下那个红按钮。
     // 预览要时间，先等它出来（没有预览就点发送只会弹「不能发送空白消息」）。
-    const preview = async () =>
-      await input
-        .evaluate((el) => {
-          const box = el.closest('[data-e2e="msg-input"]') || el;
-          return Array.from(box.querySelectorAll('img')).some((im) => {
-            const r = im.getBoundingClientRect();
-            return r.width >= 24 && r.height >= 24;
-          });
-        })
-        .catch(() => false);
+    const preview = () => this.hasPreview(page, input);
     let ready = false;
-    for (let i = 0; i < 12; i += 1) {
+    for (let i = 0; i < 25; i += 1) {
       if (await preview()) {
         ready = true;
         break;
@@ -3371,12 +3577,63 @@ export class DouyinBrowser {
   }
 
   /** 在页面里把图抓下来：先走 context 的 request（带 cookie），不行再用页内 fetch。 */
+  /** 下载一张图（有页面就借页面的 cookie，没有再开临时请求）。 */
+  async imageBytes(src, page = null) {
+    const p =
+      page ||
+      (this.dmPage && !this.dmPage.isClosed() ? this.dmPage : null) ||
+      (this.page && !this.page.isClosed() ? this.page : null) ||
+      Array.from(this.groupPages?.values?.() ?? [])
+        .map((s) => s.page)
+        .find((x) => x && !x.isClosed()) ||
+      null;
+    if (!p) return null;
+    const bytes = await this.fetchImageBytes(p, src).catch(() => null);
+    if (!bytes) return null;
+    // 抖音常给 avif/heic：模型多半不吃，转成 jpeg 再给
+    if (!imageMimeOf(bytes)) return this.toJpegBytes(p, bytes).catch(() => null);
+    return bytes;
+  }
+
+  /**
+   * 把已经下载好的图片重新编码成 jpeg（顺带缩到 1280px 以内）。
+   * 传字节而不是 URL：图片 CDN 不一定允许页内跨域 fetch，但字节已经在手里了，
+   * 走 blob 就不受 CORS 限制。手机直出照片动辄 4000px，原图塞给模型又慢又容易超限。
+   */
+  async toJpegBytes(page, bytes) {
+    const input = Buffer.from(bytes).toString('base64');
+    const b64 = await page
+      .evaluate(async (data) => {
+        try {
+          const bin = atob(data);
+          const u8 = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i += 1) u8[i] = bin.charCodeAt(i);
+          const bmp = await createImageBitmap(new Blob([u8]));
+          const scale = Math.min(1, 1280 / Math.max(bmp.width || 1, bmp.height || 1));
+          const c = document.createElement('canvas');
+          c.width = Math.max(1, Math.round((bmp.width || 1) * scale));
+          c.height = Math.max(1, Math.round((bmp.height || 1) * scale));
+          const g = c.getContext('2d');
+          if (!g) return '';
+          g.drawImage(bmp, 0, 0, c.width, c.height);
+          return String(c.toDataURL('image/jpeg', 0.86).split(',')[1] || '');
+        } catch {
+          return '';
+        }
+      }, input)
+      .catch(() => '');
+    if (!b64) return null;
+    const buf = Buffer.from(b64, 'base64');
+    return buf.length && imageMimeOf(buf) ? buf : null;
+  }
+
   async fetchImageBytes(page, src) {
     const url = String(src ?? '').trim();
     if (!/^https?:/.test(url)) return null;
     try {
       const resp = await page.context().request.get(url, {
-        headers: { Referer: `${ORIGIN}/`, Accept: 'image/avif,image/webp,image/*,*/*;q=0.8' },
+        // 别主动要 avif：模型大多不认，白转一道
+        headers: { Referer: `${ORIGIN}/`, Accept: 'image/webp,image/png,image/jpeg,image/*;q=0.8' },
         timeout: 15000,
       });
       if (resp.ok()) {
@@ -3663,8 +3920,8 @@ export class DouyinBrowser {
    * DOM 顺序是「最新在前」，这里翻成时间顺序返回。
    */
   async readMessages(page, size = 12, { group = false, selfName = '' } = {}) {
-    return await page
-      .evaluate(([n, withSender, self]) => {
+    const rows = await page
+      .evaluate(async ([n, withSender, self]) => {
         // 「是不是我发的」：抖音把语义拼在块名后面（messageMessageBoxisFromMe /
         // MessageBoxContentisFromMe），用「包含」匹配才对得上。
         const isMine = (el) => !!(el.closest && el.closest('[class*="isFromMe"]'));
@@ -3797,6 +4054,174 @@ export class DouyinBrowser {
           const arr = Array.from(t);
           return arr.length > n ? `${arr.slice(0, n).join('')}…` : t;
         };
+        /**
+         * 补全图片地址。抖音的图有几种写法：
+         * `//p3-sign.douyinpic.com/...`（协议相对）、懒加载的 `data-src`、`srcset` 里的多档。
+         * 只认 http(s) 会把协议相对的全都丢掉——线上「只收到 [图片] 标记、画面没过来」就是它。
+         */
+        const absUrl = (u) => {
+          const s = String(u ?? '').trim();
+          if (!s) return '';
+          if (s.startsWith('//')) return `https:${s}`;
+          if (/^https?:\/\//i.test(s)) return s;
+          if (s.startsWith('/')) return `https://www.douyin.com${s}`;
+          return '';
+        };
+        const urlsIn = (el) => {
+          const out = [];
+          for (const im of el.querySelectorAll('img, source')) {
+            // 头像（36px）、表情小图标先排掉，别把发送人头像当成图片消息
+            if (im.tagName === 'IMG' && im.naturalWidth && im.naturalWidth < 60) continue;
+            if (/aweme-avatar/i.test(String(im.currentSrc || im.src || ''))) continue;
+            for (const attr of ['currentSrc', 'src', 'data-src', 'data-original', 'srcset']) {
+              const v = im[attr] ?? im.getAttribute?.(attr);
+              if (!v) continue;
+              for (const piece of String(v).split(',')) {
+                const u = absUrl(String(piece).trim().split(/\s+/)[0]);
+                if (u && !/aweme-avatar/i.test(u)) out.push(u);
+              }
+            }
+          }
+          if (!out.length) {
+            // 有些版本把图放在背景图里（div + background-image，甚至挂在 ::before 上）
+            for (const n of [el, ...el.querySelectorAll('div, span')]) {
+              for (const pseudo of [null, '::before', '::after']) {
+                const bg = getComputedStyle(n, pseudo).backgroundImage || '';
+                const m = /url\(["']?([^"')]+)/i.exec(bg);
+                if (!m) continue;
+                const u = absUrl(m[1]);
+                if (u && !/aweme-avatar/i.test(u)) out.push(u);
+              }
+            }
+          }
+          return out;
+        };
+        /**
+         * 图源也可能只存在这条消息的 React props 里（占位 div、懒加载、加密图）。
+         * 扫一遍这条消息自己的 props，挑像图片 CDN 的字符串。
+         */
+        const imgFromProps = (el) => {
+          const key = Object.keys(el).find((k) => k.indexOf('__reactProps$') === 0);
+          if (!key) return '';
+          const seen = new Set();
+          let out = '';
+          const walk = (v, d) => {
+            if (out || !v || typeof v !== 'object' || d > 9 || seen.has(v)) return;
+            seen.add(v);
+            for (const k of Object.keys(v)) {
+              if (k === '_owner' || k === 'ref' || k === 'return' || k === 'stateNode') continue;
+              const val = v[k];
+              if (typeof val === 'string') {
+                const s = val.trim();
+                if (
+                  s.length > 24 &&
+                  s.length < 600 &&
+                  !/aweme-avatar/i.test(s) &&
+                  /^(https?:)?\/\/[^\s"'<>]*(douyinpic|byteimg|snssdk|tplv|aweme)[^\s"'<>]*$/i.test(s)
+                ) {
+                  out = s;
+                  return;
+                }
+              } else {
+                walk(val, d + 1);
+              }
+              if (out) return;
+            }
+          };
+          try {
+            walk(el[key], 0);
+          } catch {
+            // 循环引用就算了
+          }
+          return out;
+        };
+        /**
+         * 图源是 blob: / data: 时（抖音有些图是先取回来再用 blob URL 显示的），
+         * 直接把字节读成 dataURL。blob 是同源的，不受 CORS 限制。
+         */
+        const dataUrlOf = async (el) => {
+          /**
+           * 抖音的聊天图是**加密存的**：CDN 上直接下回来是一堆随机字节（实测 200 + application/octet-stream），
+           * 由页面脚本解密后再画出来。所以真正能用的只有「屏幕上已经解出来的画面」：
+           *   - canvas（解密后画上去的）
+           *   - <img src="blob:...">（解密后生成的 blob）
+           *   - 元素/伪元素的 background-image 是 blob:
+           * 直接下 CDN 那条路只在图片本来就没加密时才有用。
+           */
+          const big = (d) => d && d.length > 200;
+          for (const cv of el.querySelectorAll('canvas')) {
+            if (!cv.width || !cv.height) continue;
+            if (cv.__strollData) return cv.__strollData;
+            try {
+              const d = cv.toDataURL('image/jpeg', 0.86);
+              if (big(d)) {
+                cv.__strollData = d;
+                return d;
+              }
+            } catch {
+              // 被污染的画布读不了，换下一个
+            }
+          }
+          const im = el.querySelector('img');
+          if (im) {
+            const src = String(im.currentSrc || im.src || '');
+            if (src.startsWith('data:image/')) return src;
+            if (im.__strollData) return im.__strollData;
+            if (src.startsWith('blob:')) {
+              try {
+                const r = await fetch(src);
+                const b = await r.blob();
+                const d = await new Promise((res) => {
+                  const fr = new FileReader();
+                  fr.onload = () => res(String(fr.result || ''));
+                  fr.onerror = () => res('');
+                  fr.readAsDataURL(b);
+                });
+                if (big(d)) im.__strollData = d;
+                return big(d) ? d : '';
+              } catch {
+                // 落到下面的背景图
+              }
+            }
+            // 普通 https 图：如果页面给它开了 CORS，画一轮也能拿到像素。
+            // 头像不算（36px 那张，画出来也不是对方发的图）。
+            if (im.complete && im.naturalWidth && !/aweme-avatar/i.test(src)) {
+              try {
+                const c = document.createElement('canvas');
+                const scale = Math.min(1, 1280 / Math.max(im.naturalWidth, im.naturalHeight));
+                c.width = Math.round(im.naturalWidth * scale);
+                c.height = Math.round(im.naturalHeight * scale);
+                c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+                const d = c.toDataURL('image/jpeg', 0.86);
+                if (big(d)) {
+                  im.__strollData = d;
+                  return d;
+                }
+              } catch {
+                // 跨域污染：读不了，退回下载
+              }
+            }
+          }
+          for (const n of [el, ...el.querySelectorAll('div, span')]) {
+            const bg = getComputedStyle(n).backgroundImage || '';
+            const m = /url\(["']?(blob:[^"')]+)/i.exec(bg);
+            if (!m) continue;
+            try {
+              const r = await fetch(m[1]);
+              const b = await r.blob();
+              const d = await new Promise((res) => {
+                const fr = new FileReader();
+                fr.onload = () => res(String(fr.result || ''));
+                fr.onerror = () => res('');
+                fr.readAsDataURL(b);
+              });
+              if (big(d)) return d;
+            } catch {
+              // 下一个
+            }
+          }
+          return '';
+        };
         // 只解析最新的这些：DOM 是最新在前，整屏几百条全解析（每条都要走一遍 React props）
         // 纯属浪费，而且 MutationObserver 每抖一下都要跑一遍。
         const rows = Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]')).slice(0, Math.max(n * 2, 12));
@@ -3810,6 +4235,7 @@ export class DouyinBrowser {
           let url = '';
           let title = '';
           let author = '';
+          let image = '';
           if (p.itemId) {
             // 分享的视频 / 图文。image_count > 1 是图集，规范地址是 /note/
             const photos = Number(p.image_count || 0) > 1 || Number(p.awemeType) === 68;
@@ -3830,11 +4256,41 @@ export class DouyinBrowser {
           } else if (raw) {
             text = cut(raw, 200);
             url = urlIn(raw);
-          } else if (imgs) {
-            // 大表情 / 贴纸也走 img，但 props 里有 emoji_type / package_id 这些标记
+          } else if (imgs || el.querySelector('canvas')) {
+            // 大表情 / 贴纸也走 img，但 props 里有 emoji_type / package_id 这些标记；
+            // 有些图是解密后画到 canvas 上的，没有 img
             const isEmoji = !!(p.emoji_type || p.image_type || p.package_id || p.resource_type);
             kind = isEmoji ? 'emoji' : 'image';
             text = isEmoji ? '[表情]' : `[图片${imgs > 1 ? `×${imgs}` : ''}]`;
+            // 图片消息：先拿「屏幕上已经解出来的画面」（抖音的 CDN 图是加密的），
+            // 拿不到再退回去找地址下载。
+            let shown = kind === 'image' ? await dataUrlOf(el) : '';
+            if (!shown && kind === 'image') {
+              const row = rowOf(el);
+              if (row && row !== el) shown = await dataUrlOf(row);
+            }
+            let cand = urlsIn(el);
+            if (!cand.length) {
+              const row = rowOf(el);
+              if (row && row !== el) cand = urlsIn(row);
+            }
+            const propUrl = absUrl(imgFromProps(el) || p.url || p.image_url || p.origin_url || p.image?.url || '');
+            // 有签名参数的那条才是能下的（srcset 里常混一条没有 query 的缩略图地址）
+            const signed = cand.find((u) => /[?&](x-signature|lk3s)=/i.test(u));
+            image =
+              shown ||
+              signed ||
+              cand.find((u) => /douyinpic|byteimg|snssdk|aweme|tplv/i.test(u)) ||
+              cand[0] ||
+              propUrl;
+            if (!image) {
+              // 还是找不到：把这一行的 HTML 留给主进程落盘
+              try {
+                window.__strollLastImgHtml = String((rowOf(el) || el).outerHTML || '').slice(0, 12000);
+              } catch {
+                // 算了
+              }
+            }
           } else {
             continue;
           }
@@ -3850,6 +4306,7 @@ export class DouyinBrowser {
             url,
             title,
             author,
+            image,
             // 先记下「这一条自己带没带名字」，没带的由下面统一继承
             who: mine ? '' : nick,
             // 这一条是不是新一段消息的开头：是的话不能沿用上一个人的名字
@@ -3877,6 +4334,35 @@ export class DouyinBrowser {
         return ordered;
       }, [size, group, selfName])
       .catch(() => []);
+    // 有「[图片]」却取不到地址时，页面里会留一份现场，这里落盘（5 分钟最多一份）
+    const miss = await page
+      .evaluate(() => {
+        const h = window.__strollLastImgHtml;
+        window.__strollLastImgHtml = '';
+        return h || '';
+      })
+      .catch(() => '');
+    if (miss) this.dumpImageMissingOnce(miss).catch(() => {});
+    return rows;
+  }
+
+  /**
+   * 图片消息取不到地址时留证。
+   * `[图片]` 是能看见的，地址却抓不到，说明这一版把图放在我们没想到的地方——
+   * 存下这一行的 HTML，下次照着改，别再猜。
+   */
+  async dumpImageMissingOnce(html) {
+    if (Date.now() - Number(this._imgDumpAt ?? 0) < 5 * 60 * 1000) return '';
+    this._imgDumpAt = Date.now();
+    try {
+      const dir = path.join(this.dataDir, 'stroll', 'debug');
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `image-missing-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+      fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), html: String(html).slice(0, 20000) }, null, 1));
+      return file;
+    } catch {
+      return '';
+    }
   }
 
   /**
@@ -3923,7 +4409,12 @@ export class DouyinBrowser {
       const dir = path.join(this.dataDir, 'stroll', 'debug');
       fs.mkdirSync(dir, { recursive: true });
       const file = path.join(dir, `group-who-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-      fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), rows, html }, null, 1));
+      // 图片可能是整段 dataURL，落盘时压掉，别让 dump 变成几 MB
+      const safe = (rows ?? []).map((r) => ({
+        ...r,
+        image: String(r?.image ?? '').startsWith('data:') ? '[data-url]' : r?.image,
+      }));
+      fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), rows: safe, html }, null, 1));
       return file;
     } catch {
       return '';
@@ -3981,6 +4472,12 @@ export class DouyinBrowser {
             url: '',
             title: '',
             author: '',
+            image: (() => {
+              const im = content.querySelector('img');
+              const raw = String(im?.currentSrc || im?.getAttribute?.('data-src') || im?.getAttribute?.('src') || im?.src || '').trim();
+              if (raw.startsWith('//')) return `https:${raw}`;
+              return /^https?:\/\//i.test(raw) ? raw : '';
+            })(),
             who: me ? '' : nickOf(box),
             runStart: me ? false : !!box.querySelector('[class*="avatar"]'),
           });
@@ -4223,6 +4720,19 @@ export class DouyinBrowser {
     // 这一步不走 serialize 队列——队列里可能正排着一次十几秒的评论，主人的话不该等它。
     const dm = this.dmPage;
     if (dm && !dm.isClosed() && this.dmThread === who) {
+      /**
+       * 先确认这一页还停在主人身上。
+       * 抖音可能自己把会话切走（新建群、点进别人的消息、刷新），
+       * 页面没关、观察器还活着，`dmThread` 却已经过期——这时读到的是别人/群的聊天，
+       * 却被当成「主人发私信了」。新开群后私信突然不回，就是这种错位。
+       */
+      const title = await this.currentChatTitle(dm).catch(() => '');
+      const onOwner = !title || this.threadTitleMatches(title, who);
+      if (!onOwner) {
+        const back = await this.clickThread(dm, who).catch(() => false);
+        if (!back) return { ok: false, code: 'THREAD_DRIFT', messages: [] };
+        await dm.waitForTimeout(140);
+      }
       const live = await this.readMessages(dm, size).catch(() => []);
       if (live.length) return { ok: true, messages: live, live: true };
     }
@@ -4488,6 +4998,8 @@ export class DouyinBrowser {
   async sendStickerTo(who, { file = '', src = '', label = '' } = {}) {
     const t = await this.chatPageOf(who);
     try {
+      // 先确认这一页真的停在这个会话上：上传框是页面级的，飘到别的会话就会传错地方/传不出去
+      if (who) await this.ensureThreadOpen(t.page, who).catch(() => false);
       const r = await this.sendStickerInChat(t.page, t.input, { file, src, name: label });
       if (r.ok) this.lastAction = `sticker ${who || 'chat'}`;
       return r;

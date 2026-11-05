@@ -150,8 +150,11 @@ export class Policy {
   consume(action, platform, target, detail = {}) {
     if (detail.countQuota !== false) this.store.bump(detail.quotaAction ?? action);
     for (const tag of detail.tags ?? []) this.store.noteInterest([tag]);
-    if (detail.dedupeKey) this.store.markSeen(detail.dedupeKey);
-    else if (target) this.store.markSeen(`${platform}:${action}:${target}`);
+    // markSeen:false 用于「平台没给确认」：既没扣额度，也不该把重试挡成 DUPLICATE
+    if (detail.markSeen !== false) {
+      if (detail.dedupeKey) this.store.markSeen(detail.dedupeKey);
+      else if (target) this.store.markSeen(`${platform}:${action}:${target}`);
+    }
     const at = Date.now();
     if (detail.free) {
       // 回主人私信只算「聊天」，不占公开动作的节奏位：

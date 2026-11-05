@@ -260,6 +260,23 @@ export class Bilibili {
     return this.readCredentials()?.bili_jct ?? '';
   }
 
+  /**
+   * 请求排队：并发调用会一个接一个地过闸，而不是同时读到同一个 lastRequest、
+   * 同时睡完再一起发（那样等于没有节流，面板轮询+用户点击就会撞出 412）。
+   */
+  async takeTurn(gap) {
+    const prev = this._reqChain ?? Promise.resolve();
+    let release;
+    this._reqChain = new Promise((resolve) => {
+      release = resolve;
+    });
+    await prev.catch(() => {});
+    const wait = Math.max(0, Number(this.lastRequest ?? 0) + gap - Date.now());
+    if (wait) await new Promise((r) => setTimeout(r, wait));
+    this.lastRequest = Date.now();
+    release();
+  }
+
   async request(route, params = {}, opts = {}) {
     const base = opts.base ?? 'https://api.bilibili.com';
     const url = new URL(route, base);
@@ -298,9 +315,7 @@ export class Bilibili {
     // 650ms 是给「刷列表/翻评论」防 412 用的；发私信、发评论这种一次性的动作
     // 没必要时时等满 650ms，调用点用 minGapMs 单独给预算。
     const gap = Math.max(0, Number(opts.minGapMs ?? 650));
-    const wait = Math.max(0, this.lastRequest + gap - Date.now());
-    if (wait) await new Promise((r) => setTimeout(r, wait));
-    this.lastRequest = Date.now();
+    await this.takeTurn(gap);
 
     const headers = {
       'User-Agent': UA,
@@ -1102,7 +1117,7 @@ export class Bilibili {
       throw error;
     }
     const after = await has();
-    return { ok: true, liked: on, confirmed: after == null ? true : after === on, data };
+    return { ok: true, liked: on, confirmed: after == null ? false : after === on, data };
   }
 
   async follow(uid, on = true) {
@@ -1115,7 +1130,7 @@ export class Bilibili {
       { post: true, cacheMs: 0, referer: `https://space.bilibili.com/${uid}` },
     );
     const after = await this.relation(uid);
-    return { ok: true, following: after === true };
+    return { ok: true, following: after === true, confirmed: after == null ? false : after === on };
   }
 
   async save(bvid) {

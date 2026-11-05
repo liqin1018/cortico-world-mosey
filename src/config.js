@@ -26,6 +26,11 @@ export const DEFAULTS = {
   dailyFollows: 3,
   dailyPosts: 2,
   dailySaves: 8,
+  /** 勾上=这项是「每天必须完成」的目标，而不只是上限 */
+  mustLike: false,
+  mustComment: false,
+  mustFollow: false,
+  mustPost: false,
 
   quietFrom: 23,
   quietTo: 8,
@@ -190,12 +195,22 @@ const QUOTA = {
         maximum: 30,
         'x-suffix': ' 次',
       },
+      [P + 'mustLike']: {
+        type: 'boolean',
+        title: '必做：点赞',
+        description: '勾上后，今天必须完成「每天最多点赞」的次数，没完成她会优先去补。',
+      },
       [P + 'dailyComments']: {
         type: 'integer',
         title: '每天最多评论',
         minimum: 0,
         maximum: 20,
         'x-suffix': ' 条',
+      },
+      [P + 'mustComment']: {
+        type: 'boolean',
+        title: '必做：评论',
+        description: '勾上后，今天必须完成「每天最多评论」的条数。审批不是 auto 时评论会进草稿，批准后才算完成。',
       },
       [P + 'dailyFollows']: {
         type: 'integer',
@@ -204,12 +219,22 @@ const QUOTA = {
         maximum: 5,
         'x-suffix': ' 人',
       },
+      [P + 'mustFollow']: {
+        type: 'boolean',
+        title: '必做：关注',
+        description: '勾上后，今天必须关注够「每天最多关注」的人数。',
+      },
       [P + 'dailyPosts']: {
         type: 'integer',
         title: '每天最多发动态',
         minimum: 0,
         maximum: 3,
         'x-suffix': ' 条',
+      },
+      [P + 'mustPost']: {
+        type: 'boolean',
+        title: '必做：发动态',
+        description: '勾上后，今天必须发够「每天最多发动态」的条数。审批不是 auto 时会进草稿，批准后才算完成。',
       },
       [P + 'dailySaves']: {
         type: 'integer',
@@ -456,6 +481,10 @@ export const POLICY_FIELDS = {
   dailyFollows: { type: 'int', min: 0, max: 5 },
   dailyPosts: { type: 'int', min: 0, max: 3 },
   dailySaves: { type: 'int', min: 0, max: 10 },
+  mustLike: { type: 'boolean' },
+  mustComment: { type: 'boolean' },
+  mustFollow: { type: 'boolean' },
+  mustPost: { type: 'boolean' },
   quietFrom: { type: 'int', min: 0, max: 23 },
   quietTo: { type: 'int', min: 0, max: 23 },
   minGapSeconds: { type: 'int', min: 10, max: 600 },

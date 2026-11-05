@@ -59,6 +59,13 @@ export class Store {
       }
     } catch (error) {
       if (error.code !== 'ENOENT') {
+        // 损坏的 state.json 别静默清空：留一份现场（额度、去重、草稿都在里面），方便排查/恢复
+        try {
+          const bad = path.join(this.dir, `state.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+          fs.renameSync(this.file, bad);
+        } catch {
+          // 备份失败也只能继续
+        }
         this.data = blank();
       }
     }
@@ -85,7 +92,16 @@ export class Store {
     const weeks = Object.keys(this.data.weekUsage).sort();
     for (const week of weeks.slice(0, Math.max(0, weeks.length - 26))) delete this.data.weekUsage[week];
     this.data.actions = this.data.actions.slice(-MAX_ACTIONS);
-    this.data.drafts = this.data.drafts.filter((d) => d.status === 'pending' || d.status === 'sending').slice(-MAX_DRAFTS);
+    // pending/sending 必留；unknown（进程退出时发送中，结果不明）留 7 天，让主人能核对，不再当场删掉
+    const keep = new Set(['pending', 'sending', 'unknown']);
+    this.data.drafts = this.data.drafts
+      .filter((d) => {
+        if (!keep.has(d.status)) return false;
+        if (d.status !== 'unknown') return true;
+        const at = Date.parse(d.createdAt ?? '');
+        return Number.isFinite(at) && Date.now() - at < 7 * 86400000;
+      })
+      .slice(-MAX_DRAFTS);
     const seen = Object.entries(this.data.seen).sort((a, b) => b[1] - a[1]);
     if (seen.length > MAX_SEEN) this.data.seen = Object.fromEntries(seen.slice(0, MAX_SEEN));
     if (!this.data.deviceId) this.data.deviceId = randomDeviceId();
@@ -130,6 +146,9 @@ export class Store {
     this.data.viewed = (this.data.viewed ?? []).filter((v) => `${v.platform}:${v.id}` !== key);
     this.data.viewed.unshift({ at: new Date().toISOString(), ...entry });
     if (this.data.viewed.length > 80) this.data.viewed = this.data.viewed.slice(0, 80);
+    // 兴趣学习：她实际点开看了谁，就把作者记一笔（原来 interests 只在 consume 里传空数组，永远不涨）
+    const who = String(entry.author ?? '').trim();
+    if (who) this.noteInterest([who]);
     this.save();
   }
 

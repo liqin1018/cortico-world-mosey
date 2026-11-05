@@ -8,8 +8,9 @@ import { Bilibili } from './bilibili.js';
 import { DouyinBrowser, secUidOf, stripLeadingFakeAt } from './douyin.js';
 import { StickerBook } from './stickers.js';
 import { TOOL_DECLS, EVENT_DECLS } from './tools.js';
-import { CONFIG_GROUPS, validatePolicyPatch } from './config.js';
+import { CONFIG_GROUPS, DEFAULTS, validatePolicyPatch } from './config.js';
 import {
+  cutChars,
   dayKey,
   hourOf,
   imageMimeOf,
@@ -164,30 +165,84 @@ export class StrollWorld {
 
   async tick() {
     if (!this.running || !this.cfg.enabled) return;
-    if (this.cfg.autoSessionsPerDay <= 0) return;
     const hour = hourOf(new Date(), this.timeZone);
     if (hour < 9 || hour >= 23) return;
     if (this.policy.isQuiet() || this.policy.paused().paused) return;
     const day = dayKey(new Date(), this.timeZone);
+    // 勾了「必做」但今天还没做够的项：出门要优先补，晚上到点还要单独催
+    const pending = this.mustDoList().filter((x) => x.left > 0);
+    await this.maybeMustNudge(pending, hour, day);
+    if (this.cfg.autoSessionsPerDay <= 0) return;
     const used = Number(this.store.data.autoSessions[day] ?? 0);
-    const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? 6000) / 1500));
+    const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? DEFAULTS.tokenDailyBudget) / 1500));
     const cap = Math.min(Number(this.cfg.autoSessionsPerDay), budgetCap);
     if (used >= cap) return;
     // 用 lastAutoAt 而不是 lastSessionAt：主人手动让她看东西，不该把自动出门往后推
     const lastAuto = Number(this.store.data.lastAutoAt ?? this.store.data.lastSessionAt ?? 0);
-    if (Date.now() - lastAuto < this.autoGapMs()) return;
-    if (Math.random() > 0.6) return;
+    // 有必做没完成：间隔压到最多 30 分钟，而且不再掷骰子跳过
+    const gap = pending.length ? Math.min(this.autoGapMs(), 30 * 60 * 1000) : this.autoGapMs();
+    if (Date.now() - lastAuto < gap) return;
+    if (!pending.length && Math.random() > 0.6) return;
     this.store.data.lastAutoAt = Date.now();
     this.store.data.autoSessions[day] = used + 1;
     // 记住「这是一次自己出门」：出门窗口内她连续做动作要按 20 秒节奏，
     // 不能拿主人点单的 1.5 秒去连发（那会招 -509）。
     this.autoWalkAt = Date.now();
     this.store.save();
+    const mustLine = pending.length
+      ? `\n今天是必做日，还差：${pending.map((x) => `${x.label} ${x.left}`).join('、')}。先补这些，别只刷着看。`
+      : '';
     await this.push(
       'stroll.due',
-      `该出门溜达了。今天还剩：${this.policy.summary()}。\n想逛就调 stroll action=brief（一次拿全，别连续 status/feed/inbox）；不想去就回「今天不逛」。`,
-      { day, used: used + 1 },
+      `该出门溜达了。今天还剩：${this.policy.summary()}。${mustLine}\n想逛就调 stroll action=brief（一次拿全，别连续 status/feed/inbox）；不想去就回「今天不逛」。`,
+      { day, used: used + 1, must: pending.length > 0 },
       'debounce',
+    );
+  }
+
+  /**
+   * 今天的「必做」清单：勾了开关的项，目标次数就是对应的每日额度。
+   * 用 usage 里的今日计数（unlike→like、reply→comment、unfollow→follow 已经在 capAction 里归一）。
+   */
+  mustDoList() {
+    const day = dayKey(new Date(), this.timeZone);
+    const usage = this.store.data.usage?.[day] ?? {};
+    const items = [
+      ['like', '点赞', 'mustLike', 'dailyLikes', '次'],
+      ['comment', '评论', 'mustComment', 'dailyComments', '条'],
+      ['follow', '关注', 'mustFollow', 'dailyFollows', '人'],
+      ['post', '发动态', 'mustPost', 'dailyPosts', '条'],
+    ];
+    return items
+      .filter(([, , flag]) => this.cfg[flag] === true)
+      .map(([action, label, , quotaKey, unit]) => {
+        const need = Math.max(0, Number(this.cfg[quotaKey] ?? 0));
+        const done = Number(usage[action] ?? 0);
+        return { action, label, unit, need, done, left: Math.max(0, need - done) };
+      })
+      .filter((x) => x.need > 0);
+  }
+
+  /** 晚上还没做完必做：单独催她，最多 3 次、每次间隔 30 分钟。 */
+  async maybeMustNudge(pending, hour, day) {
+    if (!pending?.length || hour < 18) return;
+    const state = this.store.data.mustNudge ?? {};
+    if (state.day !== day) {
+      state.day = day;
+      state.n = 0;
+      state.at = 0;
+    }
+    if (Number(state.n ?? 0) >= 3) return;
+    if (Date.now() - Number(state.at ?? 0) < 30 * 60 * 1000) return;
+    state.n = Number(state.n ?? 0) + 1;
+    state.at = Date.now();
+    this.store.data.mustNudge = state;
+    this.store.save();
+    await this.push(
+      'stroll.due',
+      `今天还有必做没完成：${pending.map((x) => `${x.label} ${x.done}/${x.need}`).join('、')}。现在就去补，不用等下一次出门；补完再回我一句。`,
+      { must: true, day },
+      'flush',
     );
   }
 
@@ -717,9 +772,26 @@ export class StrollWorld {
     }
     const meta = { platform: fresh[0].platform, count: fresh.length, images: urls.length };
     // interrupt 最急（当场把她叫起来）；宿主不认这个值就退到 flush / debounce，别让消息掉地上
-    if (await this.push('stroll.reply', body, meta, 'interrupt', blobs)) return true;
-    if (await this.push('stroll.reply', body, meta, 'flush', blobs)) return true;
-    return this.push('stroll.reply', body, meta, 'debounce', blobs);
+    let sent = false;
+    if (await this.push('stroll.reply', body, meta, 'interrupt', blobs)) sent = true;
+    else if (await this.push('stroll.reply', body, meta, 'flush', blobs)) sent = true;
+    else sent = await this.push('stroll.reply', body, meta, 'debounce', blobs);
+    // 推送成功才把「这条已经接过」写进状态；失败就留着，下次还能再推（GLM #3）
+    if (sent) {
+      let dirty = false;
+      for (const x of fresh) {
+        try {
+          if (x?.commit) {
+            x.commit();
+            dirty = true;
+          }
+        } catch {
+          // 单条落状态失败不影响别的
+        }
+      }
+      if (dirty) this.store.save();
+    }
+    return sent;
   }
 
   /**
@@ -731,7 +803,7 @@ export class StrollWorld {
     const paused = this.policy.paused();
     const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
     if (paused.paused && !soft) return;
-    const hit = this.douyinDmTail(messages, name);
+    const hit = this.douyinDmTail(messages, name, { commit: false });
     if (!hit) return;
     await this.pushDm([hit]);
   }
@@ -754,10 +826,13 @@ export class StrollWorld {
       tail.unshift(thread[i]);
     }
     const body = tail.length ? tail.map((m) => m.text).join(' / ') : hit.body;
-    this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), bilibili: { at: hit.at, body } };
-    this.store.save();
+    const nextSeen = { at: hit.at, body };
     // 第一次跑、或者这条已经放了好几分钟（上个版本的旧消息）：只记基线，不叫她
-    if (!seen || old) return [];
+    if (!seen || old) {
+      this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), bilibili: nextSeen };
+      this.store.save();
+      return [];
+    }
     const images = tail.flatMap((m) => (m.image ? [m.image] : []));
     return [
       {
@@ -765,6 +840,10 @@ export class StrollWorld {
         who: this.cfg.ownerName || '主人',
         text: body || '（发来一条非文字消息）',
         images,
+        // 指纹推迟到「真的推给她了」再写：推送失败回滚，下次轮询还能重来（GLM #3）
+        commit: () => {
+          this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), bilibili: nextSeen };
+        },
       },
     ];
   }
@@ -781,7 +860,7 @@ export class StrollWorld {
     }
     const res = await this.douyin.peekThread(name, 8).catch(() => null);
     if (!res?.ok || !res.messages?.length) return [];
-    const hit = this.douyinDmTail(res.messages, name);
+    const hit = this.douyinDmTail(res.messages, name, { commit: false });
     return hit ? [hit] : [];
   }
 
@@ -789,7 +868,7 @@ export class StrollWorld {
    * 从一段会话消息里判断「有没有主人还没被接住的新话」。
    * 轮询和页面事件都走这里，保证两条路的去重口径一致。返回要推的条目或 null。
    */
-  douyinDmTail(messages, name) {
+  douyinDmTail(messages, name, { commit = true } = {}) {
     const list = Array.isArray(messages) ? messages : [];
     // 末尾连着的那几句，最多 6 条：主人连发一大串时别把整屏都塞进推送
     const tail = this.dmTailOf(list, 6);
@@ -812,15 +891,24 @@ export class StrollWorld {
       return null;
     }
     if (seen.fp === fp) return null;
-    this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: { fp, at: Date.now() } };
-    this.store.save();
-    return {
+    const nextSeen = { fp, at: Date.now() };
+    const payload = {
       platform: 'douyin',
       who: name,
       text: tail.map((m) => (m.url ? `${m.text}（${m.url}）` : m.text)).join(' / '),
       // 主人发来的图片：推的时候下载成附件，她才能真的看见
       images: tail.flatMap((m) => (m.image ? [m.image] : [])),
     };
+    if (commit) {
+      this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: nextSeen };
+      this.store.save();
+    } else {
+      // 推送成功后再落指纹；推失败就不落，下一轮还会重来，不会把主人的话永久吞掉
+      payload.commit = () => {
+        this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: nextSeen };
+      };
+    }
+    return payload;
   }
 
   async push(type, text, meta = {}, trigger = 'debounce', blobs = null) {
@@ -1422,6 +1510,8 @@ export class StrollWorld {
       last: this.store.lastActions(3),
       interests: this.store.topInterests(6),
       autoSessions: this.store.data.autoSessions[dayKey()] ?? 0,
+      // 必做清单（勾了开关的项）：她出门前先看还差多少
+      mustDo: this.mustDoList(),
     };
   }
 
@@ -1474,6 +1564,8 @@ export class StrollWorld {
         policy: status.policy.summary,
         pending: status.pending.length,
         owner: status.owner,
+        // 必做清单要跟着 brief 一起给她，不然出门推送里只能看到「还剩几次」却不知道目标
+        mustDo: status.mustDo ?? this.mustDoList(),
       },
       platform: actual,
       feed: feed.map(({ _score, ...rest }) => rest),
@@ -1820,7 +1912,7 @@ export class StrollWorld {
       const p = a.platform === 'douyin' ? '抖音' : 'B站';
       platformCount.set(p, (platformCount.get(p) ?? 0) + 1);
       const ts = Date.parse(a.at ?? '');
-      if (Number.isFinite(ts)) hours[new Date(ts + 8 * 3600000).getUTCHours()] += 1;
+      if (Number.isFinite(ts)) hours[hourOf(new Date(ts), tz)] += 1;
     }
     const busiest = hours.reduce((best, v, i) => (v > hours[best] ? i : best), 0);
 
@@ -2127,7 +2219,13 @@ export class StrollWorld {
     this.watch = { ...this.watch, url: digest.url, title: digest.title, platform: digest.platform, last: digest };
     if (!due) return;
     this.lastWatchPush = now;
-    const clock = (n) => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+    const clock = (n) => {
+      const sec = Math.max(0, Math.floor(Number(n) || 0));
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const rest = sec % 60;
+      return h ? `${h}:${String(m).padStart(2, '0')}:${String(rest).padStart(2, '0')}` : `${String(m).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+    };
     const progress = digest.duration ? `${clock(digest.time || 0)}/${clock(digest.duration)}` : '没有进度条';
     const rawComments = await this.watchComments(digest);
     const comments = rawComments.slice(0, 3).map((c) => truncate(c, 60)).join(' / ');
@@ -2308,7 +2406,7 @@ export class StrollWorld {
     const name = this.douyinOwner().name || (await this.douyinOwnerName().catch(() => ''));
     if (name) {
       const ok = await this.douyin
-        .replyDm(name, String(text).slice(0, 300))
+        .replyDm(name, cutChars(text, 300))
         .then(() => true)
         .catch(() => false);
       if (ok) return { ok: true, sent: true, via: 'chat' };
@@ -2324,13 +2422,13 @@ export class StrollWorld {
     if (!who) return { ok: false, error: '这条抖音私信没有昵称，回不了。' };
     if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
     try {
-      await this.douyin.replyDm(who, body.slice(0, 300));
+      await this.douyin.replyDm(who, cutChars(body, 300));
       this.store.addAction({
         platform: 'douyin',
         action: 'dm',
         target: who,
         title: who,
-        text: body.slice(0, 300),
+        text: cutChars(body, 300),
         result: 'ok',
         extra: { by: 'owner' },
       });
@@ -2365,7 +2463,7 @@ export class StrollWorld {
         action: 'dm',
         target: uid,
         title: this.titleOf('bilibili', uid) || '私信',
-        text: body.slice(0, 300),
+        text: cutChars(body, 300),
         result: 'ok',
         extra: { by: 'owner', msgKey: sent.msgKey },
       });
@@ -3075,7 +3173,7 @@ export class StrollWorld {
       parent: draft.parent,
     };
     const receipt = await this.executePlan(plan, source);
-    this.store.closeDraft(id, receipt.ok ? 'sent' : receipt.code === 'WRITE_UNCERTAIN' ? 'unknown' : 'failed', {
+    this.store.closeDraft(id, receipt.ok ? (receipt.uncertain ? 'unknown' : 'sent') : receipt.code === 'WRITE_UNCERTAIN' ? 'unknown' : 'failed', {
       receipt,
     });
     this.store.save();
@@ -3139,19 +3237,27 @@ export class StrollWorld {
       // 记总耗时：主人在追「一秒内回复」，得能看出是发送慢还是别的地方慢
       if (result && typeof result === 'object') result = { ...result, msTotal: Date.now() - t0 };
 
-      this.policy.consume(action, platform, target, {
-        quotaAction: this.capAction(action),
-        countQuota: !plan.free,
-        dedupeKey: plan.free ? '' : plan.dedupeKey,
-        // free：回主人私信只算聊天，不占公开动作的节奏位
-        free: !!plan.free,
-        text,
-        title: this.titleOf(platform, target),
-        kind: plan.kind ?? result?.kind,
-        result: 'ok',
-        extra: result,
-        tags: plan.mentionOwner ? [] : [],
-      });
+      // 「平台没给确认」不能当成功记账：额度扣了会冤枉人，去重键还会把重试挡成 DUPLICATE
+      const uncertain = !!result && (result.ok === false || result.confirmed === false);
+      try {
+        this.policy.consume(action, platform, target, {
+          quotaAction: this.capAction(action),
+          countQuota: !plan.free && !uncertain,
+          dedupeKey: plan.free || uncertain ? '' : plan.dedupeKey,
+          // free：回主人私信只算聊天，不占公开动作的节奏位
+          free: !!plan.free,
+          text,
+          title: this.titleOf(platform, target),
+          kind: plan.kind ?? result?.kind,
+          result: uncertain ? 'unknown' : 'ok',
+          markSeen: !uncertain,
+          extra: result,
+          tags: result?.author ? [String(result.author)] : [],
+        });
+      } catch (error) {
+        // 记账失败（磁盘满/权限）不能反过来把已经发出去的动作标成失败，否则主人一重试就重复发（#9）
+        this.log?.warn?.('stroll quota consume failed', { action, message: error?.message });
+      }
       const receipt = {
         ok: true,
         action,
@@ -3160,6 +3266,7 @@ export class StrollWorld {
         group: !!plan.group,
         // 发到哪儿要写死：她以前会把「私信主人」当成「发到群里」
         ...(action === 'dm' ? { to: plan.group ? 'group' : 'owner' } : {}),
+        ...(uncertain ? { uncertain: true } : {}),
         result,
         receipt: this.receiptText(action, platform, result, plan),
       };
@@ -3205,6 +3312,7 @@ export class StrollWorld {
       if (result?.kind === 'opus') bits.push('动态');
       if (result?.kind === 'article') bits.push('专栏');
       if (result.rpid) bits.push(`rpid ${result.rpid}`);
+      if (result.confirmed === false) bits.push('没拿到发布回执，可能没发出去');
       if (result.mentioned === true) bits.push('@ 已生效');
       if (result.mentioned === false) bits.push('@ 没生效');
       if (result.visibility === 'public') bits.push('公开可见');
@@ -3224,7 +3332,12 @@ export class StrollWorld {
       return `${p} 群「${name}」发出去了`;
     }
     if (action === 'save') return '已加到 B站稍后再看';
-    if (action === 'follow' || action === 'unfollow') return `${p} ${action === 'follow' ? '关注' : '取关'}完成`;
+    if (action === 'follow' || action === 'unfollow') {
+      const what = action === 'follow' ? '关注' : '取关';
+      if (result?.already) return `${p} 已经是${what}后的状态，不用重复操作`;
+      if (result?.confirmed === false) return `${p} ${what}请求发出去了，但平台没给确认`;
+      return `${p} ${what}完成`;
+    }
     return `${p} ${ACTION_NAMES[action] ?? action}完成`;
   }
 
@@ -3565,13 +3678,13 @@ export class StrollWorld {
             };
           }
           try {
-            await this.douyin.dm(owner.secUid, text.slice(0, 300));
+            await this.douyin.dm(owner.secUid, cutChars(text, 300));
             this.store.addAction({
               platform: 'douyin',
               action: 'dm',
               target: owner.secUid,
               title: `私信主人${owner.name ? `（${owner.name}）` : ''}`,
-              text: text.slice(0, 300),
+              text: cutChars(text, 300),
               result: 'ok',
               extra: { by: 'owner', test: true },
             });
@@ -3585,13 +3698,13 @@ export class StrollWorld {
         if (!uid) return { ok: false, error: '先在设置里填主人 B站 UID。' };
         if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
         try {
-          const sent = await this.bili.dm(uid, text.slice(0, 200));
+          const sent = await this.bili.dm(uid, cutChars(text, 200));
           this.store.addAction({
             platform: 'bilibili',
             action: 'dm',
             target: uid,
             title: '私信主人',
-            text: text.slice(0, 300),
+            text: cutChars(text, 300),
             result: 'ok',
             extra: { by: 'owner', test: true },
           });
@@ -3644,14 +3757,30 @@ export class StrollWorld {
   autoNextView() {
     const daily = Number(this.cfg.autoSessionsPerDay ?? 0);
     if (daily <= 0 || !this.cfg.enabled) return null;
-    const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? 9000) / 1500));
+    const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? DEFAULTS.tokenDailyBudget) / 1500));
     const cap = Math.min(daily, budgetCap);
     const day = dayKey(new Date(), this.timeZone);
     const used = Number(this.store.data.autoSessions[day] ?? 0);
     if (used >= cap) return { done: true, used, cap };
     const last = Number(this.store.data.lastAutoAt ?? this.store.data.lastSessionAt ?? 0);
-    const gap = this.autoGapMs();
-    return { done: false, used, cap, gapMinutes: Math.round(gap / 60000), at: last ? last + gap : Date.now() + 90 * 1000 };
+    // tick 里有 40% 概率跳过（Math.random() > 0.6 才出门），按期望 1/0.6 折算，
+    // 不然显示的时间永远比实际早一截
+    const gap = this.autoGapMs() / 0.6;
+    let at = last ? last + gap : Date.now() + 90 * 1000;
+    at = this.nextOutingWindow(Math.max(at, Date.now()));
+    return { done: false, used, cap, gapMinutes: Math.round(this.autoGapMs() / 60000), at };
+  }
+
+  /** 自动出门只在 9:00-23:00；落在窗外就推到下一个 9:00。 */
+  nextOutingWindow(ts) {
+    const d = new Date(ts);
+    const h = d.getHours();
+    if (h < 9) d.setHours(9, 0, 0, 0);
+    else if (h >= 23) {
+      d.setDate(d.getDate() + 1);
+      d.setHours(9, 0, 0, 0);
+    }
+    return d.getTime();
   }
 
   /** 两次自动出门之间的最小间隔（毫秒）。 */
@@ -3778,6 +3907,7 @@ export class StrollWorld {
       week: this.weekBars(),
       autoSessions: Number(this.store.data.autoSessions[dayKey(new Date(), this.timeZone)] ?? 0),
       autoNext: this.autoNextView(),
+      mustDo: this.mustDoList(),
       stats: this.store.data.stats,
       config: {
         background: this.cfg.background !== false,
@@ -3789,7 +3919,11 @@ export class StrollWorld {
         dailyPosts: Number(this.cfg.dailyPosts ?? 0),
         dailySaves: Number(this.cfg.dailySaves ?? 0),
         watchSpeakSec: Number(this.cfg.watchSpeakSec ?? 60),
-        tokenDailyBudget: Number(this.cfg.tokenDailyBudget ?? 6000),
+        tokenDailyBudget: Number(this.cfg.tokenDailyBudget ?? DEFAULTS.tokenDailyBudget),
+        mustLike: this.cfg.mustLike === true,
+        mustComment: this.cfg.mustComment === true,
+        mustFollow: this.cfg.mustFollow === true,
+        mustPost: this.cfg.mustPost === true,
         commentMaxChars: Number(this.cfg.commentMaxChars ?? 120),
         newAccountRamp: this.cfg.newAccountRamp !== false,
       },

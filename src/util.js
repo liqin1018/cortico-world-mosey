@@ -386,3 +386,11 @@ export function imageMimeOf(input) {
   if (b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
   return '';
 }
+
+
+/** 按「字」截断（码点），不会把 emoji 切成半个；不加省略号。 */
+export function cutChars(input, n) {
+  const text = String(input ?? '');
+  const chars = [...text];
+  return chars.length <= n ? text : chars.slice(0, Math.max(0, n)).join('');
+}

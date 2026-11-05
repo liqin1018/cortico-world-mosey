@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-mosey",
-  "version": "1.12.1",
+  "version": "1.14.1",
   "type": "module",
-  "description": "她住进你的 B 站和抖音：刷关注流、看视频/动态/专栏，点赞、评论、回楼中楼。私信和群聊两边都通——你发一句，她几秒内接住；图片能看、能存，也能把自己画的图发回抖音私信、群聊和评论区。还带表情包库、周报和本地书库。公开动作有硬额度，默认先出草稿等你批准。\n\nQQ 交流群：745879632",
+  "description": "摸鱼（Mosey）：让 Coopanion 的桌宠自己去抖音和 B站逛一圈。评论和私信都能收能回；关注流、周报、本地书库；按额度点赞、评论、关注、发动态。默认人审，三把工具、少 token。",
   "license": "MIT",
   "keywords": [
     "cortico-world",
@@ -56,11 +56,11 @@
     "locales": {
       "zh": {
         "displayName": "摸鱼",
-        "description": "她住进你的 B 站和抖音：刷关注流、看视频/动态/专栏，点赞、评论、回楼中楼。私信和群聊两边都通——你发一句，她几秒内接住；图片能看、能存，也能把自己画的图发回抖音私信、群聊和评论区。还带表情包库、周报和本地书库。公开动作有硬额度，默认先出草稿等你批准。\n\nQQ 交流群：745879632"
+        "description": "让她自己去抖音/B站逛：刷候选、看关注流、看视频/动态/专栏、点赞、评论、回复楼中楼；私信收发两边都通，面板上直接回。还带周报和本地书库。公开动作有硬额度，默认先出草稿等你批准。"
       },
       "en": {
         "displayName": "Mosey",
-        "description": "She lives inside your Bilibili and Douyin: following feeds, videos, dynamics, articles - likes, comments, replies to nested threads. DMs and group chats both work: you say one line and she picks it up within seconds; she can see and save images, and send the pictures she draws back to Douyin DMs, groups and comment sections. Plus a sticker library, a weekly recap and a local book library. Public actions have hard caps, and drafts wait for your approval by default.\n\nQQ group: 745879632"
+        "description": "Let her browse Douyin and Bilibili: feeds, following updates, videos, dynamics, articles. Comments and DMs work both ways, reply right from the panel. Plus weekly recap and a local book library. Hard caps and owner approval by default."
       }
     }
   },

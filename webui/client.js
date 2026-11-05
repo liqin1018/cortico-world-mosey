@@ -159,7 +159,8 @@ function ago(sec) {
 
 function cut(text, max) {
   const s = String(text ?? '');
-  return s.length > max ? `${s.slice(0, max)}…` : s;
+  const chars = [...s];
+  return chars.length > max ? `${chars.slice(0, max).join('')}…` : s;
 }
 
 /**
@@ -749,6 +750,13 @@ export default {
           const dy = s.douyin ?? {};
           const paused = p.paused?.paused === true;
           const left = (key) => Math.max(0, Number(caps[key] ?? 0) - Number(usage[key] ?? 0));
+          // 哪些项被主人勾成了「每天必做」
+          const mustKeys = {
+            like: cfg.mustLike === true,
+            comment: cfg.mustComment === true,
+            follow: cfg.mustFollow === true,
+            post: cfg.mustPost === true,
+          };
 
           // 概览
           kickerDot.className = paused ? 'bad' : p.quiet ? 'warn' : 'ok';
@@ -829,7 +837,7 @@ export default {
             if (cap > 0 && u >= cap) item.classList.add('full');
             else if (ratio >= 0.7) item.classList.add('warn');
             const head = el('div', undefined, 'stroll-meter-head');
-            head.append(el('span', m.label, 'stroll-meter-label'));
+            head.append(el('span', mustKeys[m.key] ? `${m.label} · 必做` : m.label, 'stroll-meter-label'));
             const num = el('span', undefined, 'stroll-meter-num');
             num.append(el('strong', String(u)), el('span', `/${cap}`));
             head.append(num);
@@ -837,11 +845,18 @@ export default {
             const bar = el('i');
             bar.style.width = `${Math.round(ratio * 100)}%`;
             track.append(bar);
-            const foot = el(
-              'div',
-              cap === 0 ? '今天关着' : left(m.key) > 0 ? `还能 ${left(m.key)} 次 · 点开看` : '今天用完了 · 点开看',
-              'stroll-meter-foot',
-            );
+            const footText =
+              cap === 0
+                ? '今天关着'
+                : mustKeys[m.key]
+                  ? left(m.key) > 0
+                    ? `必做还差 ${left(m.key)} 次 · 点开看`
+                    : '必做已完成 · 点开看'
+                  : left(m.key) > 0
+                    ? `还能 ${left(m.key)} 次 · 点开看`
+                    : '今天用完了 · 点开看';
+            const foot = el('div', footText, 'stroll-meter-foot');
+            if (mustKeys[m.key]) foot.classList.add('stroll-must');
             item.append(head, track, foot);
             meters.append(item);
           }
@@ -872,8 +887,10 @@ export default {
             autoCap > 0 ? `${Number(data?.autoSessions ?? 0)}/${autoCap}` : String(Number(data?.autoSessions ?? 0)),
             autoCap > 0 ? ' 次' : ' 次 · 关着',
           );
-          statBudget.set(Math.round(Number(cfg.tokenDailyBudget ?? 0) / 1000), 'k token');
-          tokenHint.textContent = '一次约 1–2k token';
+          // 这是「预算」（配置值），不是已用量；原来 Math.round(8600/1000) 会显示成 9k，看着像超了
+          const budgetK = (Number(cfg.tokenDailyBudget ?? 0) / 1000).toFixed(1).replace(/\.0$/, '');
+          statBudget.set(budgetK, 'k token 预算');
+          tokenHint.textContent = '预算只决定每天出门几次，不是已用量';
 
           // 一起看
           const watching = data?.watch?.watching === true;
@@ -953,7 +970,7 @@ export default {
           biliSub.textContent = bili.loggedIn ? `UID ${bili.uid || '—'} · 写动作可用` : '未登录 · 能看不能赞';
           biliBtn.textContent = bili.loggedIn ? '重新登录' : '登录 B站';
           biliOut.style.display = bili.loggedIn ? '' : 'none';
-          dyName.textContent = dy.loggedIn ? '抖音' : '抖音';
+          dyName.textContent = dy.loggedIn ? '抖音' : '抖音（未登录）';
           dySub.textContent = dy.loggedIn
             ? dy.running
               ? dy.headless
@@ -1202,7 +1219,7 @@ export default {
           if (!where && target) where = /^follow|unfollow$/.test(item.action ?? '') ? `UID ${target}` : target;
           if (where) {
             const line = el('div', undefined, 'stroll-detail-where');
-            line.append(icon('play', 11), el('span', where.length > 34 ? `${cut(where, 34)}…` : where));
+            line.append(icon('play', 11), el('span', cut(where, 34)));
             row.append(line);
           }
 
@@ -1328,7 +1345,7 @@ export default {
           input.type = 'text';
           input.className = 'stroll-input';
           input.maxLength = Number(lastData?.config?.commentMaxChars ?? 120);
-          input.placeholder = `回 ${cut(name, 8)}…`;
+          input.placeholder = `回 ${cut(name, 8)}`;
           const hint = el('span', undefined, 'stroll-token');
           const send = button('发送', () => submit(), 'primary xs');
           const line = el('div', undefined, 'stroll-inline');

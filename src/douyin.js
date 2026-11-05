@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { formatCount, formatDuration, humanPause, imageMimeOf, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
+import { cutChars, formatCount, formatDuration, humanPause, imageMimeOf, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
 
 const ORIGIN = 'https://www.douyin.com';
 
@@ -3102,10 +3102,15 @@ export class DouyinBrowser {
         .catch(() => '');
     // 正文里她手打的「@某人」先剥掉：真 @ 由 mention 插 chip，
     // 手打的那个只是普通字符——抖音会染成蓝色，但对方收不到通知，还容易和真 chip 重复成一个。
-    let body = String(text ?? '').slice(0, 300);
+    let body = cutChars(text, 300);
     if (mention) body = stripAtName(body, mention);
     // 「@你 / @主人」不是昵称，留着也只是一个假 @
     body = stripAtPlaceholder(stripLeadingFakeAt(body));
+    // 空正文按回车只会弹「不能发送空白消息」，而读回来还是空——会被当成「发出去了」。
+    // 没有 @ 要插就直接拒绝（GLM 审出来的 #2 前半）。
+    if (!body && !mention) {
+      throw new DouyinError('EMPTY_TEXT', '正文是空的，没发（空消息只会弹「不能发送空白消息」）。');
+    }
     await input.click({ timeout: 6000, force: true }).catch(() => {});
     let mentioned = false;
     if (mention) {
@@ -3113,9 +3118,10 @@ export class DouyinBrowser {
     }
     // 先试「整段插入」：Slate 编辑器认 beforeinput/input，一次事件就落进去，
     // 20 个字从 200ms+ 降到 ~20ms。编辑器没接住（还是空的）再退回逐字输入。
+    let pastedOk = false;
     if (body) {
-      const pasted = await this.insertTextFast(page, input, body);
-      if (!pasted) {
+      pastedOk = await this.insertTextFast(page, input, body);
+      if (!pastedOk) {
         if (mentioned) {
           // mentionInChat 收尾已经在 chip 后面补了空格，这里直接接正文
           await page.keyboard.type(body, { delay: 0 });
@@ -3125,6 +3131,11 @@ export class DouyinBrowser {
       }
     }
     this.lastMention = mentioned;
+    // 逐字输入可能「静默失败」（焦点不在编辑器里）：读一次确认；insertText 那条路已经校验过 DOM 了
+    if (body && !pastedOk) {
+      const typedNow = await read();
+      if (!typedNow) throw new DouyinError('NOT_TYPED', '正文没进输入框，没发。');
+    }
     await page.keyboard.press('Enter');
     // 轮询「输入框清空了没有」：正常 200-300ms 就发完了。每 25ms 问一次，
     // 比原来 60ms 平均快 35ms，比死等 1.5 秒快一个数量级。
@@ -4757,11 +4768,21 @@ export class DouyinBrowser {
       // 预览行就是最新一条消息：它没变，会话里就没新话，不必点开
       const row = await this.readRow(page, who).catch(() => null);
       const cache = this.peekCache;
-      if (row && cache && cache.name === who && cache.preview === row.preview && cache.messages?.length) {
+      // 缓存只当「防 -509 的秒级短路」：最多 5 秒，而且有未读就直接点开，
+      // 免得预览行没变时把新消息（尤其是同一句/图片）一直挡在缓存里
+      if (
+        row &&
+        cache &&
+        cache.name === who &&
+        cache.preview === row.preview &&
+        Number(row.unread ?? 0) === 0 &&
+        Date.now() - Number(cache.at ?? 0) < 5000 &&
+        cache.messages?.length
+      ) {
         return { ok: true, messages: cache.messages, cached: true };
       }
       const messages = await this.readThread(page, who, size).catch(() => []);
-      if (row) this.peekCache = { name: who, preview: row.preview, messages };
+      if (row) this.peekCache = { name: who, preview: row.preview, messages, at: Date.now() };
       return { ok: true, messages };
     });
   }
@@ -4798,37 +4819,45 @@ export class DouyinBrowser {
     // 这是「秒回」的关键一段——省掉整页导航（6-8 秒）和点会话后的固定停顿（2.4 秒）。
     const dm = this.dmPage;
     if (dm && !dm.isClosed() && this.dmThread === who) {
-      await this.ensureThreadOpen(dm, who);
-      const t1 = Date.now();
-      const input = await this.waitMsgInput(dm, 3000).catch(() => null);
-      if (input) {
-        const t2 = Date.now();
-        await this.sendInChat(dm, input, text, { mention });
-        this.lastAction = `dm ${who}`;
-        return {
-          ok: true, sent: true, fast: true,
-          ms: { prep: t1 - t0, input: t2 - t1, send: Date.now() - t2, total: Date.now() - t0 },
-          mentioned: mention ? !!this.lastMention : null,
-          mentionDebug: this.lastMention ? '' : this.lastMentionDump || '',
-        };
+      // 先确认页面真的停在主人这个会话上。点不回来就别硬发——宁可走慢路径重开，
+      // 也不能把私信打进别人的会话里（GLM 审出来的 #1）。
+      const onThread = await this.ensureThreadOpen(dm, who).catch(() => false);
+      if (!onThread) {
+        this.dmThread = '';
+      } else {
+        const t1 = Date.now();
+        const input = await this.waitMsgInput(dm, 3000).catch(() => null);
+        if (input) {
+          const t2 = Date.now();
+          await this.sendInChat(dm, input, text, { mention });
+          this.lastAction = `dm ${who}`;
+          return {
+            ok: true, sent: true, fast: true,
+            ms: { prep: t1 - t0, input: t2 - t1, send: Date.now() - t2, total: Date.now() - t0 },
+            mentioned: mention ? !!this.lastMention : null,
+            mentionDebug: this.lastMention ? '' : this.lastMentionDump || '',
+          };
+        }
       }
     }
     // 群：那个群的监听页正停在群里，同样可以直接在那页打字（零跳转）
     const slot = this.groupPages?.get?.(who);
     if (slot?.page && !slot.page.isClosed() && slot.thread === who) {
-      await this.ensureThreadOpen(slot.page, who);
-      const t1 = Date.now();
-      const input = await this.waitMsgInput(slot.page, 3000).catch(() => null);
-      if (input) {
-        const t2 = Date.now();
-        await this.sendInChat(slot.page, input, text, { mention });
-        this.lastAction = `group ${who}`;
-        return {
-          ok: true, sent: true, fast: true, group: true,
-          ms: { prep: t1 - t0, input: t2 - t1, send: Date.now() - t2, total: Date.now() - t0 },
-          mentioned: mention ? !!this.lastMention : null,
-          mentionDebug: this.lastMention ? '' : this.lastMentionDump || '',
-        };
+      const onThread = await this.ensureThreadOpen(slot.page, who).catch(() => false);
+      if (onThread) {
+        const t1 = Date.now();
+        const input = await this.waitMsgInput(slot.page, 3000).catch(() => null);
+        if (input) {
+          const t2 = Date.now();
+          await this.sendInChat(slot.page, input, text, { mention });
+          this.lastAction = `group ${who}`;
+          return {
+            ok: true, sent: true, fast: true, group: true,
+            ms: { prep: t1 - t0, input: t2 - t1, send: Date.now() - t2, total: Date.now() - t0 },
+            mentioned: mention ? !!this.lastMention : null,
+            mentionDebug: this.lastMention ? '' : this.lastMentionDump || '',
+          };
+        }
       }
     }
     return this.serialize(async () => {
@@ -4843,6 +4872,10 @@ export class DouyinBrowser {
           this.openThread = who;
           // 点完不用干等两秒：下面 waitMsgInput 会一轮一轮等到输入框真的能打字
           await page.waitForTimeout(200);
+        }
+        // 慢路径也核一次标题：openThread 只是我们记的，页面可能没真的切过去
+        if (!(await this.ensureThreadOpen(page, who).catch(() => false))) {
+          throw new DouyinError('THREAD_DRIFT', `页面没切到「${who}」这个会话，没发`);
         }
         const input = await this.waitMsgInput(page, 6000);
         if (!input) throw new DouyinError('NO_INPUT', '没找到输入框，抖音可能改版了');
@@ -4999,7 +5032,9 @@ export class DouyinBrowser {
     const t = await this.chatPageOf(who);
     try {
       // 先确认这一页真的停在这个会话上：上传框是页面级的，飘到别的会话就会传错地方/传不出去
-      if (who) await this.ensureThreadOpen(t.page, who).catch(() => false);
+      if (who && !(await this.ensureThreadOpen(t.page, who).catch(() => false))) {
+        return { ok: false, code: 'THREAD_DRIFT', error: `页面没停在「${who}」这个会话上，点不回去，没发` };
+      }
       const r = await this.sendStickerInChat(t.page, t.input, { file, src, name: label });
       if (r.ok) this.lastAction = `sticker ${who || 'chat'}`;
       return r;

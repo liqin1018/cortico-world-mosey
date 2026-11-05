@@ -99,6 +99,10 @@ export class StrollWorld {
     this.presence = null;
     this.lastPresenceNotify = 0;
     this.watch = null;
+    /** 一起刷的会话状态：当前视频、进入时间、刷了几条、看过哪些 */
+    this.watchScrollState = null;
+    this.watchBusy = false;
+    this.watchTimerSec = 0;
     this.watchTimer = null;
     this.lastWatchPush = 0;
     this.dmTimer = null;
@@ -163,12 +167,12 @@ export class StrollWorld {
     this.store.save();
   }
 
-  async tick() {
+  async tick(now = Date.now()) {
     if (!this.running || !this.cfg.enabled) return;
-    const hour = hourOf(new Date(), this.timeZone);
+    const hour = hourOf(new Date(now), this.timeZone);
     if (hour < 9 || hour >= 23) return;
     if (this.policy.isQuiet() || this.policy.paused().paused) return;
-    const day = dayKey(new Date(), this.timeZone);
+    const day = dayKey(new Date(now), this.timeZone);
     // 勾了「必做」但今天还没做够的项：出门要优先补，晚上到点还要单独催
     const pending = this.mustDoList().filter((x) => x.left > 0);
     await this.maybeMustNudge(pending, hour, day);
@@ -1661,9 +1665,30 @@ export class StrollWorld {
         dur: detail.dur ?? '',
         url: detail.url,
       });
+      // 视频才读字幕/弹幕；专栏、动态没有。条数由「看视频」设置控制，0 = 不带
+      const subOpen = clamp(Number(this.cfg.subtitleOpen ?? 12), 0, 60);
+      const dmOpen = clamp(Number(this.cfg.danmakuOpen ?? 30), 0, 60);
+      let media = null;
+      if (bvid && (subOpen > 0 || dmOpen > 0)) {
+        media = await this.bili.mediaText(bvid, { subtitleLimit: subOpen, danmakuLimit: dmOpen }).catch(() => null);
+      }
       return JSON.stringify({
         ok: true,
         ...detail,
+        ...(media?.ok
+          ? {
+              subtitles: media.subtitles,
+              danmaku: media.danmaku,
+              mediaTotal: media.total,
+              mediaNote:
+                media.total.subtitles === 0 && media.total.danmaku === 0
+                  ? '这条没读到字幕也没读到弹幕'
+                  : media.total.subtitles === 0
+                    ? '这条没有 CC 字幕（弹幕有）'
+                    : '',
+            }
+          : {}),
+        ...(this.cfg.openTalk === true ? { followUp: '看完用一两句跟主人说说你的反应，别只复述简介。' } : {}),
         window: '后台看的，没有开网页。要一起看就在面板点「一起看」。',
       });
     }
@@ -1690,6 +1715,7 @@ export class StrollWorld {
         url: result.url,
       });
       result.window = '后台看的，没有开网页。要一起看就在面板点「一起看」。';
+      if (this.cfg.openTalk === true) result.followUp = '看完用一两句跟主人说说你的反应，别只复述简介。';
       this.store.markSeen(`douyin:open:${result.id}`);
       this.policy.noteRead('douyin', { open: true });
       const blobs = (result.frames ?? []).map((f, i) => ({
@@ -2182,9 +2208,55 @@ export class StrollWorld {
 
   /* ---------------- 一起看 ---------------- */
 
+  /** 把 B站 登录态转成 Playwright 的 cookie，陪看浏览器启动时直接带过去。 */
+  biliCookiesForWatch() {
+    const header = String(this.bili.cookieHeader?.() ?? '');
+    const out = [];
+    for (const part of header.split(';')) {
+      const i = part.indexOf('=');
+      if (i <= 0) continue;
+      const name = part.slice(0, i).trim();
+      const value = part.slice(i + 1).trim();
+      if (!name || !value) continue;
+      out.push({
+        name,
+        value,
+        domain: '.bilibili.com',
+        path: '/',
+        secure: true,
+        httpOnly: true,
+        sameSite: 'Lax',
+      });
+    }
+    return out;
+  }
+
+  /** 陪看浏览器要带的 cookie：B站登录态 + 抖音登录态（不然打开抖音就是未登录，评论区也没有）。 */
+  async watchCookies() {
+    const out = [...this.biliCookiesForWatch()];
+    const ctx = this.douyin.context;
+    if (ctx) {
+      const list = await ctx.cookies('https://www.douyin.com').catch(() => []);
+      for (const c of list ?? []) {
+        if (!c?.name || !c?.value) continue;
+        out.push({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path || '/',
+          secure: c.secure !== false,
+          httpOnly: !!c.httpOnly,
+          sameSite: c.sameSite || 'Lax',
+        });
+      }
+    }
+    return out;
+  }
+
   async watchStart(url) {
-    const info = await this.douyin.watchStart(url);
+    const info = await this.douyin.watchStart(url, { cookies: await this.watchCookies() });
     this.watch = { startedAt: Date.now(), url: info.url, title: info.title, platform: info.platform, last: null };
+    this.watchScrollState = { id: '', at: Date.now(), count: 0, seen: [], retryAt: 0 };
     this.setPresence({
       platform: info.platform,
       id: '',
@@ -2208,9 +2280,17 @@ export class StrollWorld {
     };
   }
 
+  /** 陪看轮询间隔：开了一起刷就用 4 秒，否则按设置。 */
+  watchPollSeconds() {
+    const base = clamp(Number(this.cfg.watchPollSec ?? 15), 5, 120);
+    // 一起刷要跟得上短视频：默认 15 秒读一次太慢，一条 15 秒的视频还没读就播完了
+    return this.cfg.watchScroll === true ? Math.min(base, 4) : base;
+  }
+
   startWatchTimer() {
     this.stopWatchTimer();
-    const sec = clamp(Number(this.cfg.watchPollSec ?? 15), 5, 120);
+    const sec = this.watchPollSeconds();
+    this.watchTimerSec = sec;
     this.watchTimer = setInterval(() => this.watchTick().catch(() => {}), sec * 1000);
   }
 
@@ -2220,18 +2300,54 @@ export class StrollWorld {
   }
 
   async watchTick() {
+    // 切视频可能卡 20 多秒，而定时器 4 秒一轮：上一轮没跑完就跳过这轮，别叠着来
+    if (this.watchBusy) return;
+    this.watchBusy = true;
+    try {
+      await this.watchTickInner();
+    } catch (error) {
+      this.log?.warn?.('stroll watch tick failed', { message: error?.message });
+    } finally {
+      this.watchBusy = false;
+    }
+  }
+
+  async watchTickInner() {
     if (!this.watch) {
       this.stopWatchTimer();
       return;
     }
-    const digest = await this.douyin.watchDigest();
+    // 主人中途改「一起刷」开关时，轮询间隔要跟着变（4 秒 ↔ watchPollSec）
+    const wantSec = this.watchPollSeconds();
+    if (this.watchTimerSec !== wantSec) this.startWatchTimer();
+    let digest = await this.douyin.watchDigest();
     if (!digest) return;
-    const changed = digest.url !== this.watch.url;
+    // 抖音「一起刷」：播完/到点就切下一条
+    const scrolled = await this.maybeWatchScroll(digest);
+    if (scrolled?.digest) digest = scrolled.digest;
+    // 抖音推荐流切换时 URL 常常不变，所以还要比 videoId；主人自己滑也能被认出来
+    const prevVideoId = this.watch.last?.videoId ?? '';
+    const changed =
+      digest.url !== this.watch.url ||
+      (!!digest.videoId && !!prevVideoId && digest.videoId !== prevVideoId) ||
+      !!scrolled?.ok;
     const now = Date.now();
     const speakEvery = clamp(Number(this.cfg.watchSpeakSec ?? 60), 20, 600) * 1000;
-    const due = changed || now - this.lastWatchPush >= speakEvery;
+    // 暂停时只在「刚暂停」那一下说一次，之后安静——不然对着静止画面每 60 秒重复一遍
+    const pausedNow = digest.paused === true;
+    const wasPaused = this.watch.last?.paused === true;
+    const due = changed || (pausedNow ? !wasPaused : now - this.lastWatchPush >= speakEvery);
     this.watch = { ...this.watch, url: digest.url, title: digest.title, platform: digest.platform, last: digest };
     if (!due) return;
+    // 一起刷时「隔几条说一句」：没轮到的只更新状态，不推给她
+    if (scrolled?.ok) {
+      const every = clamp(Number(this.cfg.watchScrollEvery ?? 1), 1, 10);
+      const count = Number(this.watchScrollState?.count ?? 0);
+      if (every > 1 && count % every !== 0) {
+        this.lastWatchPush = now;
+        return;
+      }
+    }
     this.lastWatchPush = now;
     const clock = (n) => {
       const sec = Math.max(0, Math.floor(Number(n) || 0));
@@ -2247,15 +2363,131 @@ export class StrollWorld {
       const name = truncate(t || '', 60);
       return /^《.*》$/.test(name) ? name : `《${name}》`;
     };
-    const head = changed
-      ? `主人翻到了新页面：${shown(digest.title || digest.url)} ${progress}。`
-      : `一起看中：${shown(digest.title)} ${progress}${digest.paused ? '（暂停）' : ''}。`;
+    const who = digest.author ? ` @${truncate(digest.author, 20)}` : '';
+    const head = scrolled?.ok
+      ? `自动刷到了下一条：${shown(digest.title || digest.url)}${who} ${progress}。`
+      : changed
+        ? `主人翻到了新页面：${shown(digest.title || digest.url)} ${progress}。`
+        : `一起看中：${shown(digest.title)} ${progress}${digest.paused ? '（暂停）' : ''}。`;
+    // B站：按当前进度取这一句字幕 + 前后 15 秒的弹幕；抖音没有弹幕，跳过
+    let mediaLine = '';
+    const subWatch = clamp(Number(this.cfg.subtitleWatch ?? 2), 0, 5);
+    const dmWatch = clamp(Number(this.cfg.danmakuWatch ?? 6), 0, 20);
+    const winSec = clamp(Number(this.cfg.watchWindowSec ?? 15), 5, 120);
+    if (digest.platform === 'bilibili' && (subWatch > 0 || dmWatch > 0)) {
+      const bvid = parseBvid(String(digest.url ?? ''));
+      if (bvid) {
+        const mt = await this.bili
+          .mediaText(bvid, { around: Number(digest.time ?? 0), subtitleLimit: subWatch, danmakuLimit: dmWatch, windowSec: winSec })
+          .catch(() => null);
+        if (mt?.ok) {
+          const subs =
+            subWatch > 0
+              ? (mt.subtitles ?? [])
+                  .slice(0, subWatch)
+                  .map((x) => truncate(String(x.text ?? ''), 40))
+                  .filter(Boolean)
+                  .join(' / ')
+              : '';
+          const dms =
+            dmWatch > 0
+              ? (mt.danmaku ?? [])
+                  .slice(0, dmWatch)
+                  .map((d) => truncate(String(d.text ?? ''), 18))
+                  .filter(Boolean)
+                  .join(' / ')
+              : '';
+          const parts = [];
+          if (subs) parts.push(`字幕：${subs}`);
+          else if (subWatch > 0) parts.push('这句没字幕');
+          if (dms) parts.push(`弹幕：${dms}`);
+          if (parts.length) mediaLine = `\n${parts.join('；')}`;
+        }
+      }
+    }
     const tail = comments ? `评论区在说：${comments}` : '评论区还没读到。';
-    await this.push('stroll.watch', `${head}${tail}`, { platform: digest.platform, url: digest.url }, 'debounce');
+    // 主人在「一起看」里要的是陪看的感觉，不是进度播报：开着就明确要求她说两句
+    const talkLines = clamp(Number(this.cfg.watchLines ?? 2), 1, 3);
+    const talkLine =
+      this.cfg.watchTalk === true ? `\n用 ${talkLines} 句说说你自己的反应（别只报进度，也别复述字幕）。` : '';
+    // 抖音没字幕也没弹幕：她只能靠标题和评论猜画面，开这个就附一张截图
+    let blobs = null;
+    if (this.cfg.watchShot === true && digest.platform === 'douyin') {
+      const shot = await this.douyin.watchShot().catch(() => null);
+      if (shot) blobs = [shot];
+    }
+    await this.push(
+      'stroll.watch',
+      `${head}${mediaLine}${tail}${talkLine}`,
+      { platform: digest.platform, url: digest.url },
+      'debounce',
+      blobs,
+    );
+  }
+
+  /**
+   * 抖音「一起刷」：播完或到点就切下一条。只对抖音生效。
+   * 切不动（找不到下一条/被平台挡）就 10 秒后再试，不每轮都撞。
+   */
+  async maybeWatchScroll(digest) {
+    if (this.cfg.watchScroll !== true) return null;
+    if (digest?.platform !== 'douyin') return null;
+    // 暂停多半是主人在看/在说话：不切，而且把计时按住，恢复后不该立刻被判成「播完了」
+    if (digest?.paused === true) {
+      if (this.watchScrollState) this.watchScrollState.at = Date.now();
+      return null;
+    }
+    const now = Date.now();
+    const idOfDigest = (d) =>
+      String(d?.videoId ?? '') || String((String(d?.url ?? '').match(/\/video\/(\d+)/) ?? [])[1] ?? '');
+    const id = idOfDigest(digest);
+    const state = this.watchScrollState ?? { id: '', at: now, count: 0, seen: [], retryAt: 0 };
+    // 换了视频（主人自己滑的）：重置计时，不重复计数
+    if (state.id !== id) {
+      state.id = id;
+      state.at = now;
+      if (id && !state.seen.includes(id)) state.seen.push(id);
+      this.watchScrollState = state;
+      return null;
+    }
+    if (now < Number(state.retryAt ?? 0)) return null;
+    const everySec = clamp(Number(this.cfg.watchScrollSec ?? 0), 0, 180);
+    const time = Number(digest.time ?? 0);
+    const dur = Number(digest.duration ?? 0);
+    const waited = (now - Number(state.at ?? now)) / 1000;
+    // 抖音短视频多数是循环播放，ended 不一定触发：用「停留超过时长 + 3 秒」兜底
+    const ended = digest.ended === true || (dur > 0 && time >= dur - 1);
+    // 90 秒只在「读不到时长」时兜底。读得到时长就老实等它播完——
+    // 否则 10 分钟的长视频会在第 90 秒被切走，和「播完就切」正好相反
+    const due = everySec > 0 ? waited >= everySec : ended || (dur >= 3 ? waited >= dur + 3 : waited >= 90);
+    if (!due) return null;
+    const next = await this.douyin.watchNext({ seen: state.seen, currentId: id }).catch(() => null);
+    if (!next?.ok) {
+      state.retryAt = now + 10000;
+      this.watchScrollState = state;
+      this.log?.warn?.('stroll watch next failed', { code: next?.code ?? 'UNKNOWN' });
+      return null;
+    }
+    const fresh = next.digest ?? (await this.douyin.watchDigest().catch(() => null));
+    state.id = idOfDigest(fresh);
+    state.at = Date.now();
+    state.count = Number(state.count ?? 0) + 1;
+    state.retryAt = 0;
+    if (state.id && !state.seen.includes(state.id)) state.seen.push(state.id);
+    if (state.seen.length > 80) state.seen = state.seen.slice(-80);
+    this.watchScrollState = state;
+    return { ok: true, via: next.via, digest: fresh };
   }
 
   /** B站评论区在 shadow DOM 里，DOM 读不到；一起看时直接用官方评论接口。 */
   async watchComments(digest) {
+    if (digest?.platform === 'douyin') {
+      // 抖音评论在 DOM 里：先用手上这份，抓不到就点开评论区再读一次
+      const dom = Array.isArray(digest?.comments) ? digest.comments : [];
+      if (dom.length) return dom;
+      const more = await Promise.resolve(this.douyin.watchComments?.()).catch(() => []);
+      return Array.isArray(more) ? more : [];
+    }
     if (digest?.platform !== 'bilibili') return digest?.comments ?? [];
     try {
       const bvid = parseBvid(digest.url);
@@ -2298,6 +2530,7 @@ export class StrollWorld {
     this.stopWatchTimer();
     if (this.presence?.phase === 'co-watch') this.presence = null;
     this.watch = null;
+    this.watchScrollState = null;
     await this.douyin.watchStop().catch(() => {});
     return { ok: true, watching: false };
   }

@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import {
+  cutChars,
   formatCount,
   formatDuration,
   parseBvid,
@@ -139,6 +141,8 @@ export class Bilibili {
     this.policy = policy;
     this.store = store;
     this.cache = new Map();
+    /** 字幕/弹幕缓存：cid -> { at, subtitles, danmaku } */
+    this.mediaCache = new Map();
     this.lastRequest = 0;
     this.wbi = null;
     this.navCache = null;
@@ -593,6 +597,8 @@ export class Bilibili {
     const data = await this.request('/x/web-interface/view', params, { cacheMs: 5 * 60 * 1000 });
     return {
       aid: String(data.aid),
+      /** 弹幕/字幕都要 cid；番剧/直播这里可能没有 */
+      cid: String(data.cid ?? ''),
       bvid: data.bvid,
       title: stripTags(data.title),
       desc: stripTags(data.desc ?? ''),
@@ -610,6 +616,138 @@ export class Bilibili {
       pubdate: Number(data.pubdate ?? 0),
       url: `https://www.bilibili.com/video/${data.bvid}`,
     };
+  }
+
+  /**
+   * 读一条视频的字幕 + 弹幕。`around` 传当前播放秒数时，只取前后几秒的，
+   * 供「一起看」按进度播报；不传就取开头一批。
+   */
+  async mediaText(idOrUrl, { subtitleLimit = 24, danmakuLimit = 40, around = null, windowSec = 15 } = {}) {
+    const v = await this.view(idOrUrl);
+    if (!v.cid) {
+      return { ok: false, code: 'NO_CID', error: '这条视频拿不到 cid（可能是番剧/直播），读不了字幕和弹幕', subtitles: [], danmaku: [] };
+    }
+    let cache = this.mediaCache.get(v.cid);
+    if (!cache || Date.now() - cache.at > 10 * 60 * 1000) {
+      const [subtitles, danmaku] = await Promise.all([
+        this.subtitlesOf(v.aid, v.cid).catch(() => []),
+        this.danmakuOf(v.cid).catch(() => []),
+      ]);
+      cache = { at: Date.now(), subtitles, danmaku };
+      this.mediaCache.set(v.cid, cache);
+      // 只留最近 20 条视频，别把内存吃满
+      if (this.mediaCache.size > 20) {
+        const oldest = [...this.mediaCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) this.mediaCache.delete(oldest[0]);
+      }
+    }
+    const subtitles =
+      around != null
+        ? cache.subtitles.filter((x) => x.to >= Number(around) - 3 && x.from <= Number(around) + 6).slice(0, 3)
+        : cache.subtitles.slice(0, subtitleLimit);
+    const danmaku =
+      around != null
+        ? cache.danmaku.filter((x) => Math.abs(x.t - Number(around)) <= windowSec).slice(0, 12)
+        : sampleDanmaku(cache.danmaku, danmakuLimit);
+    return {
+      ok: true,
+      aid: v.aid,
+      cid: v.cid,
+      title: v.title,
+      duration: v.duration,
+      subtitles,
+      danmaku,
+      total: { subtitles: cache.subtitles.length, danmaku: cache.danmaku.length },
+    };
+  }
+
+  /** CC 字幕：player/v2 列出字幕轨，subtitle_url 里是 {from,to,content}。 */
+  async subtitlesOf(aid, cid) {
+    let data = null;
+    try {
+      data = await this.request('/x/player/wbi/v2', { aid, cid }, { wbi: true, cacheMs: 0 });
+    } catch {
+      data = await this.request('/x/player/v2', { aid, cid }, { cacheMs: 0 }).catch(() => null);
+    }
+    const tracks = data?.subtitle?.subtitles ?? [];
+    const out = [];
+    for (const t of tracks.slice(0, 2)) {
+      const raw = String(t.subtitle_url ?? '');
+      if (!raw) continue;
+      const url = raw.startsWith('//') ? `https:${raw}` : raw;
+      const json = await this.fetchJson(url).catch(() => null);
+      for (const line of json?.body ?? []) {
+        const text = String(line.content ?? '').trim();
+        if (!text) continue;
+        out.push({ from: Number(line.from) || 0, to: Number(line.to) || 0, text: cutChars(text, 80) });
+      }
+    }
+    // 同一句常常同时有「中文轨 + AI 轨」两份：时间差不到 2 秒、文字一样就去重
+    const out2 = [];
+    for (const line of out.sort((a, b) => a.from - b.from)) {
+      const prev = out2[out2.length - 1];
+      if (prev && prev.text === line.text && Math.abs(prev.from - line.from) < 2) continue;
+      out2.push(line);
+    }
+    return out2;
+  }
+
+  /** 弹幕：comment.bilibili.com/{cid}.xml 是 raw-deflate 的 XML，解压后按 <d p="..."> 读。 */
+  async danmakuOf(cid) {
+    const buf = await this.fetchRaw(`https://comment.bilibili.com/${cid}.xml`, { binary: true });
+    if (!buf) return [];
+    let xml = '';
+    try {
+      xml = zlib.inflateRawSync(buf).toString('utf8');
+    } catch {
+      xml = buf.toString('utf8');
+    }
+    const out = [];
+    for (const m of xml.matchAll(/<d p="([^"]*)"[^>]*>([\s\S]*?)<\/d>/g)) {
+      const parts = m[1].split(',');
+      const at = Number(parts[0]);
+      if (!Number.isFinite(at)) continue;
+      const text = unescapeXml(m[2]).trim();
+      if (!text) continue;
+      out.push({
+        t: Math.round(at * 10) / 10,
+        mode: Number(parts[1]) || 1,
+        color: Number(parts[3]) || 0xffffff,
+        text: cutChars(text, 50),
+      });
+    }
+    return out.sort((a, b) => a.t - b.t);
+  }
+
+  async fetchRaw(url, { binary = false, timeout = 8000 } = {}) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeout);
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': UA,
+          Referer: 'https://www.bilibili.com/',
+          ...(this.cookieHeader() ? { Cookie: this.cookieHeader() } : {}),
+        },
+        signal: ctl.signal,
+      });
+      if (!res.ok) return null;
+      return binary ? Buffer.from(await res.arrayBuffer()) : await res.text();
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async fetchJson(url) {
+    const text = await this.fetchRaw(url);
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
   }
 
   async open(id, { comments = 5 } = {}) {
@@ -1359,4 +1497,30 @@ export class Bilibili {
       note: h.loggedIn ? `已登录：${h.name}` : h.cookie ? '登录态失效或接口不通' : '未登录（只能读公开内容）',
     };
   }
+}
+
+
+/** 弹幕里同名刷屏太多：按时间均匀抽，再按文字去重。 */
+function sampleDanmaku(list, limit) {
+  if (!list.length) return [];
+  if (list.length <= limit) return list.slice();
+  const step = list.length / limit;
+  const out = [];
+  const seen = new Set();
+  for (let i = 0; i < limit; i += 1) {
+    const item = list[Math.min(list.length - 1, Math.floor(i * step))];
+    if (!item || seen.has(item.text)) continue;
+    seen.add(item.text);
+    out.push(item);
+  }
+  return out;
+}
+
+function unescapeXml(text) {
+  return String(text ?? '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
 }

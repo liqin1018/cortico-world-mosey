@@ -82,7 +82,15 @@ const stateScript = String.raw`(() => {
 })()`;
 
 const watchScript = String.raw`(() => {
-  const v = document.querySelector('video');
+  const visible = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return r.width >= 120 && r.height >= 90 && r.bottom > 0 && r.top < innerHeight * 1.2;
+  };
+  const videos = Array.from(document.querySelectorAll('video'));
+  // 抖音会预加载下一条，页面里可能同时有两个 video：优先「可见且没暂停」的那个，
+  // 不然读到的可能是上一条的进度（一起刷时尤其明显）
+  const v = videos.find((x) => visible(x) && !x.paused) || videos.find(visible) || videos[0] || null;
   const pick = (sels) => {
     for (const sel of sels) {
       const nodes = Array.from(document.querySelectorAll(sel)).slice(0, 6);
@@ -96,25 +104,55 @@ const watchScript = String.raw`(() => {
   const text = document.body.innerText || '';
   const platform = /bilibili\.com/.test(location.host) ? 'bilibili' : /douyin\.com/.test(location.host) ? 'douyin' : 'web';
   let title = (document.title || '').replace(/\s*-\s*抖音\s*$/, '').trim();
-  if (platform === 'douyin' && title.length < 5) {
-    const info = document.querySelector('[data-e2e="detail-video-info"]');
-    if (info) title = (info.innerText || '').split('\n')[0] || title;
+  let author = '';
+  if (platform === 'douyin') {
+    if (title.length < 5) {
+      const info = document.querySelector('[data-e2e="detail-video-info"]');
+      if (info) title = (info.innerText || '').split('\n')[0] || title;
+    }
+    const who =
+      document.querySelector('[data-e2e="video-author-name"]') ||
+      document.querySelector('[data-e2e="detail-video-info"] a[href*="/user/"]');
+    if (who) author = ((who.innerText || '').split('\n')[0] || '').trim();
   }
   if (platform === 'bilibili') {
     const h1 = document.querySelector('h1');
     if (h1) title = h1.innerText.trim() || title;
     title = title.replace(/_哔哩哔哩.*$/, '').trim();
+    const up = document.querySelector('.up-name, .username');
+    if (up) author = ((up.innerText || '').split('\n')[0] || '').trim();
   }
+  const src = v ? String(v.currentSrc || v.src || '') : '';
+  const m = location.pathname.match(/\/video\/(\d+)/);
   return {
     platform: platform,
     url: location.href,
+    videoId: m ? m[1] : '',
+    videoKey: src ? src.slice(-160) : '',
     title: title.slice(0, 120),
+    author: author.slice(0, 40),
     time: v && isFinite(v.currentTime) ? Math.round(v.currentTime) : null,
     duration: v && isFinite(v.duration) ? Math.round(v.duration) : null,
     paused: v ? !!v.paused : null,
+    ended: v ? !!v.ended : null,
+    loop: v ? !!v.loop : null,
+    videoCount: videos.length,
     comments: pick(['[data-e2e="comment-item"]', '#comment .reply-item', '.reply-item', '.comment-item', '.danmaku-item']),
     loginHint: /登录后|请先登录|扫码登录|立即登录/.test(text),
   };
+})()`;
+
+/** 只读评论列表，别把整页 innerText 拖过来。 */
+const readCommentsScript = String.raw`(() => {
+  const sels = ['[data-e2e="comment-item"]', '#comment .reply-item', '.reply-item', '.comment-item'];
+  for (const sel of sels) {
+    const out = Array.from(document.querySelectorAll(sel))
+      .slice(0, 8)
+      .map((n) => (n.innerText || '').split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 2).join(' '))
+      .filter(Boolean);
+    if (out.length) return out;
+  }
+  return [];
 })()`;
 
 /** 抖音只给「11分钟前 / 昨天 / 周四」这种相对时间，换成大约的时间戳，用来排序。 */
@@ -521,6 +559,10 @@ export class DouyinBrowser {
     this.headless = null;
     this.loginPoller = null;
     this.watchStartedAt = 0;
+    /** 「一起看」用独立浏览器窗口：不跟私信/群标签混在一起 */
+    this.watchBrowser = null;
+    this.watchContext = null;
+    this.watchPage = null;
     this.page = null;
     this.queue = Promise.resolve();
     this.closeTimer = null;
@@ -5087,29 +5129,105 @@ export class DouyinBrowser {
   }
 
   /** 一起看：开一个有头窗口，主人可以自己在这个窗口里翻页，桌宠读同一个页面。 */
-  async watchStart(url) {
+  /** 一起看：单独起一个有窗口的浏览器，主浏览器（私信/群）不露头。 */
+  async watchStart(url, { cookies = [] } = {}) {
     return this.serialize(async () => {
-      if (this.closeTimer) clearTimeout(this.closeTimer);
-      this.closeTimer = null;
-      await this.launch({ headless: false, force: true });
-      // 一起看期间不许自动收窗：期间任何动作排下的 60 秒定时器都会把主人正在看的页面关掉
-      this.holdOpen = true;
+      await this.closeWatch();
+      const browser = await this.launchWatchBrowser();
+      this.watchBrowser = browser;
       try {
-        const page = await this.getPage();
-        if (url) await this.goto(page, url, 2200);
+        const context = await browser.newContext({
+          // 不给固定 viewport：让窗口自己决定大小，最大化/全屏才有效
+          viewport: null,
+          locale: 'zh-CN',
+          timezoneId: 'Asia/Shanghai',
+        });
+        this.watchContext = context;
+        // 把主会话的 B站 登录态带过去，省得每次陪看都要扫码
+        if (cookies?.length) await context.addCookies(cookies).catch(() => {});
+        const page = await context.newPage();
+        page.setDefaultTimeout(20000);
+        this.watchPage = page;
+        await this.applyWatchWindow(browser, page);
+        if (url) await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        const hasVideo = await page
+          .waitForSelector('video', { timeout: 12000 })
+          .then(() => true)
+          .catch(() => false);
+        const finalUrl = page.url();
+        // 打不开就别假装成功：about:blank / 错误页会把一个空白窗口当成「一起看中」
+        if (url && (/^about:blank/i.test(finalUrl) || /^chrome-error:/i.test(finalUrl))) {
+          throw new DouyinError('WATCH_OPEN_FAILED', `陪看窗口打不开这个地址：${url}`);
+        }
         this.watchStartedAt = Date.now();
+        // 抖音打开后常常停在暂停态（浏览器拦自动播放）：主动播一下，不然「一起刷」第一轮就卡住
+        if (hasVideo && this.platformOf(finalUrl) === 'douyin') await this.ensureWatchPlaying(page);
         const digest = await page.evaluate(watchScript).catch(() => null);
         return {
           ok: true,
-          platform: this.platformOf(page.url()),
-          title: digest?.title || (await page.title()),
-          url: page.url(),
+          platform: this.platformOf(finalUrl),
+          title: digest?.title || (await page.title().catch(() => '')),
+          url: finalUrl,
+          hasVideo,
         };
       } catch (error) {
-        this.holdOpen = false;
+        await this.closeWatch();
         throw error;
       }
     });
+  }
+
+  async launchWatchBrowser() {
+    const mod = await this.loadPlaywright();
+    const chromium = mod.chromium ?? mod.default?.chromium;
+    const winMode = String(this.cfg.watchWindow ?? 'maximized');
+    const args = ['--autoplay-policy=no-user-gesture-required', '--disable-blink-features=AutomationControlled'];
+    if (winMode === 'fullscreen') args.push('--start-fullscreen');
+    else if (winMode === 'normal') args.push('--window-size=1300,860');
+    else args.push('--start-maximized');
+    const options = { headless: false, args };
+    // 默认 Chrome 优先；也允许在设置里强制 chrome/edge。都没有就用 Playwright 自带的
+    const pref = String(this.cfg.watchBrowser ?? 'auto');
+    const order = this.channel
+      ? [this.channel, 'chrome', 'msedge']
+      : pref === 'edge'
+        ? ['msedge', 'chrome']
+        : ['chrome', 'msedge'];
+    for (const channel of order) {
+      try {
+        return await chromium.launch({ ...options, channel });
+      } catch {
+        // 试下一个渠道
+      }
+    }
+    return await chromium.launch(options);
+  }
+
+  /** 最大化/全屏：启动参数不一定生效，再用 CDP 设一次窗口状态。 */
+  async applyWatchWindow(browser, page) {
+    const mode = String(this.cfg.watchWindow ?? 'maximized');
+    if (mode === 'normal') return;
+    try {
+      const cdp = await browser.newBrowserCDPSession();
+      const { windowId } = await cdp.send('Browser.getWindowForTarget');
+      await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: mode } });
+      await cdp.detach().catch(() => {});
+    } catch {
+      // 启动参数已经带 --start-maximized/--start-fullscreen，失败就算了
+    }
+  }
+
+  /** 关掉一起看专用浏览器（不动主浏览器）。 */
+  async closeWatch() {
+    const page = this.watchPage;
+    this.watchPage = null;
+    await page?.close().catch(() => {});
+    const context = this.watchContext;
+    this.watchContext = null;
+    await context?.close().catch(() => {});
+    const browser = this.watchBrowser;
+    this.watchBrowser = null;
+    await browser?.close().catch(() => {});
   }
 
   platformOf(url) {
@@ -5120,17 +5238,145 @@ export class DouyinBrowser {
 
   /** 同页面摘要：标题、进度、评论区。没开窗时返回 null。 */
   async watchDigest() {
-    if (!this.context || !this.page || this.page.isClosed()) return null;
+    const page = this.watchPage;
+    if (!page || page.isClosed()) return null;
     try {
-      return await this.page.evaluate(watchScript);
+      return await page.evaluate(watchScript);
     } catch {
       return null;
     }
   }
 
+  /**
+   * 一起刷：切到下一条抖音视频。
+   * 顺序：页面自带的「下一个」按钮 → 推荐列表里没看过的一条 → 滚一下（推荐流）。
+   * 切完会核对 videoId/videoKey 有没有真的变，没变就报 NO_NEXT，别让上层以为刷成功了。
+   */
+  async watchNext({ seen = [], currentId = '' } = {}) {
+    const page = this.watchPage;
+    if (!page || page.isClosed()) return { ok: false, code: 'NO_WATCH_PAGE' };
+    const before = await this.watchDigest();
+    const idOf = (u) => (String(u).match(/\/video\/(\d+)/) || [])[1] || '';
+    const changedFrom = (d) =>
+      !!d && !!before && (d.videoId !== before.videoId || d.videoKey !== before.videoKey || d.url !== before.url);
+
+    // 1) 抖音自己的「下一个」
+    // 只在播放器容器里找，别点到页面其他地方的轮播箭头
+    for (const sel of [
+      '[data-e2e="video-switch-next"]',
+      '[data-e2e="player-container"] [data-e2e="arrow-right"]',
+    ]) {
+      const btn = page.locator(sel).first();
+      if (!(await btn.count().catch(() => 0))) continue;
+      await btn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(1000);
+      const after = await this.watchDigest();
+      if (changedFrom(after)) {
+        await this.ensureWatchPlaying(page);
+        return { ok: true, via: 'button', digest: after };
+      }
+    }
+
+    // 2) 推荐列表里挑一条没看过的
+    const cands = await page
+      .evaluate(() =>
+        Array.from(document.querySelectorAll('a[href*="/video/"]'))
+          .map((a) => ({ href: a.href, text: (a.innerText || '').trim().slice(0, 40) }))
+          .filter((x) => x.href),
+      )
+      .catch(() => []);
+    const seenSet = new Set(seen.map(String));
+    const pick = cands
+      .filter((c) => {
+        const id = idOf(c.href);
+        return id && id !== currentId && id !== before?.videoId && !seenSet.has(id);
+      })
+      // 侧边栏/评论区里也有 /video/ 链接，优先挑带标题文字的
+      .sort((a, b) => (b.text ? 1 : 0) - (a.text ? 1 : 0))[0];
+    if (pick) {
+      await page.goto(pick.href, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
+      await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
+      await page.waitForTimeout(700);
+      const after = await this.watchDigest();
+      const newId = idOf(page.url());
+      // 只有真换了才算成功：goto 失败时 URL 还是原来那条，不能当已经刷过去了
+      if (changedFrom(after) || (newId && newId !== before?.videoId)) {
+        await this.ensureWatchPlaying(page);
+        return { ok: true, via: 'list', digest: after };
+      }
+    }
+
+    // 3) 兜底：滚一下 + 方向键（推荐流只能这么切）
+    await page.mouse.wheel(0, 900).catch(() => {});
+    await page.waitForTimeout(400);
+    await page.keyboard.press('ArrowDown').catch(() => {});
+    await page.waitForTimeout(900);
+    const after = await this.watchDigest();
+    if (changedFrom(after)) {
+      await this.ensureWatchPlaying(page);
+      return { ok: true, via: 'scroll', digest: after };
+    }
+    return { ok: false, code: 'NO_NEXT', via: 'scroll' };
+  }
+
+  /** 切完视频可能停在暂停态（自动播放被拦）：主动 play 一下，别让一起刷卡住。 */
+  async ensureWatchPlaying(page = this.watchPage) {
+    if (!page || page.isClosed()) return;
+    await page
+      .evaluate(() => {
+        const visible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 90;
+        };
+        const vs = Array.from(document.querySelectorAll('video'));
+        const v = vs.find((x) => visible(x) && !x.paused) || vs.find(visible) || vs[0];
+        if (v && v.paused) v.play().catch(() => {});
+      })
+      .catch(() => {});
+  }
+
+  /** 抖音评论区：先直接读，读不到就点开评论图标再读一次。 */
+  async watchComments() {
+    const page = this.watchPage;
+    if (!page || page.isClosed()) return [];
+    const read = () => page.evaluate(readCommentsScript).catch(() => []);
+    let list = await read();
+    if (list.length) return list;
+    for (const sel of [
+      '[data-e2e="comment-icon"]',
+      '[data-e2e="feed-comment-icon"]',
+      '[data-e2e="video-comment"]',
+      '[data-e2e="detail-comment-icon"]',
+    ]) {
+      const btn = page.locator(sel).first();
+      if (!(await btn.count().catch(() => 0))) continue;
+      await btn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(700);
+      list = await read();
+      if (list.length) return list;
+    }
+    return [];
+  }
+
+  /** 附一张当前画面（抖音没字幕，她只能靠这个看见画面）。 */
+  async watchShot() {
+    const page = this.watchPage;
+    if (!page || page.isClosed()) return null;
+    const box = await page
+      .locator('[data-e2e="player-container"], video')
+      .first()
+      .boundingBox()
+      .catch(() => null);
+    const clip = box && box.width >= 120 && box.height >= 90 ? box : null;
+    const buf = await page.screenshot({ type: 'jpeg', quality: 58, ...(clip ? { clip } : {}) }).catch(() => null);
+    if (!buf) return null;
+    return { bytes: buf, mime: 'image/jpeg', name: '陪看画面', fallbackText: '（陪同观看的当前画面）' };
+  }
+
   async watchStop() {
     this.watchStartedAt = 0;
-    await this.close();
+    await this.closeWatch();
     return { ok: true };
   }
 
@@ -5138,6 +5384,7 @@ export class DouyinBrowser {
     if (this.closeTimer) clearTimeout(this.closeTimer);
     this.closeTimer = null;
     this.holdOpen = false;
+    await this.closeWatch().catch(() => {});
     await this.page?.close().catch(() => {});
     this.page = null;
     await this.dmPage?.close().catch(() => {});

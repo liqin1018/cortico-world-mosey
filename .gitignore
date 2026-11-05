@@ -10,3 +10,6 @@ Thumbs.db
 # 本地调试探针：只在开发机上跑，不进包也不进仓库
 .probe/
 scripts/probe-*.mjs
+
+# 本地临时文件（curl 样本、配置备份）
+.tmp/

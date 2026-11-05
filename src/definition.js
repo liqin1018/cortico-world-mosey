@@ -26,6 +26,27 @@ export const STROLL = {
         { value: 'off', label: zh ? '不提醒' : 'Off' },
       ];
     }
+    if (kind === 'stroll-watch-browser') {
+      return [
+        { value: 'auto', label: zh ? '自动（Chrome 优先）' : 'Auto (Chrome first)' },
+        { value: 'chrome', label: 'Chrome' },
+        { value: 'edge', label: 'Edge' },
+      ];
+    }
+    if (kind === 'stroll-watch-window') {
+      return [
+        { value: 'maximized', label: zh ? '最大化（推荐）' : 'Maximized' },
+        { value: 'fullscreen', label: zh ? '全屏（F11 退出）' : 'Fullscreen (F11 to exit)' },
+        { value: 'normal', label: zh ? '普通窗口 1280×800' : 'Window 1280×800' },
+      ];
+    }
+    if (kind === 'stroll-risk-guard') {
+      return [
+        { value: 'off', label: zh ? '不拦（推荐）' : 'Off (recommended)' },
+        { value: 'light', label: zh ? '只在验证码时停' : 'Only on captcha' },
+        { value: 'strict', label: zh ? '严格' : 'Strict' },
+      ];
+    }
     if (kind !== 'stroll-approval') return [];
     return [
       { value: 'confirm', label: zh ? '全部等我批准（推荐）' : 'Ask me first (recommended)' },

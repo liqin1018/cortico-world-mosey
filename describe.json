@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "stroll",
-      "description": "出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站/抖音链接都行，/note/ 图文也行）；comments 只读评论区（B站/抖音，链接自动判断；带图评论会附最多两张图）；inbox 看谁回了你（评论/@/私信都算；抖音私信带 recent 最近十几句，含分享的视频/图文链接，还有 pending/said 表示主人连着发了几句）；groups 看抖音会话列表（私信和群都在里面，会标出哪些是群、正在盯哪几个）；join_group 用群邀请链接进群（url 参数）；stickers 看本地表情包库（query 按名字/标签筛，没有就空），images 看能发的图（自己画的 + 别人发来存下的，发图前用它确认有哪些）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。",
+      "description": "出门看看（只读，默认后台，不弹网页）。action=status 查登录/额度；brief 一次拿全（推荐，省 token）；feed 刷候选；following 看关注的人在发什么（B站/抖音）；open 后台看指定视频/动态/专栏（B站/抖音链接都行，/note/ 图文也行；B站视频会带字幕和弹幕）；comments 只读评论区（B站/抖音，链接自动判断；带图评论会附最多两张图）；inbox 看谁回了你（评论/@/私信都算；抖音私信带 recent 最近十几句，含分享的视频/图文链接，还有 pending/said 表示主人连着发了几句）；groups 看抖音会话列表（私信和群都在里面，会标出哪些是群、正在盯哪几个）；join_group 用群邀请链接进群（url 参数）；stickers 看本地表情包库（query 按名字/标签筛，没有就空），images 看能发的图（自己画的 + 别人发来存下的，发图前用它确认有哪些）；search 搜 B站；weekly 看这周小结；books 看书库、read 读一段、note 记一句摘抄；watch 一起看（watch_action=start/stop/status，start 才开窗）；login 打开登录窗；history 看最近做过什么。先 brief，少反复 status。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -96,7 +96,7 @@
               "stop",
               "status"
             ],
-            "description": "watch 用：start 和主人一起看（会开一个窗口，主人可以在里面翻页）；stop 结束；status 看现在看到哪。"
+            "description": "watch 用：start 和主人一起看（会开一个窗口，主人可以在里面翻页；开了「抖音一起刷」时会自动切下一条）；stop 结束；status 看现在看到哪。"
           }
         },
         "required": [

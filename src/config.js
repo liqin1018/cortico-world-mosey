@@ -35,6 +35,26 @@ export const DEFAULTS = {
   maxGroups: 6,
   /** 最多常驻几个群监听页（每个占一个后台标签页） */
   groupTabs: 3,
+  /** 字幕/弹幕带多少：后台 open 与一起看分开，数字越大越详细、token 越高 */
+  subtitleOpen: 12,
+  danmakuOpen: 30,
+  subtitleWatch: 2,
+  danmakuWatch: 6,
+  watchWindowSec: 15,
+  watchTalk: true,
+  watchLines: 2,
+  openTalk: false,
+  /** 陪看浏览器：auto=Chrome 优先，也可强制 chrome/edge */
+  watchBrowser: 'auto',
+  watchWindow: 'maximized',
+  /** 抖音「一起刷」：自动切下一条；默认关，省 token 也少招风控 */
+  watchScroll: false,
+  /** 0 = 这条播完就切；>0 = 停留多少秒就切 */
+  watchScrollSec: 0,
+  /** 刷几条才说一次（1 = 每条都说） */
+  watchScrollEvery: 1,
+  /** 推送时附一张当前画面（约 500 token/张） */
+  watchShot: false,
 
   quietFrom: 23,
   quietTo: 8,
@@ -133,14 +153,14 @@ const BASIC = {
         type: 'string',
         title: '公开动作怎么放行',
         'x-options': 'stroll-approval',
-        description: '评论、关注、发动态、私信默认都要你点头；「按额度自动」会跳过确认。',
+        description: '评论/关注/发动态/私信默认等你点头；「按额度自动」跳过确认。',
         'x-hot': true,
         'x-warning': true,
       },
       [P + 'autoSessionsPerDay']: {
         type: 'integer',
         title: '每天自己出门',
-        description: '0 = 只在你叫的时候去；5 次像正常人刷手机，活跃但不是刷量。',
+        description: '0＝只在你叫的时候；5 次像正常人刷手机。',
         minimum: 0,
         maximum: 10,
         'x-suffix': ' 次/天',
@@ -149,12 +169,27 @@ const BASIC = {
       [P + 'autoGapMinutes']: {
         type: 'integer',
         title: '两次出门至少隔',
-        description: '太密容易撞平台风控。90 分钟 ≈ 一天能出去 5 次；想更勤就调到 60。',
+        description: '太密容易撞风控；90 分钟≈一天 5 次。',
         minimum: 30,
         maximum: 360,
         'x-suffix': ' 分钟',
         'x-hot': true,
       },
+    },
+  },
+};
+
+/**
+ * 主人：@ 谁、发私信给谁、书从哪读。
+ */
+const OWNER = {
+  id: 'world:stroll-owner',
+  owner: 'world:stroll',
+  schema: {
+    type: 'object',
+    title: '主人',
+    description: '她 @ 谁、给谁发私信、书从哪读。',
+    properties: {
       [P + 'ownerUid']: {
         type: 'string',
         title: '主人 B站 UID',
@@ -189,20 +224,16 @@ const QUOTA = {
   owner: 'world:stroll',
   schema: {
     type: 'object',
-    title: '额度与时段',
-    description: '硬额度：到了就停，不是建议值。默认按新号保护再打折。',
+    title: '每日额度',
+    description: '每天最多做多少；勾「必做」就从上限变成目标。',
     properties: {
+
       [P + 'dailyLikes']: {
         type: 'integer',
         title: '每天最多点赞',
         minimum: 0,
         maximum: 30,
         'x-suffix': ' 次',
-      },
-      [P + 'mustLike']: {
-        type: 'boolean',
-        title: '必做：点赞',
-        description: '勾上后，今天必须完成「每天最多点赞」的次数，没完成她会优先去补。',
       },
       [P + 'dailyComments']: {
         type: 'integer',
@@ -211,22 +242,12 @@ const QUOTA = {
         maximum: 20,
         'x-suffix': ' 条',
       },
-      [P + 'mustComment']: {
-        type: 'boolean',
-        title: '必做：评论',
-        description: '勾上后，今天必须完成「每天最多评论」的条数。审批不是 auto 时评论会进草稿，批准后才算完成。',
-      },
       [P + 'dailyFollows']: {
         type: 'integer',
         title: '每天最多关注',
         minimum: 0,
         maximum: 5,
         'x-suffix': ' 人',
-      },
-      [P + 'mustFollow']: {
-        type: 'boolean',
-        title: '必做：关注',
-        description: '勾上后，今天必须关注够「每天最多关注」的人数。',
       },
       [P + 'dailyPosts']: {
         type: 'integer',
@@ -235,11 +256,6 @@ const QUOTA = {
         maximum: 3,
         'x-suffix': ' 条',
       },
-      [P + 'mustPost']: {
-        type: 'boolean',
-        title: '必做：发动态',
-        description: '勾上后，今天必须发够「每天最多发动态」的条数。审批不是 auto 时会进草稿，批准后才算完成。',
-      },
       [P + 'dailySaves']: {
         type: 'integer',
         title: '每天最多稍后再看',
@@ -247,46 +263,27 @@ const QUOTA = {
         maximum: 10,
         'x-suffix': ' 条',
       },
-      [P + 'quietFrom']: {
-        type: 'integer',
-        title: '安静时段开始',
-        description: '这段时间不自己出门，也不主动说话。',
-        minimum: 0,
-        maximum: 23,
-        'x-suffix': ' 点',
+      [P + 'mustLike']: {
+        type: 'boolean',
+        title: '必做：点赞',
+        description: '勾上后，今天必须完成「每天最多点赞」的次数，没完成她会优先去补。',
       },
-      [P + 'quietTo']: {
-        type: 'integer',
-        title: '安静时段结束',
-        minimum: 0,
-        maximum: 23,
-        'x-suffix': ' 点',
+      [P + 'mustComment']: {
+        type: 'boolean',
+        title: '必做：评论',
+        description: '勾上后，今天必须完成「每天最多评论」的条数。审批不是 auto 时评论会进草稿，批准后才算完成。',
       },
-      [P + 'minGapSeconds']: {
-        type: 'integer',
-        title: '她自己多久能动一次',
-        description: '只约束她自己出门逛的时候；你在对话里让她做的事只防连点，不受这个限制。',
-        minimum: 10,
-        maximum: 600,
-        'x-suffix': ' 秒',
-        'x-hot': true,
+      [P + 'mustFollow']: {
+        type: 'boolean',
+        title: '必做：关注',
+        description: '勾上后，今天必须关注够「每天最多关注」的人数。',
       },
-      [P + 'sessionMaxItems']: {
-        type: 'integer',
-        title: '每次出门最多看几条',
-        description: '看完就回来汇报，不无限刷。',
-        minimum: 3,
-        maximum: 12,
-        'x-suffix': ' 条',
+      [P + 'mustPost']: {
+        type: 'boolean',
+        title: '必做：发动态',
+        description: '勾上后，今天必须发够「每天最多发动态」的条数。审批不是 auto 时会进草稿，批准后才算完成。',
       },
-      [P + 'commentMaxChars']: {
-        type: 'integer',
-        title: '评论最多几个字',
-        description: '短一点更像人；20–300。',
-        minimum: 20,
-        maximum: 300,
-        'x-suffix': ' 字',
-      },
+
     },
   },
 };
@@ -297,7 +294,7 @@ const INTERACT = {
   owner: 'world:stroll',
   schema: {
     type: 'object',
-    title: '互动与身份',
+    title: '公开动作',
     description: '关掉的动作用不了；额度仍然生效。',
     properties: {
       [P + 'allowFollow']: {
@@ -335,9 +332,58 @@ const ADVANCED = {
   owner: 'world:stroll',
   schema: {
     type: 'object',
-    title: '高级',
-    description: '一般不用改。改错最多是多花点 token 或多等一会儿。',
+    title: '高级与节奏',
+    description: '一般不用改。改错最多多花点 token 或多等一会儿。',
     properties: {
+
+      [P + 'tokenDailyBudget']: {
+        type: 'integer',
+        title: '每天模型预算',
+        description: '只限制主动出门的频率，不拦你找她。',
+        minimum: 1000,
+        maximum: 50000,
+        'x-suffix': ' token',
+      },
+      [P + 'quietFrom']: {
+        type: 'integer',
+        title: '安静时段开始',
+        description: '这段时间不自己出门，也不主动说话。',
+        minimum: 0,
+        maximum: 23,
+        'x-suffix': ' 点',
+      },
+      [P + 'quietTo']: {
+        type: 'integer',
+        title: '安静时段结束',
+        minimum: 0,
+        maximum: 23,
+        'x-suffix': ' 点',
+      },
+      [P + 'minGapSeconds']: {
+        type: 'integer',
+        title: '她自己多久能动一次',
+        description: '只约束她自己出门逛的时候；你在对话里让她做的事只防连点，不受这个限制。',
+        minimum: 10,
+        maximum: 600,
+        'x-suffix': ' 秒',
+        'x-hot': true,
+      },
+      [P + 'sessionMaxItems']: {
+        type: 'integer',
+        title: '每次出门最多看几条',
+        description: '看完就回来，不无限刷。',
+        minimum: 3,
+        maximum: 12,
+        'x-suffix': ' 条',
+      },
+      [P + 'commentMaxChars']: {
+        type: 'integer',
+        title: '评论最多几个字',
+        description: '20-300，短一点更像人。',
+        minimum: 20,
+        maximum: 300,
+        'x-suffix': ' 字',
+      },
       [P + 'interests']: {
         type: 'string',
         title: '兴趣词',
@@ -349,53 +395,6 @@ const ADVANCED = {
         title: '不想看的内容',
         description: '逗号分隔，命中就不进候选。',
       },
-      [P + 'tokenDailyBudget']: {
-        type: 'integer',
-        title: '每天模型预算',
-        description: '只限制主动出门的频率，不拦你主动找她。',
-        minimum: 1000,
-        maximum: 50000,
-        'x-suffix': ' token',
-      },
-      [P + 'framesPerOpen']: {
-        type: 'integer',
-        title: '看视频抽几帧',
-        description: '0 最省 token；1 帧约 500 token。',
-        minimum: 0,
-        maximum: 3,
-        'x-suffix': ' 帧',
-      },
-      [P + 'keepWindowSeconds']: {
-        type: 'integer',
-        title: '打开后窗口留多久',
-        description: '只对开窗模式有效；后台模式不弹窗。',
-        minimum: 0,
-        maximum: 600,
-        'x-suffix': ' 秒',
-      },
-      [P + 'watchPollSec']: {
-        type: 'integer',
-        title: '一起看：多久读一次',
-        description: '读标题、进度和评论区；不截图，不花 token。',
-        minimum: 5,
-        maximum: 120,
-        'x-suffix': ' 秒',
-      },
-      [P + 'watchSpeakSec']: {
-        type: 'integer',
-        title: '一起看：多久说一句',
-        description: '太短会吵。',
-        minimum: 20,
-        maximum: 600,
-        'x-suffix': ' 秒',
-      },
-      [P + 'watchNotify']: {
-        type: 'string',
-        title: '她开始看时提醒我',
-        'x-options': 'stroll-notify',
-        description: '面板上永远有「正在看」浮条；选「对话里也说一句」会多花一点 token。',
-        'x-hot': true,
-      },
       [P + 'newAccountRamp']: {
         type: 'boolean',
         title: '新号保护',
@@ -404,10 +403,8 @@ const ADVANCED = {
       [P + 'riskGuard']: {
         type: 'string',
         title: '风控拦截力度',
-        description: 'off＝只记一笔、不拦任何动作（推荐，限流本来几十分钟就自己好）；light＝只有要验证码时停 30 分钟；strict＝旧的长时间冷却。',
-        enum: ['off', 'light', 'strict'],
-        'x-options': ['off', 'light', 'strict'],
-        'x-labels': { off: '不拦（推荐）', light: '只在验证码时停', strict: '严格' },
+        description: 'off 只记不拦（推荐）；light 验证码时停 30 分钟；strict 长冷却。',
+        'x-options': 'stroll-risk-guard',
       },
       [P + 'riskPauseHours']: {
         type: 'integer',
@@ -417,18 +414,201 @@ const ADVANCED = {
         maximum: 168,
         'x-suffix': ' 小时',
       },
+
     },
   },
 };
 
 /** 私信：主人发来就接住，不用等她下次出门。 */
+const VIEWING = {
+  id: 'world:stroll-viewing',
+  owner: 'world:stroll',
+  schema: {
+    type: 'object',
+    title: '看视频',
+    description: 'B站视频的字幕和弹幕带多少条。数字越大越详细，token 和延迟也越高；填 0 就是不看不带。',
+    properties: {
+      [P + 'subtitleOpen']: {
+        type: 'integer',
+        title: '后台看：带几句字幕',
+        description: 'stroll action=open 时返回的字幕句数。没有 CC 字幕的视频这里设多少都是空。',
+        minimum: 0,
+        maximum: 60,
+        'x-suffix': ' 句',
+      },
+      [P + 'danmakuOpen']: {
+        type: 'integer',
+        title: '后台看：带几条弹幕',
+        description: '按时间均匀抽样后返回的弹幕条数。',
+        minimum: 0,
+        maximum: 60,
+        'x-suffix': ' 条',
+      },
+      [P + 'framesPerOpen']: {
+        type: 'integer',
+        title: '看视频抽几帧',
+        description: '0 最省；1 帧约 500 token。',
+        minimum: 0,
+        maximum: 3,
+        'x-suffix': ' 帧',
+      },
+      [P + 'keepWindowSeconds']: {
+        type: 'integer',
+        title: '打开后窗口留多久',
+        description: '只对开窗模式有效。',
+        minimum: 0,
+        maximum: 600,
+        'x-suffix': ' 秒',
+      },
+
+    },
+  },
+};
+
+/**
+ * 一起看：多久说一次、说几句、带多少字幕弹幕。
+ */
+const WATCH = {
+  id: 'world:stroll-watch',
+  owner: 'world:stroll',
+  schema: {
+    type: 'object',
+    title: '一起看',
+    description: '一起看时多久说一次、说几句、带多少字幕弹幕。',
+    properties: {
+
+      [P + 'watchTalk']: {
+        type: 'boolean',
+        title: '一起看时主动说几句',
+        description: '开着时，播报会提醒她说 1-2 句观后感，不是只报进度。',
+        'x-hot': true,
+      },
+      [P + 'watchLines']: {
+        type: 'integer',
+        title: '一次说几句',
+        description: '配合上一条，控制每次说多少。',
+        minimum: 1,
+        maximum: 3,
+        'x-suffix': ' 句',
+      },
+      [P + 'watchSpeakSec']: {
+        type: 'integer',
+        title: '一起看：多久说一句',
+        description: '太短会吵。',
+        minimum: 20,
+        maximum: 600,
+        'x-suffix': ' 秒',
+      },
+      [P + 'subtitleWatch']: {
+        type: 'integer',
+        title: '一起看：带几句字幕',
+        description: '按当前播放进度取的字幕句数（通常 1-2 句就够）。',
+        minimum: 0,
+        maximum: 5,
+        'x-suffix': ' 句',
+      },
+      [P + 'danmakuWatch']: {
+        type: 'integer',
+        title: '一起看：带几条弹幕',
+        description: '当前进度前后窗口内取几条弹幕。',
+        minimum: 0,
+        maximum: 20,
+        'x-suffix': ' 条',
+      },
+      [P + 'watchWindowSec']: {
+        type: 'integer',
+        title: '一起看：弹幕窗口多大',
+        description: '以当前播放秒数为中心，前后各取多少秒的弹幕。',
+        minimum: 5,
+        maximum: 120,
+        'x-suffix': ' 秒',
+      },
+      [P + 'watchPollSec']: {
+        type: 'integer',
+        title: '一起看：多久读一次',
+        description: '读标题/进度/评论，不花 token。',
+        minimum: 5,
+        maximum: 120,
+        'x-suffix': ' 秒',
+      },
+      [P + 'watchNotify']: {
+        type: 'string',
+        title: '她开始看时提醒我',
+        'x-options': 'stroll-notify',
+        description: '面板上永远有「正在看」浮条；选「对话里也说一句」会多花一点 token。',
+        'x-hot': true,
+      },
+      [P + 'openTalk']: {
+        type: 'boolean',
+        title: '后台看完也说一句',
+        description: '看完视频后主动跟主人说一句，会多花一点 token。',
+      },
+      [P + 'watchWindow']: {
+        type: 'string',
+        title: '陪看窗口多大',
+        description: '最大化够用；全屏会隐藏标题栏，按 F11 退出。',
+        'x-options': 'stroll-watch-window',
+      },
+      [P + 'watchBrowser']: {
+        type: 'string',
+        title: '陪看用哪个浏览器',
+        description: '默认 Chrome 优先；没装会自动退回 Edge/自带 Chromium。',
+        'x-options': 'stroll-watch-browser',
+      },
+
+    },
+  },
+};
+
+/**
+ * 抖音一起刷：只在「一起看」抖音时生效，和 B站 无关。
+ */
+const SHORTS = {
+  id: 'world:stroll-shorts',
+  owner: 'world:stroll',
+  schema: {
+    type: 'object',
+    title: '抖音一起刷',
+    description: '陪主人刷抖音：多久切一条、隔几条说一句、要不要附画面。',
+    properties: {
+      [P + 'watchScroll']: {
+        type: 'boolean',
+        title: '抖音一起刷',
+        description: '开着时，陪看窗口会自动切到下一条抖音视频（只对抖音生效，B站不受影响）。',
+        'x-hot': true,
+      },
+      [P + 'watchScrollSec']: {
+        type: 'integer',
+        title: '一起刷：多久切一条',
+        description: '0 = 这条播完就切；填 30 就是每条停 30 秒。',
+        minimum: 0,
+        maximum: 180,
+        'x-suffix': ' 秒',
+      },
+      [P + 'watchScrollEvery']: {
+        type: 'integer',
+        title: '一起刷：隔几条说一句',
+        description: '1 = 每条都说话；3 = 刷三条才说一次，省 token。',
+        minimum: 1,
+        maximum: 10,
+        'x-suffix': ' 条',
+      },
+      [P + 'watchShot']: {
+        type: 'boolean',
+        title: '一起刷：附一张画面',
+        description: '抖音没字幕，附截图她才看得见画面。每张约 500 token，默认关。',
+      },
+    },
+  },
+};
+
 const MESSAGES = {
   id: 'world:stroll-messages',
   owner: 'world:stroll',
   schema: {
     type: 'object',
-    title: '私信',
-    description: '你给她发私信，她能不能马上回。抖音要常驻一个后台页面。',
+    title: '私信与群',
+    description: '抖音私信和群消息，主人一发就接住。',
     properties: {
       [P + 'dmWatch']: {
         type: 'boolean',
@@ -462,7 +642,7 @@ const MESSAGES = {
       [P + 'maxGroups']: {
         type: 'integer',
         title: '最多认几个群',
-        description: '名单里最多保留几个群。这个数决定「能不能给第 N 个群发消息」，不决定常驻标签页数量。',
+        description: '名单最多保留几个群；决定「能不能给第 N 个群发消息」。',
         minimum: 1,
         maximum: 10,
         'x-suffix': ' 个',
@@ -482,7 +662,7 @@ const MESSAGES = {
   },
 };
 
-export const CONFIG_GROUPS = [BASIC, QUOTA, MESSAGES, INTERACT, ADVANCED];
+export const CONFIG_GROUPS = [BASIC, OWNER, QUOTA, VIEWING, WATCH, SHORTS, MESSAGES, INTERACT, ADVANCED];
 
 /** 旧引用兼容：第一组即基础组。 */
 export const CONFIG_GROUP = BASIC;
@@ -510,6 +690,20 @@ export const POLICY_FIELDS = {
   mustPost: { type: 'boolean' },
   maxGroups: { type: 'int', min: 1, max: 10 },
   groupTabs: { type: 'int', min: 1, max: 8 },
+  subtitleOpen: { type: 'int', min: 0, max: 60 },
+  danmakuOpen: { type: 'int', min: 0, max: 60 },
+  subtitleWatch: { type: 'int', min: 0, max: 5 },
+  danmakuWatch: { type: 'int', min: 0, max: 20 },
+  watchWindowSec: { type: 'int', min: 5, max: 120 },
+  watchTalk: { type: 'boolean' },
+  watchLines: { type: 'int', min: 1, max: 3 },
+  openTalk: { type: 'boolean' },
+  watchBrowser: { type: 'enum', values: ['auto', 'chrome', 'edge'] },
+  watchWindow: { type: 'enum', values: ['maximized', 'fullscreen', 'normal'] },
+  watchScroll: { type: 'boolean' },
+  watchScrollSec: { type: 'int', min: 0, max: 180 },
+  watchScrollEvery: { type: 'int', min: 1, max: 10 },
+  watchShot: { type: 'boolean' },
   quietFrom: { type: 'int', min: 0, max: 23 },
   quietTo: { type: 'int', min: 0, max: 23 },
   minGapSeconds: { type: 'int', min: 10, max: 600 },

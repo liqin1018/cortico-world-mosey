@@ -1,5 +1,13 @@
 # 更新日志
 
+## 1.14.2
+
+没有代码改动，把简介里的 QQ 交流群补回来，并加一道检查防止再丢。
+
+- 1.13 / 1.14 那次重写简介时，`package.json` 里的群号尾巴被整段覆盖了，**1.14.1 发出去的中英简介和卡片简介都没有群号**（1.12.1 还是好的）。
+- 现在三处补回独立段落「QQ 交流群：745879632」。
+- `npm run release:check` 新增一项：`description` / `locales.zh` / `locales.en` 任意一处缺群号就报错，发布前能直接拦住，不用等发完才发现。
+
 ## 1.14.1
 
 - **修**：`brief` 里把 `mustDo` 补上了（之前只加在 `compactStatus` 里，而 `brief` 会把 status 裁成精简版，她出门时看不到必做清单）。现在 `brief.status.mustDo` 和 `status.mustDo` 都有 `{action,label,need,done,left}`。

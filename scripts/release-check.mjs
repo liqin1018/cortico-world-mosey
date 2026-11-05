@@ -42,6 +42,26 @@ if (typeof describe !== 'string') add('bad', 'package.json 缺 cortico.describe'
 else if (!existsSync(path.join(root, describe))) add('bad', `cortico.describe 指向的 ${describe} 不存在`, '跑 npm run describe 生成');
 else add('ok', `describe.json 存在（${describe}）`);
 
+/* 3.5 简介里的 QQ 群：改简介时最容易整段覆盖掉，三处都要在 */
+const CONTACT_ZH = 'QQ 交流群：745879632';
+const CONTACT_EN = 'QQ group: 745879632';
+const hasContact = (v) => typeof v === 'string' && v.includes('745879632');
+const contactSurfaces = [
+  ['description', pkg.description],
+  ['cortico.locales.zh.description', pkg.cortico?.locales?.zh?.description],
+  ['cortico.locales.en.description', pkg.cortico?.locales?.en?.description],
+];
+const contactMissing = contactSurfaces.filter(([, v]) => !hasContact(v)).map(([k]) => k);
+add(
+  contactMissing.length ? 'bad' : 'ok',
+  contactMissing.length
+    ? `简介里缺 QQ 交流群：${contactMissing.join('、')}`
+    : '简介三处都带 QQ 交流群 745879632',
+  contactMissing.length
+    ? `补一句「${CONTACT_ZH}」单独成段；英文版用「${CONTACT_EN}」`
+    : '',
+);
+
 /* 4. 工作区要干净，否则推上去的和发出去的可能不是同一份 */
 try {
   const dirty = execSync('git status --porcelain', { cwd: root, encoding: 'utf8' }).trim();

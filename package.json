@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-mosey",
-  "version": "1.14.1",
+  "version": "1.14.2",
   "type": "module",
-  "description": "摸鱼（Mosey）：让 Coopanion 的桌宠自己去抖音和 B站逛一圈。评论和私信都能收能回；关注流、周报、本地书库；按额度点赞、评论、关注、发动态。默认人审，三把工具、少 token。",
+  "description": "摸鱼（Mosey）：让 Coopanion 的桌宠自己去抖音和 B站逛一圈。评论和私信都能收能回；关注流、周报、本地书库；按额度点赞、评论、关注、发动态。默认人审，三把工具、少 token。\n\nQQ 交流群：745879632",
   "license": "MIT",
   "keywords": [
     "cortico-world",
@@ -56,11 +56,11 @@
     "locales": {
       "zh": {
         "displayName": "摸鱼",
-        "description": "让她自己去抖音/B站逛：刷候选、看关注流、看视频/动态/专栏、点赞、评论、回复楼中楼；私信收发两边都通，面板上直接回。还带周报和本地书库。公开动作有硬额度，默认先出草稿等你批准。"
+        "description": "让她自己去抖音/B站逛：刷候选、看关注流、看视频/动态/专栏、点赞、评论、回复楼中楼；私信收发两边都通，面板上直接回。还带周报和本地书库。公开动作有硬额度，默认先出草稿等你批准。\n\nQQ 交流群：745879632"
       },
       "en": {
         "displayName": "Mosey",
-        "description": "Let her browse Douyin and Bilibili: feeds, following updates, videos, dynamics, articles. Comments and DMs work both ways, reply right from the panel. Plus weekly recap and a local book library. Hard caps and owner approval by default."
+        "description": "Let her browse Douyin and Bilibili: feeds, following updates, videos, dynamics, articles. Comments and DMs work both ways, reply right from the panel. Plus weekly recap and a local book library. Hard caps and owner approval by default.\n\nQQ group: 745879632"
       }
     }
   },

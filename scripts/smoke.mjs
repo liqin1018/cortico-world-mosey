@@ -178,8 +178,12 @@ check('留空回到默认书库', world.bookDir() === path.join(tmp, 'stroll', '
 cfg.booksDir = '';
 
 // 群聊：只认设置里点过名的群，别的会话一律不许发
-cfg.douyinGroups = ' 摸鱼群 , 夜聊群 , 第三个不认 ';
-check('群名最多认两个且去掉空格', JSON.stringify(world.groupNames()) === JSON.stringify(['摸鱼群', '夜聊群']));
+cfg.douyinGroups = ' 摸鱼群 , 夜聊群 , 第三个也认 ';
+check('群名按逗号切分并去掉空格', JSON.stringify(world.groupNames()) === JSON.stringify(['摸鱼群', '夜聊群', '第三个也认']));
+const capBefore = cfg.maxGroups;
+cfg.maxGroups = 2;
+check('「最多认几个群」会截断名单', JSON.stringify(world.groupNames()) === JSON.stringify(['摸鱼群', '夜聊群']));
+cfg.maxGroups = capBefore;
 const groupPlan = await world.buildPlan('dm', { platform: 'douyin', target: '摸鱼群', text: '在的' });
 check('可以发到点过名的群', groupPlan.ok === true && groupPlan.group === true && groupPlan.target === '摸鱼群');
 const strangerPlan = await world.buildPlan('dm', { platform: 'douyin', target: '路人甲', text: '在的' });

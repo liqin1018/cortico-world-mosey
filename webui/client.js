@@ -1615,7 +1615,8 @@ export default {
 
         function strangerCard(item) {
           const card = el('div', undefined, 'stroll-stranger');
-          const iconBox = el('私', 'stroll-draft-icon');
+          // el(tag, 文字, 类名)——以前把类名写进了第二个参数，面板上就直接显示「stroll-draft-icon」
+          const iconBox = el('span', item.platform === 'bilibili' ? 'B' : '抖', 'stroll-draft-icon');
           iconBox.style.setProperty('--tone', '#fe2c55');
           const body = el('div', undefined, 'stroll-draft-body');
           const head = el('p');

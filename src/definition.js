@@ -40,6 +40,12 @@ export const STROLL = {
         { value: 'normal', label: zh ? '普通窗口 1280×800' : 'Window 1280×800' },
       ];
     }
+    if (kind === 'stroll-douyin-follow') {
+      return [
+        { value: 'browser', label: zh ? '让她在网页里点（默认）' : 'Click in browser (default)' },
+        { value: 'off', label: zh ? '关（你在手机上关注）' : 'Off (follow on phone)' },
+      ];
+    }
     if (kind === 'stroll-risk-guard') {
       return [
         { value: 'off', label: zh ? '不拦（推荐）' : 'Off (recommended)' },

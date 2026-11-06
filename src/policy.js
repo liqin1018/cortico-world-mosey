@@ -1,12 +1,17 @@
 import { clamp, dayKey, hourOf, weekKey } from './util.js';
 
+/**
+ * 日额度直接读配置；周额度 = 日额度 × 7（不再另设一个写死的周上限）。
+ * 以前 follow 的 weeklyMax 是 12——即使主人把日额度调到 5，一周也只能关注 12 个，
+ * 测试时很容易就撞墙，而且配置页上完全看不到这个数。
+ */
 const ACTION_CAPS = {
-  like: { daily: 'dailyLikes', weeklyFactor: 4, weeklyMax: 120, label: '赞' },
-  comment: { daily: 'dailyComments', weeklyFactor: 4, weeklyMax: 40, label: '评' },
-  follow: { daily: 'dailyFollows', weeklyFactor: 3, weeklyMax: 12, label: '关' },
-  post: { daily: 'dailyPosts', weeklyFactor: 3, weeklyMax: 6, label: '发' },
-  dm: { daily: 'dailyDms', weeklyFactor: 4, weeklyMax: 12, label: '私' },
-  save: { daily: 'dailySaves', weeklyFactor: 4, weeklyMax: 40, label: '存' },
+  like: { daily: 'dailyLikes', weeklyFactor: 7, label: '赞' },
+  comment: { daily: 'dailyComments', weeklyFactor: 7, label: '评' },
+  follow: { daily: 'dailyFollows', weeklyFactor: 7, label: '关' },
+  post: { daily: 'dailyPosts', weeklyFactor: 7, label: '发' },
+  dm: { daily: 'dailyDms', weeklyFactor: 7, label: '私' },
+  save: { daily: 'dailySaves', weeklyFactor: 7, label: '存' },
 };
 
 export class Policy {
@@ -34,7 +39,7 @@ export class Policy {
     const raw = Number(this.cfg[meta.daily] ?? 0);
     const factor = this.rampFactor();
     const daily = raw > 0 ? Math.max(1, Math.floor(raw * factor)) : 0;
-    const weekly = raw > 0 ? Math.min(meta.weeklyMax, Math.max(daily, Math.floor(raw * meta.weeklyFactor * factor))) : 0;
+    const weekly = raw > 0 ? Math.max(daily, Math.floor(raw * meta.weeklyFactor * factor)) : 0;
     return { daily, weekly };
   }
 
@@ -81,7 +86,7 @@ export class Policy {
   }
 
   /** 公开动作总闸。userInitiated 是你亲手点的：只做防连点，不再按节奏拦。 */
-  check(action, platform, target, { userInitiated = false, quotaAction = action, dedupeKey = '', free = false } = {}) {
+  check(action, platform, target, { userInitiated = false, quotaAction = action, dedupeKey = '', free = false, skipQuota = false } = {}) {
     if (!this.cfg.enabled) return { ok: false, code: 'DISABLED', message: '摸鱼已停用。' };
     if (platform === 'bilibili' && !this.cfg.bilibili) return { ok: false, code: 'PLATFORM_OFF', message: 'B站这边关着。' };
     if (platform === 'douyin' && !this.cfg.douyin) return { ok: false, code: 'PLATFORM_OFF', message: '抖音这边关着。' };
@@ -102,7 +107,8 @@ export class Policy {
     if (!meta) return { ok: false, code: 'UNKNOWN_ACTION', message: '不认识这个动作。' };
 
     // free：只发给主人的私信不限额，也不做去重（不然一天只能发一条）
-    if (!free) {
+    // skipQuota：取消关注/取消赞这种「撤销」，不该被额度卡住（额度用完了还不让撤回，很荒谬）
+    if (!free && !skipQuota) {
       const left = this.remaining(quotaAction);
       if (left.daily <= 0) return { ok: false, code: 'DAILY_CAP', message: `今天的「${meta.label}」额度用完了（${left.dailyCap}）。` };
       if (left.weekly <= 0) return { ok: false, code: 'WEEKLY_CAP', message: `这周的「${meta.label}」额度用完了（${left.weeklyCap}）。` };

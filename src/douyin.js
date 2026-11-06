@@ -1952,28 +1952,322 @@ export class DouyinBrowser {
     });
   }
 
+  /** 读自己主页的关注数（带 _t 破缓存）。拿不到返回 null。 */
+  async followingCount(page) {
+    if (!page || page.isClosed()) return null;
+    const n = await page
+      .evaluate(async () => {
+        try {
+          const r = await fetch(
+            '/aweme/v1/web/user/profile/self/?device_platform=webapp&aid=6383&channel=channel_pc_web&_t=' + Date.now(),
+            { credentials: 'include' },
+          );
+          const t = await r.json();
+          const v = Number(t?.user?.following_count);
+          return Number.isFinite(v) ? v : null;
+        } catch {
+          return null;
+        }
+      })
+      .catch(() => null);
+    return typeof n === 'number' ? n : null;
+  }
+
+  /** 从视频页读出作者主页的 sec_uid（拿不到就返回空，退回视频页按钮）。 */
+  async videoAuthorUid(page) {
+    const href = await page
+      .evaluate(() => {
+        const visible = (x) => {
+          const r = x.getBoundingClientRect();
+          return r.width > 0 && r.height > 0 && r.top >= 0 && r.top < innerHeight * 0.65;
+        };
+        const hit = Array.from(document.querySelectorAll('a[href*="/user/MS4w"]')).find(visible);
+        return hit ? hit.href : '';
+      })
+      .catch(() => '');
+    return secUidOf(String(href ?? ''));
+  }
+
+  /** 点击后的小停顿。抽成方法是为了测试能设成 0，不用真等 4 秒。 */
+  async pause(a, b) {
+    await humanPause(a, b);
+  }
+
+  /** 关注失败时存一份现场：按钮、弹窗、页面文字。下次一眼看出是被登录框挡了还是按钮找错了。 */
+  async dumpFollowDebug(page, extra = {}) {
+    try {
+      const data = await page
+        .evaluate(() => {
+          const cut = (s, n = 1200) => String(s ?? '').slice(0, n);
+          const rect = (n) => {
+            const r = n.getBoundingClientRect();
+            return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+          };
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"], [data-e2e]'))
+            .filter((b) => /关注|已关注|互相关注/.test(b.innerText || ''))
+            .slice(0, 12)
+            .map((b) => ({
+              text: cut((b.innerText || '').trim(), 40),
+              e2e: b.getAttribute('data-e2e') || '',
+              cls: cut(b.className, 120),
+              ...rect(b),
+              html: cut(b.outerHTML, 800),
+            }));
+          const popups = [];
+          const all = document.querySelectorAll('body *');
+          for (let i = 0; i < all.length && i < 6000 && popups.length < 10; i += 1) {
+            const n = all[i];
+            const st = getComputedStyle(n);
+            if (!/^(fixed|absolute)$/.test(st.position)) continue;
+            const r = n.getBoundingClientRect();
+            if (r.width < 200 || r.height < 120) continue;
+            const cls = String(n.className || '');
+            const txt = (n.innerText || '').replace(/\s+/g, ' ').slice(0, 120);
+            if (!/login|captcha|verify|验证|登录|安全/.test(cls + txt)) continue;
+            popups.push({ tag: n.tagName, cls: cut(cls, 140), ...rect(n), text: cut(txt, 120) });
+          }
+          return {
+            url: location.href,
+            title: document.title,
+            bodyText: cut((document.body.innerText || '').replace(/\s+/g, ' '), 1500),
+            buttons,
+            popups,
+          };
+        })
+        .catch(() => null);
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const file = path.join(this.dataDir, 'stroll', 'debug', `follow-${stamp}.json`);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), ...extra, ...data }, null, 1));
+      this.lastDebugDump = file;
+      this.log?.warn?.(`关注没成功，界面结构已存到 ${file}`);
+      return file;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 找页面顶部那个「关注/已关注」按钮。
+   * 抖音主页的推荐位、右侧列表里也有同名按钮，`first()` 很容易点到别人——
+   * 所以只接受 y 在上半屏的，并且优先抖音自己的 data-e2e。
+   */
+  async pickFollowButton(page) {
+    const limit = await page.evaluate(() => window.innerHeight).catch(() => 900);
+    const maxY = Math.max(320, Math.min(560, Math.round(Number(limit || 900) * 0.45)));
+    for (const sel of ['[data-e2e="user-info-follow-btn"]', '[data-e2e="user-follow-btn"]', 'button']) {
+      const loc = page.locator(sel);
+      const n = Math.min(16, await loc.count().catch(() => 0));
+      let best = null;
+      for (let i = 0; i < n; i += 1) {
+        const el = loc.nth(i);
+        const text = (await el.innerText().catch(() => '')).trim();
+        if (!/^(关注|已关注|互相关注)$/.test(text)) continue;
+        const box = await el.boundingBox().catch(() => null);
+        if (!box || box.width < 24 || box.y < 0 || box.y > maxY) continue;
+        if (!best || box.y < best.y) best = { el, y: box.y, text };
+      }
+      if (best) return best;
+    }
+    return null;
+  }
+
+  /**
+   * 关注/取关一个人。三种入口都认：主页链接、sec_uid、视频链接。
+   * 以前只认视频 ID——主人在对方主页上点「关注」，反而被要求「给个视频」，很不合理。
+   */
   async follow(idOrUrl, on = true) {
     return this.serialize(async () => {
-      const id = await this.idOf(idOrUrl);
-      if (!id) throw new DouyinError('BAD_ID', '不是有效的抖音视频');
+      const raw = String(idOrUrl ?? '').trim();
       const page = await this.getPage();
       if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，关注不了');
-      await this.ensureVideo(page, id);
-      const buttons = page.getByRole('button', { name: /^(关注|已关注)$/ });
-      const count = await buttons.count();
-      if (!count) throw new DouyinError('NO_FOLLOW', '页面上没找到关注按钮');
-      const button = buttons.first();
-      const text = (await button.innerText().catch(() => '')).trim();
-      const following = text === '已关注';
-      if (following === on) return { ok: true, already: true, following: on };
-      await button.click({ timeout: 6000 });
-      await humanPause(1500, 2600);
-      const after = (await button.innerText().catch(() => '')).trim();
-      if ((after === '已关注') !== on) {
-        throw new DouyinError('NOT_CONFIRMED', '点了关注，但按钮没变成「已关注」；可能弹了登录/验证');
+
+      const secUid = secUidOf(raw);
+      let target = secUid;
+      let where = 'profile';
+      if (secUid) {
+        await this.goto(page, `${ORIGIN}/user/${secUid}`, 2400);
+        // 主页的按钮比视频页晚一拍，多等一会儿再找
+        await page.waitForTimeout(700);
+        // 没真的打开这个主页就别点：页面上照样有别人的关注按钮
+        if (!page.url().includes(`/user/${secUid}`)) {
+          throw new DouyinError('BAD_TARGET', `打不开这个抖音主页（${secUid}），可能账号不存在或链接过期`);
+        }
+      } else {
+        const id = await this.idOf(raw);
+        if (!id) throw new DouyinError('BAD_ID', '抖音关注：给主页链接、sec_uid 或视频链接都行');
+        target = id;
+        where = 'video';
+        await this.ensureVideo(page, id);
+        /**
+         * 视频不存在时抖音会跳到推荐流，页面上照样有关注按钮——以前点了就算成功，
+         * 结果「面板显示关注成功、实际谁也没关注上」。所以必须核对 URL 还在这条视频上。
+         */
+        if (!page.url().includes(`/video/${id}`) && !page.url().includes(`/note/${id}`)) {
+          throw new DouyinError(
+            'BAD_ID',
+            `抖音上打不开 ${id}：这串可能是用户 ID，不是视频。给主页链接（/user/MS4w…）更稳`,
+          );
+        }
+        /**
+         * 视频页的「关注」常被播放器/浮层压住，点了没反应。
+         * 能从这条视频里读出作者主页，就跳过去用主页的按钮点——命中率明显更高。
+         */
+        const authorUid = await this.videoAuthorUid(page);
+        if (authorUid) {
+          await this.goto(page, `${ORIGIN}/user/${authorUid}`, 2200);
+          await page.waitForTimeout(700);
+          if (page.url().includes(`/user/${authorUid}`)) {
+            where = 'profile';
+            target = authorUid;
+          }
+        }
       }
-      this.lastAction = `${on ? 'follow' : 'unfollow'} ${id}`;
-      return { ok: true, following: on, confirmed: true };
+
+      const isFollowing = (t) => /已关注|互相关注/.test(String(t ?? ''));
+
+      /**
+       * 抖音的关注是「乐观更新」：点下去前端立刻把按钮改成「已关注」，
+       * 请求被拒（风控 / 要验证 / 权重低）也不回滚，只有刷新才看得见真相。
+       * 所以只信两样：关注接口的 status_code，和刷新页面后的按钮状态。
+       */
+      const verify = async (api) => {
+        const code = api?.body ? Number(api.body.status_code ?? api.body.code) : NaN;
+        if (api?.seen && Number.isFinite(code)) {
+          return { ok: code === 0, why: 'api', apiCode: code, apiMsg: String(api.body?.status_msg ?? '') };
+        }
+        // 没抓到接口回执（接口改名/走别的域名）：刷新一次，破掉假状态
+        if (where !== 'profile' || !page.url().includes(`/user/${target}`)) {
+          return { ok: null, why: 'none' };
+        }
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
+        await page.waitForTimeout(900);
+        if (!page.url().includes(`/user/${target}`)) {
+          return { ok: null, why: 'navigated', afterReload: page.url() };
+        }
+        const again = await this.pickFollowButton(page);
+        const t = (again?.text ?? '').trim();
+        return { ok: isFollowing(t) === on, why: 'reload', afterReload: t };
+      };
+
+      // 只认页面顶部的那个：主页的推荐位、侧栏也有「关注」，取第一个容易点到别人
+      const hit = await this.pickFollowButton(page);
+      if (!hit) {
+        throw new DouyinError(
+          'NO_FOLLOW',
+          where === 'profile' ? '主页上没找到关注按钮（可能要登录/验证）' : '页面上没找到关注按钮',
+        );
+      }
+      const button = hit.el;
+      const text = hit.text;
+
+      // 页面显示「已关注」也可能是上次乐观更新留下的脏状态：刷新确认一次再下结论
+      if (isFollowing(text) === on) {
+        const v0 = await verify(null);
+        if (v0.ok === true) return { ok: true, already: true, following: on, target, where, verified: v0.why };
+        const file = await this.dumpFollowDebug(page, { target, where, phase: 'already-stale', before: text, ...v0 });
+        throw new DouyinError(
+          'STATE_STALE',
+          `页面上写着「${text}」，但刷新后是「${v0.afterReload || '空'}」——上次那个「已关注」是假的，实际没关注上。现场：${file}`,
+        );
+      }
+
+      // 抖音 -509 限流时，关注接口照样返回 status_code 0，但服务端不执行。
+      // 唯一靠谱的证据是「自己的关注数有没有变」，所以点之前先记一下。
+      const beforeFollowing = await this.followingCount(page);
+
+      // 点之前挂响应监听：抖音网页版关注走 commit/item/follow 这类接口
+      const api = { seen: false, body: null };
+      const onResp = (r) => {
+        try {
+          const u = r.url();
+          // 关注列表（spotlight/relation）、私信轮询也会带 follow 字样，别拿它们当结果
+          if (/spotlight|relation\/list|\/im\//i.test(u)) return;
+          if (!/follow|commit\/item/i.test(u)) return;
+          r.json()
+            .then((b) => {
+              // 只收带 status_code 的：埋点、粉丝列表没有这个字段，会污染判断
+              const code = Number(b?.status_code ?? b?.code);
+              if (!Number.isFinite(code)) return;
+              api.seen = true;
+              api.body = b;
+            })
+            .catch(() => {});
+        } catch {
+          // 响应已释放，忽略
+        }
+      };
+      page.on('response', onResp);
+
+      await button.click({ timeout: 6000 });
+      await this.checkRisk(page);
+      // 按钮变化有延迟（抖音要先请求再回写 UI）：轮询 4 次，别读一次就判死
+      let after = '';
+      for (let i = 0; i < 4; i += 1) {
+        await this.pause(700, 1100);
+        after = (await button.innerText().catch(() => '')).trim();
+        if (isFollowing(after) === on) break;
+      }
+      await page.waitForTimeout(400);
+      page.off('response', onResp);
+
+      if (isFollowing(after) !== on) {
+        const needLogin = await page
+          .evaluate(() =>
+            /登录后|请先登录|扫码登录|验证码|安全验证|身份验证/.test(document.body.innerText || ''),
+          )
+          .catch(() => false);
+        const file = await this.dumpFollowDebug(page, { target, where, after, needLogin, api: api.body });
+        throw new DouyinError(
+          needLogin ? 'NEED_LOGIN' : 'NOT_CONFIRMED',
+          needLogin
+            ? `点了关注弹出了登录/验证：先用 stroll action=login 打开登录窗扫一次码。现场：${file}`
+            : `点了关注，按钮还是「${after || '空'}」。现场已存 ${file}`,
+        );
+      }
+
+      // 按钮变了不算数，还要验真
+      const v = await verify(api);
+      if (v.ok === false) {
+        const file = await this.dumpFollowDebug(page, { target, where, phase: 'rejected', after, api: api.body, ...v });
+        throw new DouyinError(
+          'FOLLOW_REJECTED',
+          v.why === 'api'
+            ? `抖音把这次关注挡回去了（接口 ${v.apiCode}${v.apiMsg ? ` ${v.apiMsg}` : ''}）。多半是账号被限制或在要验证。现场：${file}`
+            : `页面上显示「${after}」，但刷新后是「${v.afterReload || '空'}」——抖音只是把按钮改了，没真的关注上。现场：${file}`,
+        );
+      }
+      if (v.ok === null) {
+        return { ok: true, following: on, confirmed: false, target, where, verified: 'none' };
+      }
+
+      // 接口说成功也要再核一次关注数：被 -509 限流时接口返回 0 但什么都没发生
+      if (beforeFollowing != null) {
+        const afterFollowing = await this.followingCount(page);
+        if (afterFollowing != null && afterFollowing === beforeFollowing) {
+          const throttled = await page
+            .evaluate(() => /-509|请求过于频繁|操作过于频繁|操作太快/.test(document.body.innerText || ''))
+            .catch(() => false);
+          if (throttled) this.policy?.noteRisk?.('DOUYIN_FREQ', '-509 请求过于频繁（关注被挡）');
+          const file = await this.dumpFollowDebug(page, {
+            target,
+            where,
+            phase: 'count-unchanged',
+            beforeFollowing,
+            afterFollowing,
+            throttled,
+            api: api.body,
+          });
+          throw new DouyinError(
+            'FOLLOW_BLOCKED',
+            `抖音收下了请求但没真的关注（关注数还是 ${afterFollowing}${throttled ? '，页面提示请求过于频繁' : ''}）。` +
+              `多半是被限流了，等 20-30 分钟再试。现场：${file}`,
+          );
+        }
+      }
+
+      this.lastAction = `${on ? 'follow' : 'unfollow'} ${target}`;
+      return { ok: true, following: on, confirmed: true, target, where, verified: v.why };
     });
   }
 

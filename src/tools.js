@@ -52,7 +52,7 @@ export const TOOL_DECLS = [
         target: {
           type: 'string',
           description:
-            '视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID。发抖音私信给主人就把 target 写成「主人」（或「私信」）；在抖音群里说话就把 target 写成群名（照抄推送/`groups` 里给的名字，同名群会带 #2）；只有一个群时写「群」也算。刚回过群消息又没写 target，会被要求写清楚——不会再自动发成私信。image 发评论区时，target 写视频链接（或配 where=comment）。collect_stickers 也用它指定去哪个群/会话里收。',
+            '视频 BV/链接、B站动态链接（t.bilibili.com/… 或 /opus/…）、专栏 cv 号；关注时是对方 UID（抖音给主页链接、sec_uid 或视频链接都行）。发抖音私信给主人就把 target 写成「主人」（或「私信」）；在抖音群里说话就把 target 写成群名（照抄推送/`groups` 里给的名字，同名群会带 #2）；只有一个群时写「群」也算。刚回过群消息又没写 target，会被要求写清楚——不会再自动发成私信。image 发评论区时，target 写视频链接（或配 where=comment）。collect_stickers 也用它指定去哪个群/会话里收。',
         },
         text: {
           type: 'string',

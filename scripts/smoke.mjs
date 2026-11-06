@@ -3,7 +3,7 @@ import zlib from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULTS } from '../src/config.js';
-import { stripLeadingFakeAt } from '../src/douyin.js';
+import { secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
 import { approvalFor } from '../src/policy.js';
 import { StickerBook, extOfBuffer } from '../src/stickers.js';
 import { cutChars, dayKey, imageMimeOf, looksBrokenPath, stripAtName, stripAtPlaceholder } from '../src/util.js';
@@ -1060,6 +1060,227 @@ world.douyin.dmPage = prevDmPage;
 world.douyin.dmThread = prevDmThread;
 world.douyin.dmHit = prevDmHit;
 world.running = prevRunning3;
+
+/* ---------------- 抖音关注认主页 ---------------- */
+const SEC = 'MS4wLjABAAAAabcdefghijklmnopqrstuvwxyz123456';
+check('sec_uid 能从主页链接里抠出来', secUidOf(`https://www.douyin.com/user/${SEC}?from=share`) === SEC);
+check('纯 sec_uid 不会被判成 B站', world.inferPlatform(SEC) === 'douyin');
+
+const prevAllowFollow = world.cfg.allowFollow;
+const prevDailyFollows = world.cfg.dailyFollows;
+world.cfg.allowFollow = true;
+world.cfg.dailyFollows = 5;
+const followDay = dayKey(new Date(), world.timeZone);
+world.store.data.usage[followDay] = { ...(world.store.data.usage[followDay] ?? {}), follow: 0 };
+
+const planFromHome = await world.buildPlan('follow', {
+  platform: 'douyin',
+  target: `https://www.douyin.com/user/${SEC}`,
+});
+check('关注认主页链接', planFromHome.ok === true && planFromHome.target === SEC, JSON.stringify(planFromHome));
+
+const planFromUid = await world.buildPlan('follow', { platform: 'douyin', target: SEC });
+check('关注认 sec_uid', planFromUid.ok === true && planFromUid.target === SEC, JSON.stringify(planFromUid));
+
+const prevFollowMode = world.cfg.douyinFollowMode;
+world.cfg.douyinFollowMode = 'off';
+const planManual = await world.buildPlan('follow', { platform: 'douyin', target: SEC });
+check(
+  '抖音关注设成手动时直接拒绝',
+  planManual.ok === false && planManual.code === 'FOLLOW_MANUAL',
+  JSON.stringify(planManual),
+);
+const planUnfollowOff = await world.buildPlan('unfollow', { platform: 'douyin', target: SEC });
+check('手动模式不影响取关', planUnfollowOff.ok === true, JSON.stringify(planUnfollowOff));
+world.cfg.douyinFollowMode = prevFollowMode;
+
+const planNick = await world.buildPlan('follow', { platform: 'douyin', target: '张三' });
+check(
+  '纯昵称会提示给主页链接',
+  planNick.ok === false && /主页链接/.test(String(planNick.error ?? '')),
+  JSON.stringify(planNick),
+);
+
+world.cfg.allowFollow = prevAllowFollow;
+world.cfg.dailyFollows = prevDailyFollows;
+world.store.data.usage[followDay] = { ...(world.store.data.usage[followDay] ?? {}), follow: 0 };
+
+/* ---------------- 额度自由设置 / 取关不占额度 ---------------- */
+const prevQuotaCfg = { follows: world.cfg.dailyFollows, likes: world.cfg.dailyLikes };
+world.cfg.dailyFollows = 10;
+const capFollow = world.policy.cap('follow');
+check('周上限跟着日上限走（×7）', capFollow.daily === 10 && capFollow.weekly === 70, JSON.stringify(capFollow));
+world.cfg.dailyFollows = 100;
+check('日上限 100 时周上限是 700', world.policy.cap('follow').weekly === 700, JSON.stringify(world.policy.cap('follow')));
+
+const capDay = dayKey(new Date(), world.timeZone);
+world.cfg.dailyFollows = 10;
+world.store.data.usage[capDay] = { ...(world.store.data.usage[capDay] ?? {}), follow: 10 };
+const unfollowCheck = world.policy.check('unfollow', 'douyin', 'MS4wTEST', { quotaAction: 'follow', skipQuota: true });
+check('关注额度用满也能取关', unfollowCheck.ok === true, JSON.stringify(unfollowCheck));
+
+const beforeFollow = world.store.usage('follow');
+const prevDyFollow = world.douyin.follow;
+world.douyin.follow = async () => ({ ok: true, following: false, confirmed: true, target: 'MS4wTEST' });
+const unfollowRes = await world.executePlan(
+  { action: 'unfollow', platform: 'douyin', target: 'MS4wTEST', text: '' },
+  'model',
+);
+check(
+  '取关不扣关注额度',
+  unfollowRes.ok === true && world.store.usage('follow') === beforeFollow,
+  `${beforeFollow} -> ${world.store.usage('follow')}`,
+);
+
+world.douyin.follow = prevDyFollow;
+world.cfg.dailyFollows = prevQuotaCfg.follows;
+world.store.data.usage[capDay] = { ...(world.store.data.usage[capDay] ?? {}), follow: 0 };
+
+/* ---------------- 抖音关注：只信接口回执 / 刷新后的状态 ---------------- */
+const FOL_SEC = 'MS4wLjABAAAAWKFR3ka8aHUS7-OV4iIh2qQ7Uoe7tKcRnr4Cb_q1lnw';
+
+function mkFollowPage(o) {
+  return {
+    _url: `https://www.douyin.com/user/${FOL_SEC}`,
+    _text: o.startText,
+    _handlers: [],
+    url() {
+      return this._url;
+    },
+    on(ev, fn) {
+      if (ev === 'response') this._handlers.push(fn);
+    },
+    off(ev, fn) {
+      const i = this._handlers.indexOf(fn);
+      if (i >= 0) this._handlers.splice(i, 1);
+    },
+    async reload() {
+      this._text = o.textAfterReload;
+    },
+    async waitForTimeout() {},
+    async evaluate() {
+      return false;
+    },
+  };
+}
+
+function mkFollowBtn(page, o) {
+  return {
+    async click() {
+      // 抖音的乐观更新：先改 UI，再去发请求
+      page._text = o.textAfterClick;
+      if (o.api) {
+        for (const fn of page._handlers) {
+          fn({
+            url: () => 'https://www.douyin.com/aweme/v1/web/commit/item/follow/',
+            json: async () => o.api,
+          });
+        }
+      }
+    },
+    async innerText() {
+      return page._text;
+    },
+  };
+}
+
+async function runFollow(o) {
+  const page = mkFollowPage(o);
+  const btn = mkFollowBtn(page, o);
+  const saved = {
+    getPage: world.douyin.getPage,
+    isLoggedIn: world.douyin.isLoggedIn,
+    goto: world.douyin.goto,
+    pick: world.douyin.pickFollowButton,
+    risk: world.douyin.checkRisk,
+    dump: world.douyin.dumpFollowDebug,
+    pause: world.douyin.pause,
+    count: world.douyin.followingCount,
+  };
+  let countCalls = 0;
+  world.douyin.followingCount = async () => {
+    countCalls += 1;
+    // 第一次＝点之前，第二次＝点之后
+    return countCalls === 1 ? (o.countBefore ?? null) : (o.countAfter ?? null);
+  };
+  world.douyin.getPage = async () => page;
+  world.douyin.isLoggedIn = async () => true;
+  world.douyin.goto = async (p, url) => {
+    p._url = url;
+  };
+  world.douyin.pickFollowButton = async (p) => ({ el: btn, y: 10, text: p._text });
+  world.douyin.checkRisk = async () => {};
+  world.douyin.dumpFollowDebug = async () => '/tmp/follow-test.json';
+  world.douyin.pause = async () => {};
+  try {
+    return await world.douyin.follow(FOL_SEC, true);
+  } catch (e) {
+    return { ok: false, code: e.code, error: String(e.message ?? '') };
+  } finally {
+    world.douyin.getPage = saved.getPage;
+    world.douyin.isLoggedIn = saved.isLoggedIn;
+    world.douyin.goto = saved.goto;
+    world.douyin.pickFollowButton = saved.pick;
+    world.douyin.checkRisk = saved.risk;
+    world.douyin.dumpFollowDebug = saved.dump;
+    world.douyin.pause = saved.pause;
+    world.douyin.followingCount = saved.count;
+  }
+}
+
+const fA = await runFollow({ startText: '关注', textAfterClick: '已关注', api: { status_code: 0 } });
+check('接口回执 0 才算关注成功', fA.ok === true && fA.confirmed === true && fA.verified === 'api', JSON.stringify(fA));
+
+const fB = await runFollow({
+  startText: '关注',
+  textAfterClick: '已关注',
+  api: { status_code: 2154, status_msg: '操作过于频繁' },
+});
+check(
+  '接口回执非 0 就报 FOLLOW_REJECTED',
+  fB.ok === false && fB.code === 'FOLLOW_REJECTED' && /2154/.test(fB.error),
+  JSON.stringify(fB),
+);
+
+// 本次核心：抖音把按钮改成「已关注」但实际没关注，刷新就露馅
+const fC = await runFollow({ startText: '关注', textAfterClick: '已关注', textAfterReload: '关注' });
+check(
+  '按钮变了但刷新后回到「关注」＝假成功',
+  fC.ok === false && fC.code === 'FOLLOW_REJECTED' && /没真的关注上/.test(fC.error),
+  JSON.stringify(fC),
+);
+
+const fD = await runFollow({ startText: '关注', textAfterClick: '已关注', textAfterReload: '已关注' });
+check('刷新后仍是「已关注」才算真成功', fD.ok === true && fD.confirmed === true && fD.verified === 'reload', JSON.stringify(fD));
+
+const fE = await runFollow({ startText: '已关注', textAfterReload: '关注' });
+check('页面写着已关注但刷新是关注＝脏状态', fE.ok === false && fE.code === 'STATE_STALE', JSON.stringify(fE));
+
+const fF = await runFollow({ startText: '已关注', textAfterReload: '已关注' });
+check('本来就是已关注（刷新核对过）', fF.ok === true && fF.already === true, JSON.stringify(fF));
+
+// 本次核心：接口返回 0、按钮也变了，但关注数没动 = 抖音 -509 假成功
+const fG = await runFollow({
+  startText: '关注',
+  textAfterClick: '已关注',
+  api: { status_code: 0 },
+  countBefore: 1,
+  countAfter: 1,
+});
+check(
+  '关注数没变就报 FOLLOW_BLOCKED',
+  fG.ok === false && fG.code === 'FOLLOW_BLOCKED' && /关注数还是 1/.test(fG.error),
+  JSON.stringify(fG),
+);
+
+const fH = await runFollow({
+  startText: '关注',
+  textAfterClick: '已关注',
+  api: { status_code: 0 },
+  countBefore: 1,
+  countAfter: 2,
+});
+check('关注数 +1 才算真成功', fH.ok === true && fH.confirmed === true, JSON.stringify(fH));
 
 console.log(checks.map(([n, ok]) => `${ok ? 'ok' : 'NO'}  ${n}`).join('\n'));
 console.log(`\n${checks.length} checks passed`);

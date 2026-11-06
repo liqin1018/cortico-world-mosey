@@ -3145,6 +3145,8 @@ export class StrollWorld {
     if (hint === 'bilibili' || hint === 'douyin') return hint;
     const text = String(raw ?? '').toLowerCase();
     if (text.includes('douyin.com') || text.includes('iesdouyin.com')) return 'douyin';
+    // 纯 sec_uid（MS4w 开头）：抖音主页的另一种写法，别被下面的兜底判成 B站
+    if (/^ms4wljab/i.test(text)) return 'douyin';
     if (text.includes('bilibili.com') || /^bv[0-9a-z]{10}$/i.test(text) || /^av\d+$/i.test(text)) return 'bilibili';
     if (/^\d{10,24}$/.test(text)) return 'douyin';
     return 'bilibili';
@@ -3197,10 +3199,30 @@ export class StrollWorld {
         }
         if (!target) return { ok: false, error: '拿不到对方 UID。' };
       } else {
-        target = await this.douyin.idOf(targetRaw);
-        if (!target) return { ok: false, error: '抖音关注要给视频链接/ID（从视频页点）。' };
+        // 抖音关注设成「手动」就直接拦：网页端点了一样不生效，别让她白点、白碰风控
+        if (action === 'follow' && String(this.cfg.douyinFollowMode ?? 'browser') === 'off') {
+          return {
+            ok: false,
+            code: 'FOLLOW_MANUAL',
+            error: '抖音关注设成手动模式了：网页端点关注不生效（刷新就没了），需要你在手机 App 里关注。',
+          };
+        }
+        // 主页链接 / sec_uid / 视频链接都认：在对方主页上点关注是最自然的方式，
+        // 以前只认视频 ID，会逼主人「必须给一条视频」，很不合理
+        target = secUidOf(targetRaw) || (await this.douyin.idOf(targetRaw));
+        if (!target) {
+          return {
+            ok: false,
+            error: '抖音关注：给主页链接、sec_uid 或视频链接都行（App 里点对方头像 → 分享 → 复制链接）。',
+          };
+        }
       }
-      const check = this.policy.check(action, platform, target, { quotaAction: 'follow', userInitiated: asked });
+      const check = this.policy.check(action, platform, target, {
+        quotaAction: 'follow',
+        userInitiated: asked,
+        // 取关是撤销，不该被「关注额度用完了」挡住
+        skipQuota: action === 'unfollow',
+      });
       if (!check.ok) return check;
       return { ok: true, action, platform, target, text: '' };
     }
@@ -3570,7 +3592,8 @@ export class StrollWorld {
       try {
         this.policy.consume(action, platform, target, {
           quotaAction: this.capAction(action),
-          countQuota: !plan.free && !uncertain,
+          // 取消关注 / 取消赞是撤销动作，只记录、不占额度
+          countQuota: !plan.free && !uncertain && action !== 'unfollow' && action !== 'unlike',
           dedupeKey: plan.free || uncertain ? '' : plan.dedupeKey,
           // free：回主人私信只算聊天，不占公开动作的节奏位
           free: !!plan.free,
@@ -3663,8 +3686,9 @@ export class StrollWorld {
     if (action === 'save') return '已加到 B站稍后再看';
     if (action === 'follow' || action === 'unfollow') {
       const what = action === 'follow' ? '关注' : '取关';
-      if (result?.already) return `${p} 已经是${what}后的状态，不用重复操作`;
-      if (result?.confirmed === false) return `${p} ${what}请求发出去了，但平台没给确认`;
+      // already 现在也是刷新核对过的，可以直说「本来就是」
+      if (result?.already) return `${p} 本来就是${what}状态（刷新核对过）`;
+      if (result?.confirmed === false) return `${p} ${what}没能确认，别当成已完成`;
       return `${p} ${what}完成`;
     }
     return `${p} ${ACTION_NAMES[action] ?? action}完成`;

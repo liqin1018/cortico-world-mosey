@@ -155,6 +155,9 @@ export class StrollWorld {
     this._dyInboxAt = 0;
     this._cfgLive = null;
     this._cfgAt = 0;
+    /** 上次读到的那份磁盘配置 + 它的 mtime：mtime 没变就不用重新解析。 */
+    this._cfgDisk = null;
+    this._cfgMtime = 0;
     this.presence = null;
     this.lastPresenceNotify = 0;
     this.watch = null;
@@ -211,6 +214,12 @@ export class StrollWorld {
     this.store.load();
     this.store.data.autoSessions ??= {};
     this.migrateConfig();
+    /**
+     * 先按磁盘上的设置来。
+     * 宿主传进来的 cfg 可能是启动那一刻的快照——刚在面板改完就重启时，
+     * 那份快照不一定是新的；这里先对齐一次，前 8 秒（等第一次心跳）也不会用旧值。
+     */
+    this.liveConfig();
     // 启动时顺手看一眼收件箱上限（只删最旧的 recv-*，不碰工坊）
     try {
       this.trimImageInbox();
@@ -270,6 +279,41 @@ export class StrollWorld {
     }
     this.store.save();
     this.log?.info?.('stroll migrate stranger keys');
+    this.migrateStrangerPending();
+  }
+
+  /** 待批记录里的昵称也可能带着时间：洗掉，同一个人的重复 pending 只留最新一条。 */
+  migrateStrangerPending() {
+    const list = this.store.data.strangerPending;
+    if (!Array.isArray(list) || !list.length) return;
+    const seen = new Set();
+    const next = [];
+    let changed = false;
+    for (const item of list) {
+      if (!item || typeof item !== 'object') {
+        changed = true;
+        continue;
+      }
+      const before = String(item.who ?? '');
+      const clean = stripRowTime(before);
+      if (clean !== before) {
+        item.who = clean;
+        changed = true;
+      }
+      if (item.status === 'pending') {
+        const key = `${item.platform}:${item.who}:${item.uid ?? ''}`;
+        if (seen.has(key)) {
+          changed = true;
+          continue;
+        }
+        seen.add(key);
+      }
+      next.push(item);
+    }
+    if (!changed) return;
+    this.store.data.strangerPending = next;
+    this.store.save();
+    this.log?.info?.('stroll migrate stranger pending', { before: list.length, after: next.length });
   }
 
   /**
@@ -1050,6 +1094,8 @@ export class StrollWorld {
    */
   /** 陌生人私信设置：模式 / 黑名单。回信额度共用「每天最多私信」。 */
   strangerDmPolicy() {
+    // 先同步一次磁盘上的设置：面板改完下拉框，最迟 2 秒就按新值走（不用重启）
+    this.liveConfig();
     const raw = String(this.cfg.strangerDmMode ?? 'ask');
     return {
       mode: ['auto', 'ask', 'off'].includes(raw) ? raw : 'ask',
@@ -1106,6 +1152,9 @@ export class StrollWorld {
 
   addStrangerPending({ platform, who, uid = '', text = '' }) {
     const now = Date.now();
+    // 昵称里可能黏着列表上的时间（「海底月 刚刚」）：存进去的话，点「让她回」会拿这个
+    // 名字去发，会话永远找不到。这里统一洗一遍。
+    who = stripRowTime(who);
     const keep = (this.store.data.strangerPending ?? []).filter((x) => now - Number(x.at ?? 0) < 24 * 3600 * 1000);
     // 同一个人只留最新的一条，别刷屏
     const rest = keep.filter((x) => !(x.platform === platform && x.who === who && x.status === 'pending'));
@@ -1715,12 +1764,47 @@ export class StrollWorld {
      */
     if (!list.length && Date.now() - Number(this.strangerListAt ?? 0) >= 10 * 1000) {
       // 主列表要遍历每一行的 innerText，比读入口贵，10 秒一次就够
+      this.strangerListAt = Date.now();
       const groups = this.groupNames();
-      if (groups.length) {
-        this.strangerListAt = Date.now();
+      if (!groups.length) {
+        /**
+         * 这条路靠「排除已知群」才敢用；一个群都认不出来时**不推**（免得把群当人），
+         * 但日志里要把列表里都有谁写出来——不然「有人发消息没提醒」根本查不到是
+         * 「没读到」还是「读到了但不敢推」。
+         */
+        if (Date.now() - Number(this.strangerRowsLogAt ?? 0) > 5 * 60 * 1000) {
+          this.strangerRowsLogAt = Date.now();
+          const rows = await this.douyin.conversationRows().catch(() => []);
+          this.log?.warn?.('stroll stranger rows skipped', {
+            reason: 'no groups',
+            count: rows.length,
+            rows: rows.slice(0, 12).map((r) => `${truncate(r.name, 12)}|${truncate(r.preview, 12)}`),
+          });
+        }
+      } else {
         // 昵称/时间/预览的清洗在 douyin.conversationRows 里做完了（时间不能留在名字里）
         const rows = await this.douyin.conversationRows().catch(() => []);
         const known = [...groups, ownerName].filter(Boolean);
+        /**
+         * 诊断：把主列表每一行和「为什么不算陌生人」记下来（5 分钟一次）。
+         * 以后「有人发了消息但没提醒」时，一眼能看出是没读到、还是读到了被当群排掉。
+         */
+        if (rows.length && Date.now() - Number(this.strangerRowsLogAt ?? 0) > 5 * 60 * 1000) {
+          this.strangerRowsLogAt = Date.now();
+          this.log?.info?.('stroll stranger rows', {
+            groups: groups.length,
+            rows: rows.slice(0, 12).map((r) => {
+              const who = String(r.name ?? '');
+              const pv = String(r.preview ?? '');
+              let why = 'stranger';
+              if (ownerName && this.sameGroup(ownerName, who)) why = 'owner';
+              else if (known.some((n) => this.sameGroup(n, who))) why = 'group';
+              else if (!pv) why = 'no-preview';
+              else if (/^\d+分钟内在线$|^在线$/.test(pv)) why = 'online';
+              return `${truncate(who, 12)}|${truncate(pv, 12)}|${why}`;
+            }),
+          });
+        }
         const extra = rows
           .filter((r) => r.name && !known.some((n) => this.sameGroup(n, r.name)))
           .map((r) => ({ who: r.name, at: r.at || '', preview: r.preview || '', unread: 0 }))
@@ -2242,23 +2326,73 @@ export class StrollWorld {
   /* ---------------- prompt ---------------- */
 
   /**
-   * 设置里改的值不一定热更新到运行中的实例——她可能还在读启动时那份 cfg。
-   * 这里兜底读一次磁盘上的 config.json（两秒缓存），改完设置不用重启。
+   * 磁盘上的设置。
+   *
+   * 面板改配置只写 config.json，**运行中的实例不会收到通知**——她的 `this.cfg` 还是
+   * 启动那一刻的快照。以前只有少数几处读这里，于是「改成『先问我』还是不点头」
+   * 这种问题会一直出现：明明改了，实际还在按旧值跑。
+   *
+   * 现在改成：文件 mtime 一变就把磁盘值同步进 `this.cfg`（原地赋值，所有模块共享同一个
+   * 引用，Douyin/Bilibili/Policy 一起生效）。两秒缓存，读不到就退回内存里的值。
    */
   liveConfig() {
     const now = Date.now();
     if (this._cfgAt && now - this._cfgAt < 2000) return this._cfgLive;
     this._cfgAt = now;
-    this._cfgLive = null;
+    this._cfgLive = this._cfgDisk ?? null;
+    const file = path.join(this.dataDir, '..', 'config.json');
     try {
-      const file = path.join(this.dataDir, '..', 'config.json');
+      const mtime = fs.statSync(file).mtimeMs;
+      // 文件没动过：上面的缓存值就是最新的，不用再解析一遍
+      if (this._cfgMtime && mtime === this._cfgMtime) return this._cfgLive;
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
       const world = parsed?.worlds?.stroll;
-      if (world && typeof world === 'object') this._cfgLive = world;
+      if (!world || typeof world !== 'object') return this._cfgLive;
+      this._cfgDisk = world;
+      this._cfgMtime = mtime;
+      this.applyLiveConfig(world);
+      this._cfgLive = world;
     } catch {
-      // 读不到就退回内存里的 cfg
+      // 读不到（路径不同 / 文件正在写）就退回内存里的 cfg
     }
     return this._cfgLive;
+  }
+
+  /**
+   * 把磁盘上的设置写进内存里的 cfg。
+   *
+   * 只覆盖磁盘上真有的键，不动其余（缺的键继续用启动时的默认值）；
+   * 原地赋值而不是换对象——`this.cfg` 被 Policy / Bilibili / DouyinBrowser 共用，
+   * 换引用会让它们继续拿着旧对象。
+   */
+  applyLiveConfig(disk) {
+    /**
+     * ESM 是严格模式：给冻结对象赋值会直接抛错，而 liveConfig 外面有 catch 会把它吞掉，
+     * 表现就是「热更新完全没反应，日志里也没有」。这里显式说一句，别让人再猜一次。
+     */
+    if (Object.isFrozen(this.cfg)) {
+      if (!this._cfgFrozenWarned) {
+        this._cfgFrozenWarned = true;
+        this.log?.warn?.('stroll config frozen', { note: '宿主冻结了配置对象，热更新不可用，改了设置要重启' });
+      }
+      return;
+    }
+    const changed = [];
+    for (const [k, v] of Object.entries(disk)) {
+      const before = this.cfg[k];
+      // 数组/对象比不了引用，简单序列化一下（配置里只有字符串和数字，成本可忽略）
+      const same =
+        before === v ||
+        (typeof before === 'object' && typeof v === 'object' && JSON.stringify(before) === JSON.stringify(v));
+      if (same) continue;
+      this.cfg[k] = v;
+      changed.push(k);
+    }
+    if (changed.length) {
+      this.log?.info?.('stroll config live', { changed: changed.slice(0, 8), total: changed.length });
+      // 监听开关可能刚被改：让 dmBeat 重新决定要不要挂/收页面
+      this._cfgLive = disk;
+    }
   }
 
   /** 主人的账号：优先读磁盘上最新的那份，读不到再用内存里的。 */

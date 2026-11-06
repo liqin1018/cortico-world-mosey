@@ -1884,6 +1884,30 @@ check(
   JSON.stringify(migKeys.store.data.strangerSeen),
 );
 
+// 待批记录里的脏昵称：洗掉，同一人的重复 pending 只留最新一条
+migKeys.store.data.strangerPending = [
+  { id: 'p1', platform: 'douyin', who: '海底月 刚刚', uid: '', text: '在吗', at: Date.now(), status: 'pending' },
+  { id: 'p2', platform: 'douyin', who: '海底月 5分钟前', uid: '', text: '旧的一条', at: Date.now() - 60000, status: 'pending' },
+  { id: 'p3', platform: 'douyin', who: '路人 刚刚', uid: '', text: '已回过的', at: Date.now(), status: 'done' },
+];
+migKeys.migrateStrangerPending();
+const pendItems = migKeys.store.data.strangerPending ?? [];
+check(
+  '待批记录里的时间也被洗干净',
+  pendItems.every((x) => !/\s(刚刚|\d+分钟前)$/.test(String(x.who))),
+  JSON.stringify(pendItems.map((x) => x.who)),
+);
+check(
+  '同一个人的重复待批只留最新一条',
+  pendItems.filter((x) => x.status === 'pending').length === 1 && pendItems[0].id === 'p1',
+  JSON.stringify(pendItems.map((x) => `${x.id}:${x.status}`)),
+);
+
+// 新增待批时也要洗（不然点「让她回」会拿「海底月 刚刚」去发）
+const cleanItem = world.addStrangerPending({ platform: 'douyin', who: '测试甲 刚刚', text: '在吗' });
+check('新增待批时洗掉时间', cleanItem.who === '测试甲', cleanItem.who);
+world.store.data.strangerPending = (world.store.data.strangerPending ?? []).filter((x) => x.id !== cleanItem.id);
+
 /* ---- 表情包：陌生人的那条也要拿到画面 ---- */
 const pngDataUrl = `data:image/png;base64,${png.toString('base64')}`;
 // 这一段测的是「读正文 + 推附件」，先把本地秒回关掉，否则它会先走秒回
@@ -2167,6 +2191,98 @@ world.douyin.clickStrangerThread = prevClickStranger2;
 world.douyin.readMessages = prevReadMsgs2;
 world.douyin.closeStrangerInbox = prevCloseFolder2;
 world.douyin.currentChatTitle = prevChatTitle2;
+
+/* ---- 配置热更新：面板改完不用重启 ---- */
+const liveRoot = path.join(tmp, 'cfglive');
+fs.mkdirSync(path.join(liveRoot, 'world'), { recursive: true });
+const liveFile = path.join(liveRoot, 'config.json');
+const writeCfg = (mode) => {
+  fs.writeFileSync(liveFile, JSON.stringify({ worlds: { stroll: { strangerDmMode: mode } } }));
+  // mtime 精度可能是秒级：手动往前推一下，保证「文件变了」看得出
+  const t = new Date(Date.now() + Math.round(Math.random() * 1000) + 100);
+  fs.utimesSync(liveFile, t, t);
+};
+writeCfg('auto');
+const liveCfg = { ...DEFAULTS, enabled: true, quietFrom: 0, quietTo: 0, strangerDmMode: 'auto' };
+const liveWorld = new StrollWorld({
+  cfg: liveCfg,
+  timezone: 'Asia/Shanghai',
+  dataDir: path.join(liveRoot, 'world'),
+  persist: () => {},
+});
+const liveLogs = [];
+liveWorld.log = { info: (...a) => liveLogs.push(a), warn: () => {} };
+liveWorld.store.load();
+check('热更新：一开始按内存里的设置', liveWorld.strangerDmPolicy().mode === 'auto');
+
+writeCfg('ask');
+liveWorld._cfgAt = 0; // 跳过热更新的 2 秒缓存
+check('热更新：改完设置不重启就生效', liveWorld.strangerDmPolicy().mode === 'ask', liveWorld.strangerDmPolicy().mode);
+check('热更新：内存里的 cfg 也被同步（模块共享同一引用）', liveCfg.strangerDmMode === 'ask', String(liveCfg.strangerDmMode));
+check(
+  '热更新：日志里写明改了哪些字段',
+  liveLogs.some((a) => a[0] === 'stroll config live' && (a[1]?.changed ?? []).includes('strangerDmMode')),
+  JSON.stringify(liveLogs.slice(0, 3)),
+);
+
+// 文件没动过：不该重复解析、也不该反复打日志
+const logCount = liveLogs.length;
+liveWorld._cfgAt = 0;
+liveWorld.strangerDmPolicy();
+check('热更新：文件没变就不重复同步', liveLogs.length === logCount, `logs=${liveLogs.length - logCount}`);
+
+/* ---- 主列表诊断：谁被当成群排掉了 ---- */
+const rowsLogs = [];
+const prevLogForRows = world.log;
+world.log = { info: (...a) => rowsLogs.push(a), warn: (...a) => rowsLogs.push(a) };
+const prevGroupsCfg = world.cfg.douyinGroups;
+const prevGroupAuto = world.groupAuto;
+world.cfg.douyinGroups = '摸鱼群';
+world.groupAuto = { names: ['摸鱼群'] };
+world.douyin.strangerEntry = async () => null;
+world.douyin.strangerThreads = async () => [];
+world.douyin.conversationRows = async () => [
+  { name: '摸鱼群', at: '10:00', preview: '大家好' },
+  { name: '小月月一直在玩', at: '10:01', preview: '在吗' },
+  { name: '海底月', at: '刚刚', preview: '在干啥' },
+];
+world.store.data.strangerSeen = {};
+world.strangerRowsLogAt = 0;
+world.strangerScanAt = 0;
+world.strangerListAt = 0;
+await world.checkDouyinStrangers('小月月一直在玩');
+world.log = prevLogForRows;
+world.cfg.douyinGroups = prevGroupsCfg;
+world.groupAuto = prevGroupAuto;
+const rowsLog = rowsLogs.find((a) => a[0] === 'stroll stranger rows');
+check(
+  '主列表每一行都记了判定原因',
+  !!rowsLog &&
+    rowsLog[1].rows.length === 3 &&
+    /摸鱼群\|.*\|group/.test(rowsLog[1].rows[0]) &&
+    /小月月一直在玩\|.*\|owner/.test(rowsLog[1].rows[1]) &&
+    /海底月\|.*\|stranger/.test(rowsLog[1].rows[2]),
+  JSON.stringify(rowsLog?.[1] ?? null),
+);
+
+/* ---- 群名一个都认不出时，这条路要明确关掉并留痕 ---- */
+const noGroupLogs = [];
+world.log = { info: (...a) => noGroupLogs.push(a), warn: (...a) => noGroupLogs.push(a) };
+world.cfg.douyinGroups = '';
+world.groupAuto = { names: [] };
+world.douyin.strangerEntry = async () => null;
+world.douyin.strangerThreads = async () => [];
+world.strangerRowsLogAt = 0;
+world.strangerScanAt = 0;
+world.strangerListAt = 0;
+await world.checkDouyinStrangers('小月月一直在玩');
+world.log = prevLogForRows;
+world.groupAuto = prevGroupAuto;
+check(
+  '认不出群时明确记一条 skipped',
+  noGroupLogs.some((a) => a[0] === 'stroll stranger rows skipped'),
+  JSON.stringify(noGroupLogs.slice(0, 3)),
+);
 
 world.cfg.quickMediaReply = prevQuickCfg;
 

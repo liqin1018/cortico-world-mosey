@@ -1011,6 +1011,56 @@ world.dmWatchOn = prevDmWatchOn2;
 world.imageBlobsSoon = prevBlobsSoon;
 world.running = prevRunning2;
 
+/* ---------------- 监听自检 ---------------- */
+const prevHealth = world.douyin.watchHealth;
+const prevRearm = world.douyin.rearmObserver;
+const prevReset = world.douyin.resetGroup;
+const prevPages = world.douyin.groupPages;
+const prevDmPage = world.douyin.dmPage;
+const prevDmThread = world.douyin.dmThread;
+const prevDmHit = world.douyin.dmHit;
+const prevRunning3 = world.running;
+
+world.douyin.dmPage = null;
+world.douyin.dmThread = '';
+world.douyin.dmHit = null;
+world.douyin.groupPages = new Map();
+const emptyHealth = await world.douyin.watchHealth();
+check('没挂监听时自检不报错', emptyHealth.dmArmed === false && emptyHealth.groups.length === 0, JSON.stringify(emptyHealth));
+
+const rearmed = [];
+const resets = [];
+world.douyin.rearmObserver = async (page) => {
+  rearmed.push(page);
+  return true;
+};
+world.douyin.resetGroup = async (name) => {
+  resets.push(name);
+  return true;
+};
+world.running = true;
+world.groupArmAt = 12345;
+await world.repairWatch({
+  dmArmed: true,
+  dm: { ok: false, reason: 'OBSERVER_GONE' },
+  groups: [
+    { name: 'g1', ok: false, reason: 'OBSERVER_GONE' },
+    { name: 'g2', ok: false, reason: 'PAGE_HUNG' },
+    { name: 'g3', ok: true },
+  ],
+});
+check('观察器丢了原地重挂，不关页', rearmed.length === 2 && resets.length === 1, `rearm=${rearmed.length} reset=${resets.length}`);
+check('页面卡死才重开，并清掉 30 秒节流', resets.length === 1 && resets[0] === 'g2' && world.groupArmAt === 0, JSON.stringify(resets));
+
+world.douyin.watchHealth = prevHealth;
+world.douyin.rearmObserver = prevRearm;
+world.douyin.resetGroup = prevReset;
+world.douyin.groupPages = prevPages;
+world.douyin.dmPage = prevDmPage;
+world.douyin.dmThread = prevDmThread;
+world.douyin.dmHit = prevDmHit;
+world.running = prevRunning3;
+
 console.log(checks.map(([n, ok]) => `${ok ? 'ok' : 'NO'}  ${n}`).join('\n'));
 console.log(`\n${checks.length} checks passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

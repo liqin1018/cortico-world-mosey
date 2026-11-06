@@ -496,6 +496,42 @@ export class StrollWorld {
   }
 
   /** 把要盯的群各挂一个观察器（每个群一个后台 tab，跟私信同一个机制）。 */
+  /**
+   * 按自检结果修监听。
+   * 观察器丢了 → 原地重挂（页面还是好的，比重开快得多）；
+   * 页面卡死/被关 → 关掉清状态，让下一拍重开。
+   */
+  async repairWatch(health) {
+    if (!health || !this.running) return;
+    if (health.dmArmed && !health.dm?.ok) {
+      if (health.dm.reason === 'OBSERVER_GONE') {
+        const ok = await this.douyin.rearmObserver?.(this.douyin.dmPage).catch(() => false);
+        this.log?.[ok ? 'info' : 'warn']?.('stroll dm observer rearm', { ok });
+      } else {
+        this.log?.warn?.('stroll dm page unhealthy, reopen', { reason: health.dm.reason });
+        await this.douyin.dmPage?.close().catch(() => {});
+        this.douyin.dmPage = null;
+        this.douyin.dmThread = '';
+        this.dmArmAt = 0;
+        this.armDmPush().catch(() => {});
+      }
+    }
+    const bad = (health.groups ?? []).filter((g) => !g?.ok);
+    if (!bad.length) return;
+    for (const g of bad) {
+      if (g.reason === 'OBSERVER_GONE') {
+        const slot = this.douyin.groupSlot?.(g.name);
+        const ok = await this.douyin.rearmObserver?.(slot?.page).catch(() => false);
+        this.log?.[ok ? 'info' : 'warn']?.('stroll group observer rearm', { group: g.name, ok });
+      } else {
+        this.log?.warn?.('stroll group page unhealthy, reopen', { group: g.name, reason: g.reason });
+        await this.douyin.resetGroup?.(g.name).catch(() => false);
+      }
+    }
+    // 别等 30 秒的挂载节流，下一拍就补
+    this.groupArmAt = 0;
+  }
+
   async armGroupPush() {
     if (this.groupArmBusy) return;
     if (!this.groupWatchOn()) return;
@@ -726,6 +762,14 @@ export class StrollWorld {
         this.dmArmAt = Date.now();
         this.armDmPush().catch(() => {});
       }
+    }
+    // 监听自检：每分钟看一次私信页/群页还活着没。
+    // 抖音页面会被自己的路由、掉线、内存回收搞哑——观察器不报错也不回调，
+    // 不看一眼就会「群里喊她没反应」，一直拖到下次重启。
+    if (useDy && this.cfg.watchdog !== false && Date.now() - Number(this.watchdogAt ?? 0) > 60 * 1000) {
+      this.watchdogAt = Date.now();
+      const health = await this.douyin.watchHealth?.().catch(() => null);
+      if (health) await this.repairWatch(health).catch(() => {});
     }
     // 群聊：观察器掉了就补挂（30 秒最多试一次）。
     // 群名留空时靠自动识别；每 3 分钟滚动会话列表做一次深度读取，

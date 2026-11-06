@@ -1618,6 +1618,63 @@ export class DouyinBrowser {
   }
 
   /**
+   * 监听健康自检：页面还在吗、观察器还在吗、页面还能不能响应。
+   * 不看「有没有收到消息」——群里几小时没人说话是正常的，那不是故障。
+   */
+  async watchHealth({ timeout = 4000 } = {}) {
+    const probe = async (page) => {
+      if (!page || page.isClosed()) return { ok: false, reason: 'PAGE_CLOSED' };
+      // 被页面自己的路由带走（回到首页/推荐流）也算不健康：观察器挂在这种页面上收不到消息
+      if (!/\/chat/i.test(String(page.url() ?? ''))) return { ok: false, reason: 'PAGE_NAVIGATED' };
+      try {
+        const alive = await Promise.race([
+          page.evaluate(() => !!(window.__strollDmObs && typeof window.__strollDmSignal === 'function')),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeout)),
+        ]);
+        // 观察器对象还在，但可能被页面自己的路由卸掉了
+        return alive ? { ok: true } : { ok: false, reason: 'OBSERVER_GONE' };
+      } catch (error) {
+        return { ok: false, reason: String(error?.message ?? '') === 'timeout' ? 'PAGE_HUNG' : 'PAGE_ERROR' };
+      }
+    };
+
+    const dmArmed = this.dmArmed();
+    const dm = dmArmed ? await probe(this.dmPage) : { ok: true, reason: 'NOT_ARMED' };
+    // 并行探，别让 4 个群各等 4 秒把心跳拖住
+    const groups = (
+      await Promise.all(
+        [...(this.groupPages ?? [])]
+          .filter(([name]) => this.groupArmed(name))
+          .map(async ([name, slot]) => ({ name, ...(await probe(slot.page)) })),
+      )
+    ).filter(Boolean);
+    return { dmArmed, dm, groups };
+  }
+
+  /** 观察器被页面导航带走了：不用重开页，原地重新挂一次就行。 */
+  async rearmObserver(page) {
+    if (!page || page.isClosed()) return false;
+    const r = await page.evaluate(dmObserverScript).catch(() => 'failed');
+    return r === 'ok' || r === 'already';
+  }
+
+  /** 群页确认死了：关掉并清状态，下一拍 armGroupPush 会重开。 */
+  async resetGroup(name) {
+    const key = String(name ?? '').trim();
+    const slot = this.groupPages?.get?.(key);
+    if (!slot) return false;
+    slot.armedAt = 0;
+    slot.thread = '';
+    slot.pendingSig = '';
+    slot.nextTryAt = 0;
+    slot.failCount = 0;
+    await slot.page?.close().catch(() => {});
+    slot.page = null;
+    this.groupPages.delete(key);
+    return true;
+  }
+
+  /**
    * 盯一个群：开（或复用）一个 tab 停在群会话上，挂同一个观察器。
    * 第一次要点一下会话，之后页面不动——新消息进 DOM 就回调，跟私信一样快。
    */

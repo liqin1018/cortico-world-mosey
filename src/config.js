@@ -35,6 +35,8 @@ export const DEFAULTS = {
   maxGroups: 6,
   /** 最多常驻几个群监听页（每个占一个后台标签页） */
   groupTabs: 3,
+  /** 监听自检：页面卡死/观察器丢了自动重挂，默认开 */
+  watchdog: true,
   /** 字幕/弹幕带多少：后台 open 与一起看分开，数字越大越详细、token 越高 */
   subtitleOpen: 12,
   danmakuOpen: 30,
@@ -679,6 +681,13 @@ const MESSAGES = {
         'x-suffix': ' 个',
         'x-hot': true,
       },
+      [P + 'watchdog']: {
+        type: 'boolean',
+        title: '监听自检',
+        description:
+          '每分钟检查一次私信/群的监听页：观察器被页面导航带走了就原地重挂，页面卡死就重开。关掉可能漏消息。',
+        'x-hot': true,
+      },
     },
   },
 };
@@ -711,6 +720,7 @@ export const POLICY_FIELDS = {
   mustPost: { type: 'boolean' },
   maxGroups: { type: 'int', min: 1, max: 10 },
   groupTabs: { type: 'int', min: 1, max: 8 },
+  watchdog: { type: 'boolean' },
   subtitleOpen: { type: 'int', min: 0, max: 60 },
   danmakuOpen: { type: 'int', min: 0, max: 60 },
   subtitleWatch: { type: 'int', min: 0, max: 5 },

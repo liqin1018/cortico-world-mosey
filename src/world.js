@@ -174,7 +174,8 @@ export class StrollWorld {
   async tick(now = Date.now()) {
     if (!this.running || !this.cfg.enabled) return;
     const hour = hourOf(new Date(now), this.timeZone);
-    if (hour < 9 || hour >= 23) return;
+    // 出门时段可配（默认 9-23）：只在这个窗口里自己出门，省流量也少打扰
+    if (!this.inOutingWindow(hour)) return;
     if (this.policy.isQuiet() || this.policy.paused().paused) return;
     const day = dayKey(new Date(now), this.timeZone);
     // 勾了「必做」但今天还没做够的项：出门要优先补，晚上到点还要单独催
@@ -234,7 +235,13 @@ export class StrollWorld {
 
   /** 晚上还没做完必做：单独催她，最多 3 次、每次间隔 30 分钟。 */
   async maybeMustNudge(pending, hour, day) {
-    if (!pending?.length || hour < 18) return;
+    if (!pending?.length) return;
+    // 原来写死「18 点后催」；窗口换成凌晨就永远催不到。
+    // 改成「离窗口结束不到 4 小时」才开始催。
+    const { to } = this.outingWindow();
+    let left = to - hour;
+    if (left <= 0) left += 24;
+    if (left > 4) return;
     const state = this.store.data.mustNudge ?? {};
     if (state.day !== day) {
       state.day = day;
@@ -621,9 +628,15 @@ export class StrollWorld {
     };
     const { tail, fp, last, tailKeys } = this.groupTailFp(messages, seen);
     if (!seen) {
-      // 第一次看到这个群：把当前这一屏记成基线，别把历史消息全推一遍
+      /**
+       * 第一次看到这个群：正常只记基线，别把进群前的历史全推一遍。
+       * 但如果这一屏末尾就是别人说的话，很可能是「群页刚挂上、主人正在喊她」——
+       * 只把最后一条推过去。宁可多推一次，也别把第一句吞掉（她「怎么喊都不理」多半就是这里）。
+       */
       saveSeen({ fp, last, tail: tailKeys, at: Date.now() });
-      return;
+      const only = tail.slice(-1);
+      if (!only.length) return;
+      return this.pushGroupMessages(group, only);
     }
     // 最后一条没变 = 没有新消息（页面上别的地方抖了一下，不算）
     if (seen.last && seen.last === last) return;
@@ -631,6 +644,11 @@ export class StrollWorld {
     // 否则下次会把这几条自己的话当成别人的新消息推给她。
     saveSeen({ fp, last, tail: tailKeys, at: Date.now() });
     if (!tail.length) return;
+    return this.pushGroupMessages(group, tail);
+  }
+
+  /** 把群里这一小段别人的话推给她（带群名、图片、回群指令）。 */
+  async pushGroupMessages(group, tail) {
     // 记下「这次说的是哪个群」：她回话时漏了 target 也能判断出该回群
     this.lastGroupPoke = { group, at: Date.now() };
     const lines = tail.map((m) => `${m.who || '有人'}：${m.url ? `${m.text}（${m.url}）` : m.text}`);
@@ -653,9 +671,9 @@ export class StrollWorld {
       this.log?.warn?.('stroll image fetch failed (group)', { group, urls: urls.slice(0, 2) });
     }
     const meta = { platform: 'douyin', group, count: tail.length, images: urls.length };
-    if (await this.push('stroll.reply', body, meta, 'interrupt', blobs)) return;
-    if (await this.push('stroll.reply', body, meta, 'flush', blobs)) return;
-    await this.push('stroll.reply', body, meta, 'debounce', blobs);
+    if (await this.push('stroll.reply', body, meta, 'interrupt', blobs)) return true;
+    if (await this.push('stroll.reply', body, meta, 'flush', blobs)) return true;
+    return this.push('stroll.reply', body, meta, 'debounce', blobs);
   }
 
   /** 私信监听到底该不该干活：总开关、私信开关、平台开关都得是开的。 */
@@ -4039,14 +4057,36 @@ export class StrollWorld {
   }
 
   /** 自动出门只在 9:00-23:00；落在窗外就推到下一个 9:00。 */
+  /** 出门窗口：{from, to}，to=24 表示到当天结束；from===to 视为全天。 */
+  outingWindow() {
+    const from = clamp(Math.round(Number(this.cfg.outingFrom ?? 9) || 0), 0, 23);
+    const to = clamp(Math.round(Number(this.cfg.outingTo ?? 23) || 0), 0, 24);
+    return { from, to };
+  }
+
+  inOutingWindow(hour = hourOf(new Date(), this.timeZone)) {
+    const { from, to } = this.outingWindow();
+    if (from === to) return true;
+    // from > to：跨天，比如 22 点到次日 6 点
+    return from < to ? hour >= from && hour < to : hour >= from || hour < to;
+  }
+
   nextOutingWindow(ts) {
+    const { from, to } = this.outingWindow();
+    if (from === to) return ts;
     const d = new Date(ts);
     const h = d.getHours();
-    if (h < 9) d.setHours(9, 0, 0, 0);
-    else if (h >= 23) {
-      d.setDate(d.getDate() + 1);
-      d.setHours(9, 0, 0, 0);
+    if (from < to) {
+      if (h < from) d.setHours(from, 0, 0, 0);
+      else if (h >= to) {
+        d.setDate(d.getDate() + 1);
+        d.setHours(from, 0, 0, 0);
+      }
+      return d.getTime();
     }
+    // 跨天：窗口是 [from,24) ∪ [0,to)，落在里面就不用推
+    if (h >= from || h < to) return ts;
+    d.setHours(from, 0, 0, 0);
     return d.getTime();
   }
 
@@ -4180,6 +4220,8 @@ export class StrollWorld {
         background: this.cfg.background !== false,
         approval: this.cfg.approval,
         autoSessionsPerDay: Number(this.cfg.autoSessionsPerDay ?? 0),
+        outingFrom: Number(this.cfg.outingFrom ?? 9),
+        outingTo: Number(this.cfg.outingTo ?? 23),
         dailyLikes: Number(this.cfg.dailyLikes ?? 0),
         dailyComments: Number(this.cfg.dailyComments ?? 0),
         dailyFollows: Number(this.cfg.dailyFollows ?? 0),

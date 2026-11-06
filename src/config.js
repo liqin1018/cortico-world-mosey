@@ -65,6 +65,9 @@ export const DEFAULTS = {
   autoSessionsPerDay: 5,
   /** 两次自动出门之间至少隔多少分钟；和主人手动互动无关。 */
   autoGapMinutes: 90,
+  /** 只在几点到几点自己出门。from===to 视为全天；from>to 支持跨天（22 到 6）。 */
+  outingFrom: 9,
+  outingTo: 23,
   sessionMaxItems: 8,
 
   /** 兴趣词，逗号分隔；本地打分用，不额外调模型。 */
@@ -173,6 +176,24 @@ const BASIC = {
         minimum: 30,
         maximum: 360,
         'x-suffix': ' 分钟',
+        'x-hot': true,
+      },
+      [P + 'outingFrom']: {
+        type: 'integer',
+        title: '出门时段：从几点',
+        description: '只在这个时间段自己出门。想只走谷时可以填 1 到 6。',
+        minimum: 0,
+        maximum: 23,
+        'x-suffix': ' 点',
+        'x-hot': true,
+      },
+      [P + 'outingTo']: {
+        type: 'integer',
+        title: '出门时段：到几点',
+        description: '填 24 表示到当天结束。和上面填一样的值＝全天都能出门；跨天也行，比如 22 到 6。',
+        minimum: 0,
+        maximum: 24,
+        'x-suffix': ' 点',
         'x-hot': true,
       },
     },
@@ -710,6 +731,8 @@ export const POLICY_FIELDS = {
   riskGuard: { type: 'enum', values: ['off', 'light', 'strict'] },
   autoSessionsPerDay: { type: 'int', min: 0, max: 10 },
   autoGapMinutes: { type: 'int', min: 30, max: 360 },
+  outingFrom: { type: 'int', min: 0, max: 23 },
+  outingTo: { type: 'int', min: 0, max: 24 },
   sessionMaxItems: { type: 'int', min: 3, max: 12 },
   interests: { type: 'string', max: 300 },
   avoid: { type: 'string', max: 300 },

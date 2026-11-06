@@ -957,6 +957,60 @@ world.douyin.watchDigest = prevGoneDigest;
 world.watch = null;
 world.watchMiss = 0;
 
+/* ---------------- 出门时段 / 群第一句 ---------------- */
+const prevOuting = { from: world.cfg.outingFrom, to: world.cfg.outingTo };
+world.cfg.outingFrom = 22;
+world.cfg.outingTo = 6;
+check('跨天窗口：23 点在', world.inOutingWindow(23) === true);
+check('跨天窗口：3 点在', world.inOutingWindow(3) === true);
+check('跨天窗口：12 点不在', world.inOutingWindow(12) === false);
+const noon = new Date();
+noon.setHours(12, 0, 0, 0);
+const nextOuting = new Date(world.nextOutingWindow(noon.getTime()));
+check(
+  '12 点的下次出门是当天 22 点',
+  nextOuting.getHours() === 22 && nextOuting.getDate() === noon.getDate(),
+  nextOuting.toString(),
+);
+world.cfg.outingFrom = 9;
+world.cfg.outingTo = 9;
+check('填一样的值＝全天', world.inOutingWindow(3) === true && world.inOutingWindow(15) === true);
+world.cfg.outingFrom = prevOuting.from;
+world.cfg.outingTo = prevOuting.to;
+
+// 第一次看到某个群：结尾是别人说的话就推最后一句，不再整段吞掉
+const prevGroupPush = world.push;
+const prevDmWatchOn2 = world.dmWatchOn;
+const prevBlobsSoon = world.imageBlobsSoon;
+const prevRunning2 = world.running;
+const groupPushes = [];
+world.push = async (type, text) => {
+  groupPushes.push(text);
+  return true;
+};
+world.dmWatchOn = () => true;
+world.imageBlobsSoon = async () => null;
+world.running = true;
+world.store.data.dmSeen = { ...(world.store.data.dmSeen ?? {}), groups: {} };
+const groupScreen = [
+  { from: 'them', who: '甲', kind: 'text', text: '历史一' },
+  { from: 'them', who: '乙', kind: 'text', text: '历史二' },
+  { from: 'them', who: '主人', kind: 'text', text: '@桌宠 在吗' },
+];
+await world.onGroupPoke(groupScreen, '新群');
+check(
+  '第一次看到群也会推最后一句',
+  groupPushes.length === 1 && /@桌宠 在吗/.test(groupPushes[0]) && !/历史一/.test(groupPushes[0]),
+  JSON.stringify(groupPushes).slice(0, 160),
+);
+groupPushes.length = 0;
+await world.onGroupPoke(groupScreen, '新群');
+check('同一屏不会重复推', groupPushes.length === 0, `n=${groupPushes.length}`);
+world.push = prevGroupPush;
+world.dmWatchOn = prevDmWatchOn2;
+world.imageBlobsSoon = prevBlobsSoon;
+world.running = prevRunning2;
+
 console.log(checks.map(([n, ok]) => `${ok ? 'ok' : 'NO'}  ${n}`).join('\n'));
 console.log(`\n${checks.length} checks passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

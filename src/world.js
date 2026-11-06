@@ -102,6 +102,7 @@ export class StrollWorld {
     /** 一起刷的会话状态：当前视频、进入时间、刷了几条、看过哪些 */
     this.watchScrollState = null;
     this.watchBusy = false;
+    this.watchMiss = 0;
     this.watchTimerSec = 0;
     this.watchTimer = null;
     this.lastWatchPush = 0;
@@ -163,6 +164,9 @@ export class StrollWorld {
     this.timer = null;
     this.stopDmWatch();
     this.stopWatchTimer();
+    // 世界停了就别留着「正在一起看」，不然面板/status 会一直显示在看
+    this.watch = null;
+    this.watchScrollState = null;
     await this.douyin.close().catch(() => {});
     this.store.save();
   }
@@ -196,9 +200,10 @@ export class StrollWorld {
     const mustLine = pending.length
       ? `\n今天是必做日，还差：${pending.map((x) => `${x.label} ${x.left}`).join('、')}。先补这些，别只刷着看。`
       : '';
+    const maxItems = clamp(Number(this.cfg.sessionMaxItems ?? 8), 3, 12);
     await this.push(
       'stroll.due',
-      `该出门溜达了。今天还剩：${this.policy.summary()}。${mustLine}\n想逛就调 stroll action=brief（一次拿全，别连续 status/feed/inbox）；不想去就回「今天不逛」。`,
+      `该出门溜达了。今天还剩：${this.policy.summary()}。${mustLine}\n这次最多看 ${maxItems} 条，看完就回来。\n想逛就调 stroll action=brief（一次拿全，别连续 status/feed/inbox）；不想去就回「今天不逛」。`,
       { day, used: used + 1, must: pending.length > 0 },
       'debounce',
     );
@@ -1586,6 +1591,8 @@ export class StrollWorld {
         mustDo: status.mustDo ?? this.mustDoList(),
       },
       platform: actual,
+      // 「每次出门最多看几条」：让她自己按这个数收手，别无限刷
+      maxItems: clamp(Number(this.cfg.sessionMaxItems ?? 8), 3, 12),
       feed: feed.map(({ _score, ...rest }) => rest),
       inbox,
       errors: errors.length ? errors : undefined,
@@ -1605,12 +1612,14 @@ export class StrollWorld {
     const p = platform === 'douyin' || platform === 'bilibili' ? platform : this.pickPlatform();
     if (p === 'bilibili') {
       if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
-      const items = await this.bili.feed(clamp(n ?? 6, 1, 8));
+      const cap = Math.min(8, clamp(Number(this.cfg.sessionMaxItems ?? 8), 3, 12));
+      const items = await this.bili.feed(clamp(n ?? Math.min(6, cap), 1, cap));
       this.policy.noteRead('bilibili');
       return { ok: true, platform: p, items: items.map(({ _score, ...rest }) => rest) };
     }
     if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
-    const items = await this.douyin.feed(clamp(n ?? 6, 1, 8));
+    const cap = Math.min(8, clamp(Number(this.cfg.sessionMaxItems ?? 8), 3, 12));
+    const items = await this.douyin.feed(clamp(n ?? Math.min(6, cap), 1, cap));
     this.policy.noteRead('douyin');
     return { ok: true, platform: p, items: items.map(({ _score, ...rest }) => ({ kind: 'video', ...rest })) };
   }
@@ -2257,6 +2266,7 @@ export class StrollWorld {
     const info = await this.douyin.watchStart(url, { cookies: await this.watchCookies() });
     this.watch = { startedAt: Date.now(), url: info.url, title: info.title, platform: info.platform, last: null };
     this.watchScrollState = { id: '', at: Date.now(), count: 0, seen: [], retryAt: 0 };
+    this.watchMiss = 0;
     this.setPresence({
       platform: info.platform,
       id: '',
@@ -2321,7 +2331,16 @@ export class StrollWorld {
     const wantSec = this.watchPollSeconds();
     if (this.watchTimerSec !== wantSec) this.startWatchTimer();
     let digest = await this.douyin.watchDigest();
-    if (!digest) return;
+    if (!digest) {
+      // 主人把陪看窗口关了 / 页面崩了：连续三次读不到就收工，别让定时器一直空转
+      this.watchMiss = Number(this.watchMiss ?? 0) + 1;
+      if (this.watchMiss >= 3) {
+        this.log?.info?.('stroll watch page gone, auto stop');
+        await this.watchStop().catch(() => {});
+      }
+      return;
+    }
+    this.watchMiss = 0;
     // 抖音「一起刷」：播完/到点就切下一条
     const scrolled = await this.maybeWatchScroll(digest);
     if (scrolled?.digest) digest = scrolled.digest;
@@ -3420,9 +3439,9 @@ export class StrollWorld {
       parent: draft.parent,
     };
     const receipt = await this.executePlan(plan, source);
-    this.store.closeDraft(id, receipt.ok ? (receipt.uncertain ? 'unknown' : 'sent') : receipt.code === 'WRITE_UNCERTAIN' ? 'unknown' : 'failed', {
-      receipt,
-    });
+    const draftState =
+      receipt.uncertain || receipt.code === 'WRITE_UNCERTAIN' ? 'unknown' : receipt.ok ? 'sent' : 'failed';
+    this.store.closeDraft(id, draftState, { receipt });
     this.store.save();
     return receipt;
   }
@@ -3506,14 +3525,15 @@ export class StrollWorld {
         this.log?.warn?.('stroll quota consume failed', { action, message: error?.message });
       }
       const receipt = {
-        ok: true,
+        // result.ok === false 时不能再报 ok:true，否则她以为发出去了、还会重试成 DUPLICATE
+        ok: !uncertain,
         action,
         platform,
         target,
         group: !!plan.group,
         // 发到哪儿要写死：她以前会把「私信主人」当成「发到群里」
         ...(action === 'dm' ? { to: plan.group ? 'group' : 'owner' } : {}),
-        ...(uncertain ? { uncertain: true } : {}),
+        ...(uncertain ? { code: result?.code ?? 'UNCONFIRMED', uncertain: true } : {}),
         result,
         receipt: this.receiptText(action, platform, result, plan),
       };

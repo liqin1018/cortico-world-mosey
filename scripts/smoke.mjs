@@ -70,7 +70,11 @@ world.bili.comment = async () => ({ ok: true, confirmed: false, rpid: '1' });
 const unc = await world
   .executePlan({ action: 'comment', platform: 'bilibili', target: 'BV1unc', text: '测试', dedupeKey: 'dedupe-unc', kind: 'video' }, 'model')
   .catch((e) => ({ ok: false, error: e?.message }));
-check('没拿到回执会标成不确定', unc.ok === true && unc.uncertain === true, JSON.stringify(unc).slice(0, 120));
+check(
+  '没拿到回执会标成不确定',
+  unc.ok === false && unc.uncertain === true && unc.code === 'UNCONFIRMED',
+  JSON.stringify(unc).slice(0, 160),
+);
 world.bili.comment = oldBiliComment;
 // 这次执行会留下 lastWriteAt（节奏控制），恢复回去，别影响后面的风控断言
 world.store.data.lastWriteAt = prevWriteAt;
@@ -931,6 +935,27 @@ world.watchScrollState = null;
 world.cfg.watchScroll = prevPauseCfg.on;
 world.cfg.watchScrollSec = prevPauseCfg.sec;
 world.cfg.watchPollSec = prevPauseCfg.poll;
+
+// 陪看窗口被关掉：连续三次读不到就自动结束
+const prevGoneDigest = world.douyin.watchDigest;
+const prevGoneStop = world.watchStop;
+let stopCalls = 0;
+world.watchStop = async () => {
+  stopCalls += 1;
+  return { ok: true };
+};
+world.watch = { startedAt: Date.now(), url: 'https://www.douyin.com/video/1', title: 'gone', platform: 'douyin', last: null };
+world.watchMiss = 0;
+world.douyin.watchDigest = async () => null;
+await world.watchTickInner();
+await world.watchTickInner();
+check('两次读不到还不收工', stopCalls === 0, `calls=${stopCalls}`);
+await world.watchTickInner();
+check('连续三次读不到就自动结束', stopCalls === 1, `calls=${stopCalls}`);
+world.watchStop = prevGoneStop;
+world.douyin.watchDigest = prevGoneDigest;
+world.watch = null;
+world.watchMiss = 0;
 
 console.log(checks.map(([n, ok]) => `${ok ? 'ok' : 'NO'}  ${n}`).join('\n'));
 console.log(`\n${checks.length} checks passed`);

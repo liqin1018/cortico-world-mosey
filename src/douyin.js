@@ -5286,6 +5286,8 @@ export class DouyinBrowser {
       )
       .catch(() => []);
     const seenSet = new Set(seen.map(String));
+    // watchDigest 偶尔读不到（页面正在跳）：拿 currentId 兜底，别让 newId !== undefined 变成假成功
+    const baseId = before?.videoId || currentId;
     const pick = cands
       .filter((c) => {
         const id = idOf(c.href);
@@ -5300,7 +5302,7 @@ export class DouyinBrowser {
       const after = await this.watchDigest();
       const newId = idOf(page.url());
       // 只有真换了才算成功：goto 失败时 URL 还是原来那条，不能当已经刷过去了
-      if (changedFrom(after) || (newId && newId !== before?.videoId)) {
+      if (changedFrom(after) || (newId && newId !== baseId)) {
         await this.ensureWatchPlaying(page);
         return { ok: true, via: 'list', digest: after };
       }
@@ -5368,7 +5370,10 @@ export class DouyinBrowser {
       .first()
       .boundingBox()
       .catch(() => null);
-    const clip = box && box.width >= 120 && box.height >= 90 ? box : null;
+    const clip =
+      box && box.width >= 120 && box.height >= 90
+        ? { x: Math.max(0, box.x), y: Math.max(0, box.y), width: box.width, height: box.height }
+        : null;
     const buf = await page.screenshot({ type: 'jpeg', quality: 58, ...(clip ? { clip } : {}) }).catch(() => null);
     if (!buf) return null;
     return { bytes: buf, mime: 'image/jpeg', name: '陪看画面', fallbackText: '（陪同观看的当前画面）' };

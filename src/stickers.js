@@ -121,15 +121,6 @@ export class StickerBook {
     return { ok: true, duplicate: false, entry };
   }
 
-  addFile(absPath, meta = {}) {
-    try {
-      const buf = fs.readFileSync(absPath);
-      return this.addBuffer(buf, { ...meta, ext: path.extname(absPath) });
-    } catch (error) {
-      return { ok: false, error: `读不了这个文件：${error?.message ?? error}` };
-    }
-  }
-
   list({ query = '', tag = '', limit = 20 } = {}) {
     const q = String(query ?? '').trim().toLowerCase();
     const t = String(tag ?? '').trim().toLowerCase();

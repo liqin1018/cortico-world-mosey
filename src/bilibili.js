@@ -1216,15 +1216,6 @@ export class Bilibili {
       .slice(0, limit);
   }
 
-  async hasLike(bvid) {
-    try {
-      const data = await this.request('/x/web-interface/archive/has/like', { bvid }, { cacheMs: 0 });
-      return Number(data) === 1;
-    } catch {
-      return null;
-    }
-  }
-
   async relation(uid) {
     try {
       const data = await this.request('/x/relation', { fid: String(uid) }, { cacheMs: 0 });

@@ -602,7 +602,8 @@
 /* ---------------- 额度 ---------------- */
 .stroll-meters {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  /* 六张卡排一行：左边三个（点赞/评论/私信）、右边三个（群聊/关注/发动态） */
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 .stroll-meter {
@@ -622,9 +623,12 @@
   gap: 6px;
 }
 .stroll-meter-label {
-  font-size: 11px;
+  font-size: 10.5px;
   opacity: 0.6;
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .stroll-meter-num {
   display: inline-flex;
@@ -1126,6 +1130,46 @@
   margin-top: 2px;
   font-size: 10.5px;
   opacity: 0.45;
+}
+/* 陌生私信：等她点头（跟草稿同一套外观，但单独一块，永远在草稿上面） */
+.stroll-strangers {
+  margin-bottom: 10px;
+  padding: 10px 12px 12px;
+  border: 1px solid color-mix(in srgb, #fe2c55 26%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, #fe2c55 6%, transparent);
+}
+.stroll-strangers-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.stroll-strangers-head strong {
+  font-size: 12px;
+  font-weight: 650;
+  color: #fe2c55;
+}
+.stroll-stranger-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stroll-stranger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--s-line);
+  border-radius: 12px;
+  background: var(--s-surface);
+}
+.stroll-stranger-text {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .stroll-draft-actions {
   display: flex;

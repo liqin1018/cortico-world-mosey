@@ -201,7 +201,7 @@
     },
     {
       "name": "stroll_policy",
-      "description": "读/改摸鱼的规矩：每日额度、审批方式、安静时段、兴趣词、主人 UID、自动出门次数。action=get 看现状；set 传 patch；pause 拉手刹（小时）；resume 解除。改额度不会绕过周上限。",
+      "description": "看/改摸鱼的偏好。action=get 看现状（额度、审批、安静时段、主人账号都能读）；set 只能改兴趣词（interests）和不想看的内容（avoid），别的一律会被拒绝——额度/审批/主人账号/开关只能主人在面板改；pause 拉手刹（小时，你自己最多 1 小时）；resume 解除。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,

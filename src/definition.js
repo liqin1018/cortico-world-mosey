@@ -40,6 +40,13 @@ export const STROLL = {
         { value: 'normal', label: zh ? '普通窗口 1280×800' : 'Window 1280×800' },
       ];
     }
+    if (kind === 'stroll-stranger-dm') {
+      return [
+        { value: 'ask', label: zh ? '先问我，我同意再回（默认）' : 'Ask me first (default)' },
+        { value: 'auto', label: zh ? '她自己回' : 'Reply automatically' },
+        { value: 'off', label: zh ? '都不回' : 'Never reply' },
+      ];
+    }
     if (kind === 'stroll-douyin-follow') {
       return [
         { value: 'browser', label: zh ? '让她在网页里点（默认）' : 'Click in browser (default)' },

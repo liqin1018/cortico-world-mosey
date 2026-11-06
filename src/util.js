@@ -109,28 +109,6 @@ export function truncate(s, n) {
   return chars.length <= n ? text : chars.slice(0, Math.max(0, n - 1)).join('') + '…';
 }
 
-/** 只允许平台官网链接；不接受账号密码、非 https、内网地址。 */
-export function platformUrl(raw) {
-  let u;
-  try {
-    u = new URL(String(raw ?? '').trim());
-  } catch {
-    return null;
-  }
-  if (u.protocol !== 'https:' || u.username || u.password) return null;
-  const host = u.hostname.toLowerCase();
-  const ok =
-    host === 'www.bilibili.com' ||
-    host === 'bilibili.com' ||
-    host === 'm.bilibili.com' ||
-    host === 't.bilibili.com' ||
-    host === 'www.douyin.com' ||
-    host === 'douyin.com' ||
-    host === 'v.douyin.com' ||
-    host === 'www.iesdouyin.com' ||
-    host === 'iesdouyin.com';
-  return ok ? u.href : null;
-}
 
 /**
  * 在主人自己的默认浏览器里打开链接（不是桌宠的后台浏览器）。
@@ -314,9 +292,6 @@ export function parseDouyinId(value) {
   return fromUrl?.[1] ?? null;
 }
 
-export function stableKey(parts) {
-  return parts.map((p) => String(p ?? '').replace(/[|\n]/g, ' ')).join('|').slice(0, 500);
-}
 
 export function randomCode(prefix = 'd') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -338,13 +313,6 @@ export function parseKeywords(text) {
     .slice(0, 30);
 }
 
-export function safeJson(text, fallback = null) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return fallback;
-  }
-}
 
 /**
  * 正文里自己写了「@昵称」，而发的时候又会前置一个真 @ → 页面上就成了 @ 两次。

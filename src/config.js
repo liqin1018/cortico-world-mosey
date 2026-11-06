@@ -25,12 +25,18 @@ export const DEFAULTS = {
 
   dailyLikes: 16,
   dailyComments: 6,
+  /** 私信（发给别人）：B站和抖音共用一个池子；抖音群聊不算私信，走下面 dailyGroups */
+  dailyDms: 10,
+  /** 抖音群聊（群里说话） */
+  dailyGroups: 20,
   dailyFollows: 3,
   dailyPosts: 2,
   dailySaves: 8,
   /** 勾上=这项是「每天必须完成」的目标，而不只是上限 */
   mustLike: false,
   mustComment: false,
+  mustDm: false,
+  mustGroup: false,
   mustFollow: false,
   mustPost: false,
   /** 最多认几个群（名单 + 发送）；常驻监听页另算 */
@@ -39,6 +45,10 @@ export const DEFAULTS = {
   groupTabs: 3,
   /** 监听自检：页面卡死/观察器丢了自动重挂，默认开 */
   watchdog: true,
+  /** 陌生人的私信：ask=先问主人 / auto=她自己回 / off=都不回（主人不受影响） */
+  strangerDmMode: 'ask',
+  /** 私信黑名单：昵称片段或 uid，逗号分隔 */
+  strangerDmBlock: '',
   /** 字幕/弹幕带多少：后台 open 与一起看分开，数字越大越详细、token 越高 */
   subtitleOpen: 12,
   danmakuOpen: 30,
@@ -121,6 +131,12 @@ export const DEFAULTS = {
   /** 风控力度：off 只记账不拦人（默认）/ light 只在验证码时停 30 分钟 / strict 旧的长时间冷却。 */
   riskGuard: 'off',
   riskPauseHours: 48,
+  /** 额外允许发图的目录（绝对路径，逗号分隔）。默认空 = 只发工坊和收件箱里的图。 */
+  allowedImageDirs: '',
+  /** 对方只发了个表情/图片、一个字没写时，本地直接回一句，不过模型（快）。 */
+  quickMediaReply: true,
+  /** 给几个活跃陌生人开「常驻页」（每个 = 一个后台标签页）。0 = 不开。 */
+  strangerMaxPages: 2,
 };
 
 const P = 'worlds.stroll.';
@@ -267,6 +283,21 @@ const QUOTA = {
         maximum: 100,
         'x-suffix': ' 条',
       },
+      [P + 'dailyDms']: {
+        type: 'integer',
+        title: '每天最多私信',
+        description:
+          '发给别人的私信（陌生人、私聊对象）算这里；给主人的私信不限量，抖音群聊也不算私信。B站和抖音共用一个额度，不设上限，想填多少填多少。',
+        minimum: 0,
+        'x-suffix': ' 条',
+      },
+      [P + 'dailyGroups']: {
+        type: 'integer',
+        title: '每天最多群聊',
+        description: '在抖音群里说话的条数（不算私信额度）。',
+        minimum: 0,
+        'x-suffix': ' 条',
+      },
       [P + 'dailyFollows']: {
         type: 'integer',
         title: '每天最多关注',
@@ -297,6 +328,16 @@ const QUOTA = {
         type: 'boolean',
         title: '必做：评论',
         description: '勾上后，今天必须完成「每天最多评论」的条数。审批不是 auto 时评论会进草稿，批准后才算完成。',
+      },
+      [P + 'mustDm']: {
+        type: 'boolean',
+        title: '必做：私信',
+        description: '勾上后，今天必须发够「每天最多私信」的条数。没有可回的人时她会告诉你，不会硬找陌生人发。',
+      },
+      [P + 'mustGroup']: {
+        type: 'boolean',
+        title: '必做：群聊',
+        description: '勾上后，今天必须在群里说够「每天最多群聊」的条数。群里没人说话时不算她的错，她会说明。',
       },
       [P + 'mustFollow']: {
         type: 'boolean',
@@ -336,7 +377,8 @@ const INTERACT = {
       [P + 'allowDm']: {
         type: 'boolean',
         title: '可以发私信',
-        description: '只发给主人，不发陌生人。',
+        description:
+          '关掉后私信全停（包括回陌生人）。给主人发私信不限量；回别人占「每日额度」里的私信额度。谁能给她发私信在上一组设置。',
       },
       [P + 'allowPost']: {
         type: 'boolean',
@@ -445,6 +487,14 @@ const ADVANCED = {
         maximum: 168,
         'x-suffix': ' 小时',
       },
+      [P + 'allowedImageDirs']: {
+        type: 'string',
+        title: '额外允许发图的目录',
+        description:
+          '默认空：她只能发「图片工坊」和「收到的图」这两个目录里的图片（jpg/png/webp/gif，单张 ≤8MB）。' +
+          '确实要让她发别的目录（比如你自己存的图），填绝对路径，多个用逗号分隔。' +
+          '填了就代表这个目录里的图她都可能发出去，别填桌面/文档这种混着私人文件的目录。',
+      },
 
     },
   },
@@ -490,6 +540,11 @@ const VIEWING = {
         minimum: 0,
         maximum: 600,
         'x-suffix': ' 秒',
+      },
+      [P + 'openTalk']: {
+        type: 'boolean',
+        title: '后台看完也说一句',
+        description: '不在一起看、她自己刷到一条时，要不要主动跟你聊一句。会多花一点 token。',
       },
 
     },
@@ -569,13 +624,7 @@ const WATCH = {
         description: '面板上永远有「正在看」浮条；选「对话里也说一句」会多花一点 token。',
         'x-hot': true,
       },
-      [P + 'openTalk']: {
-        type: 'boolean',
-        title: '后台看完也说一句',
-        description: '看完视频后主动跟主人说一句，会多花一点 token。',
-      },
-      [P + 'watchWindow']: {
-        type: 'string',
+      [P + 'watchWindow']: {        type: 'string',
         title: '陪看窗口多大',
         description: '最大化够用；全屏会隐藏标题栏，按 F11 退出。',
         'x-options': 'stroll-watch-window',
@@ -658,6 +707,38 @@ const MESSAGES = {
         'x-suffix': ' 秒',
         'x-hot': true,
       },
+      [P + 'strangerDmMode']: {
+        type: 'string',
+        title: '陌生人的私信',
+        description:
+          '「先问我」会把私信转给你、你点头她才回；「她自己回」按人设直接回；「都不回」当没看见。回陌生人占「每天最多私信」的额度，主人不受影响。',
+        'x-options': 'stroll-stranger-dm',
+        'x-hot': true,
+      },
+      [P + 'quickMediaReply']: {
+        type: 'boolean',
+        title: '本地秒回',
+        description:
+          '对方只发了个表情/图片，或者只说了句「在吗 / 你好 / hi」这类开场白时，不叫模型，' +
+          '直接从几句短话里挑一句回过去（0.3-0.6 秒，走模型要 2-5 秒）。' +
+          '只在「她自己回」模式下生效，同一个人 3 分钟最多秒回一次；有内容的话一律交给她自己想。' +
+          '对方发的是表情时，回的是真的表情字符（😄 这种），不是「（笑）」这种文字描述。',
+      },
+      [P + 'strangerMaxPages']: {
+        type: 'integer',
+        title: '陌生人常驻页数量',
+        description:
+          '给最近聊过的几个陌生人各开一个后台页，页面停在他的会话上——读表情/图片、发消息都跟主人私信一样快' +
+          '（发送 200ms 级）。每个页约 50-100MB 内存，默认 2，最多 4；填 0 = 不开（省内存，但表情包/图片可能读不到）。',
+        minimum: 0,
+        maximum: 4,
+        'x-suffix': ' 个',
+      },
+      [P + 'strangerDmBlock']: {
+        type: 'string',
+        title: '私信黑名单',
+        description: '这些人发的私信一律不理。填昵称片段或 UID，多个用逗号隔开。',
+      },
       [P + 'groupWatch']: {
         type: 'boolean',
         title: '盯着抖音群',
@@ -703,7 +784,6 @@ const MESSAGES = {
 export const CONFIG_GROUPS = [BASIC, OWNER, QUOTA, VIEWING, WATCH, SHORTS, MESSAGES, INTERACT, ADVANCED];
 
 /** 旧引用兼容：第一组即基础组。 */
-export const CONFIG_GROUP = BASIC;
 
 /** 可经 stroll_policy 修改的字段及边界。 */
 export const POLICY_FIELDS = {
@@ -720,16 +800,22 @@ export const POLICY_FIELDS = {
   allowSave: { type: 'boolean' },
   dailyLikes: { type: 'int', min: 0, max: 200 },
   dailyComments: { type: 'int', min: 0, max: 100 },
+  dailyDms: { type: 'int', min: 0, max: 9999 },
+  dailyGroups: { type: 'int', min: 0, max: 9999 },
   dailyFollows: { type: 'int', min: 0, max: 100 },
   dailyPosts: { type: 'int', min: 0, max: 30 },
   dailySaves: { type: 'int', min: 0, max: 100 },
   mustLike: { type: 'boolean' },
   mustComment: { type: 'boolean' },
+  mustDm: { type: 'boolean' },
+  mustGroup: { type: 'boolean' },
   mustFollow: { type: 'boolean' },
   mustPost: { type: 'boolean' },
   maxGroups: { type: 'int', min: 1, max: 10 },
   groupTabs: { type: 'int', min: 1, max: 8 },
   watchdog: { type: 'boolean' },
+  strangerDmMode: { type: 'enum', values: ['ask', 'auto', 'off'] },
+  strangerDmBlock: { type: 'string', max: 500 },
   subtitleOpen: { type: 'int', min: 0, max: 60 },
   danmakuOpen: { type: 'int', min: 0, max: 60 },
   subtitleWatch: { type: 'int', min: 0, max: 5 },
@@ -768,6 +854,9 @@ export const POLICY_FIELDS = {
   tokenDailyBudget: { type: 'int', min: 1000, max: 50000 },
   commentMaxChars: { type: 'int', min: 20, max: 300 },
   riskPauseHours: { type: 'int', min: 1, max: 168 },
+  allowedImageDirs: { type: 'string', max: 600 },
+  quickMediaReply: { type: 'boolean' },
+  strangerMaxPages: { type: 'int', min: 0, max: 4 },
 };
 
 export function validatePolicyPatch(patch) {

@@ -81,9 +81,10 @@ function sectionHead(title, hint, right) {
 const METERS = [
   { key: 'like', label: '点赞' },
   { key: 'comment', label: '评论' },
+  { key: 'dm', label: '私信' },
+  { key: 'group', label: '群聊' },
   { key: 'follow', label: '关注' },
   { key: 'post', label: '发动态' },
-  { key: 'save', label: '稍后再看' },
 ];
 
 const ACTION_LABEL = {
@@ -592,8 +593,31 @@ export default {
         }
         draftHead.append(draftTitle, seg);
         const draftHint = el('p', undefined, 'stroll-muted');
+        // 陌生人私信：模式是「先问我」时，别人发来的消息停在这里等她点头。
+        // 以前只靠她在对话里说一句，主人一忙就错过了，所以必须有个看得见的地方。
+        const strangerSec = el('div', undefined, 'stroll-strangers');
+        strangerSec.style.display = 'none';
+        const strangerHead = el('div', undefined, 'stroll-strangers-head');
+        const strangerTitle = el('strong', '有人找你，等你点头');
+        const strangerScan = button('现在查一下', async () => {
+          strangerScan.disabled = true;
+          strangerScan.textContent = '正在看…';
+          try {
+            const r = await ctx.invoke('stranger_scan');
+            if (r?.ok === false) throw new Error(r.error || '没查到');
+            msgSet(r?.receipt || '查完了。');
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+          }
+          strangerScan.disabled = false;
+          strangerScan.textContent = '现在查一下';
+          refresh();
+        }, 'ghost xs');
+        strangerHead.append(strangerTitle, strangerScan);
+        const strangerList = el('div', undefined, 'stroll-stranger-list');
+        strangerSec.append(strangerHead, strangerList);
         const draftBox = el('div', undefined, 'stroll-drafts');
-        draftSec.append(draftHead, draftHint, draftBox);
+        draftSec.append(draftHead, draftHint, strangerSec, draftBox);
         root.append(draftSec);
 
         /* ---------------- 这一条 ---------------- */
@@ -754,6 +778,8 @@ export default {
           const mustKeys = {
             like: cfg.mustLike === true,
             comment: cfg.mustComment === true,
+            dm: cfg.mustDm === true,
+            group: cfg.mustGroup === true,
             follow: cfg.mustFollow === true,
             post: cfg.mustPost === true,
           };
@@ -1013,10 +1039,11 @@ export default {
               : '把 sec_uid、主页链接或抖音号填到设置里的「主人抖音」';          dyOwner.classList.toggle('is-warn', !dyBound);
           inboxDmDy.style.display = dyBound && !owner.douyinSame ? '' : 'none';
 
-          // 待批
+          // 待批（草稿 + 等你点头的陌生人私信，一起算进这个数字）
           const drafts = data?.drafts ?? [];
-          draftTitle.lastChild.textContent = String(drafts.length);
-          draftTitle.lastChild.className = `stroll-count ${drafts.length ? 'on' : ''}`.trim();
+          const strangerPend = data?.strangerPending ?? [];
+          draftsCount = drafts.length;
+          renderStrangers(strangerPend);
           draftHint.textContent = APPROVAL_HINT[p.approval] ?? '';
           for (const [value, b] of segButtons) b.classList.toggle('on', value === p.approval);
           draftBox.replaceChildren();
@@ -1568,7 +1595,64 @@ export default {
           return card;
         }
 
+        /**
+         * 只重画「等你点头」这一块。
+         * 之前面板完全没有自动刷新：检测到了也不会自己冒出来，非得主人点「刷新」。
+         * 现在每秒调一次轻量接口（只读内存里的待办，不查登录态），变了才重画。
+         */
+        let draftsCount = 0;
+        let strangerSig = '__init__';
+        function renderStrangers(items) {
+          const list = items ?? [];
+          strangerSec.style.display = list.length ? '' : 'none';
+          strangerList.replaceChildren();
+          for (const item of list) strangerList.append(strangerCard(item));
+          const total = draftsCount + list.length;
+          draftTitle.lastChild.textContent = String(total);
+          draftTitle.lastChild.className = `stroll-count ${total ? 'on' : ''}`.trim();
+          strangerSig = list.map((x) => x.id).join(',');
+        }
+
+        function strangerCard(item) {
+          const card = el('div', undefined, 'stroll-stranger');
+          const iconBox = el('私', 'stroll-draft-icon');
+          iconBox.style.setProperty('--tone', '#fe2c55');
+          const body = el('div', undefined, 'stroll-draft-body');
+          const head = el('p');
+          head.append(el('strong', item.who || '有人'), el('span', ` · ${ago(Math.round((Date.now() - Number(item.at || 0)) / 1000))}`, 'stroll-draft-meta'));
+          body.append(head);
+          body.append(el('p', cut(item.text || '（发来一条非文字消息）', 80), 'stroll-stranger-text'));
+          body.append(
+            el(
+              'span',
+              `${PLATFORM_LABEL[item.platform] ?? item.platform} · 陌生私信 · 你说回她才回`,
+              'stroll-draft-meta',
+            ),
+          );
+          const actions = el('div', undefined, 'stroll-draft-actions');
+          actions.append(
+            button('让她回', () => act('stranger_approve', item.id), 'solid xs'),
+            button('不回', () => act('stranger_reject', item.id), 'ghost xs'),
+          );
+          card.append(iconBox, body, actions);
+          return card;
+        }
+
         /* ---------------- 动作 ---------------- */
+        // 1 秒轮询「有没有人等我点头」：新消息进来 1 秒内就出现在面板上
+        setInterval(() => {
+          if (document.visibilityState !== 'visible') return;
+          if (!strangerSec.isConnected) return;
+          ctx
+            .invoke('stranger_pending')
+            .then((r) => {
+              if (!r?.ok) return;
+              if (r.sig === strangerSig) return;
+              renderStrangers(r.items ?? []);
+            })
+            .catch(() => {});
+        }, 1000);
+
         async function refresh() {
           if (busy) return;
           busy = true;

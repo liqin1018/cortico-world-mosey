@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { cutChars, formatCount, formatDuration, humanPause, imageMimeOf, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
+import { cutChars, formatDuration, humanPause, imageMimeOf, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
 
 const ORIGIN = 'https://www.douyin.com';
 
@@ -289,13 +289,16 @@ function dmObserverScript() {
   if (win.__strollDmObs) return 'already';
   const text = (el) => String(el.innerText || '').replace(/\s+/g, ' ').trim();
   const sigOf = () => {
+    // 「陌生人消息」入口always要算进签名：陌生私信不进主列表，只在这里露头
+    const sbox = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
+    const stranger = sbox ? text(sbox).slice(0, 80) : '';
     const items = Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]'));
     if (!items.length) {
       // 会话列表那一行（还没点进会话，或会话被切走时）也要能发现新消息
       const rows = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]')).slice(0, 3).map(text).join('|');
-      return `0#${rows.slice(-200)}`;
+      return `0#${rows.slice(-200)}#${stranger}`;
     }
-    return `${items.length}#${items.slice(0, 6).map(text).join('|').slice(-200)}`;
+    return `${items.length}#${items.slice(0, 6).map(text).join('|').slice(-200)}#${stranger}`;
   };
   let last = sigOf();
   let timer = 0;
@@ -325,6 +328,8 @@ function dmObserverScript() {
     return !!(
       el.closest('[data-e2e="msg-item-content"]') ||
       el.closest('[data-e2e="conversation-item"]') ||
+      el.closest('[class*="StrangerBox"]') ||
+      el.closest('[class*="StrangerConversationList"]') ||
       el.closest('[class*="messageList"]') ||
       el.closest('[class*="MessageList"]') ||
       el.closest('[class*="message-list"]') ||
@@ -583,6 +588,28 @@ export class DouyinBrowser {
      * 它不开新浏览器（同一个 context，cookie 共用），只是一个后台 tab。
      */
     this.dmPage = null;
+    /**
+     * 「回私信」专用页：停在 /chat，发完就**留在那个人的会话上**。
+     *
+     * 之前回陌生人用的是主页（this.page）：发完 60 秒就被收走，下次又要冷启动 +
+     * 跳 /chat（7-9 秒）。主人那条快，就是因为她有一个永远停在会话上的页。
+     * 这里给陌生人配一个同样的：第一次慢，之后同一个人就是点一下、打字、回车。
+     */
+    this.chatPage = null;
+    /**
+     * chatPage 上现在开着谁。
+     * 和 `openThread` 分开：那个是给 dmPage（主人监听页）/ readThread 共用的，
+     * 混在一起会让「发送前要不要点会话」判断错，把话打进别人那儿。
+     */
+    this.chatThread = '';
+    /**
+     * 陌生人的「常驻页」：谁进了快车道，就给他开一个页面停在他的会话上（最多 2 个）。
+     *
+     * 主人私信和群聊之所以能稳稳读到图，是因为**页面本来就停在那儿**；
+     * 陌生人在共享页上「找→点→读」，标题又读不出来，每次都靠猜。
+     * 这里照抄群聊那套：一人一页，读完不换人。
+     */
+    this.strangerPages = new Map();
     /** dmPage 上正开着谁的会话。 */
     this.dmThread = '';
     /** 正在建 dmPage 的 promise，防并发重复建。 */
@@ -839,6 +866,205 @@ export class DouyinBrowser {
     if (waitMs) await page.waitForTimeout(waitMs);
     await this.checkRisk(page);
     this.lastError = '';
+  }
+
+  /** 拿到那个「回私信专用页」（没有就建一个，同一个 context，cookie 共用）。 */
+  async chatPageForSend() {
+    const ctx = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });
+    if (this.chatPage && !this.chatPage.isClosed()) return this.chatPage;
+    this._reserving = Number(this._reserving ?? 0) + 1;
+    let page;
+    try {
+      page = await ctx.newPage();
+      // 打个标记：getPage() 不能把它当成自己的空页抢走
+      page.__strollRole = 'chat';
+    } finally {
+      this._reserving = Math.max(0, Number(this._reserving ?? 0) - 1);
+    }
+    page.setDefaultTimeout(20000);
+    this.chatPage = page;
+    this.chatThread = '';
+    page.on('close', () => {
+      if (this.chatPage === page) {
+        this.chatPage = null;
+        this.chatThread = '';
+      }
+    });
+    return page;
+  }
+
+  /** 这个陌生人有没有常驻页（world 用它决定要不要读正文）。 */
+  hasStrangerPage(who) {
+    const hit = this.strangerPages?.get(String(who ?? '').trim());
+    return !!(hit?.page && !hit.page.isClosed());
+  }
+
+  /**
+   * 给某个陌生人开一个常驻页（最多 max 个，超了关最旧的）。
+   *
+   * 和群监听一样：建页 → 进 /chat → 点开这个人 → 收起文件夹，之后读消息直接读这一页。
+   * 失败就返回 null，调用方退回共享页那条老路，不影响发送。
+   */
+  async ensureStrangerPage(who, { max = 2 } = {}) {
+    const want = String(who ?? '').trim();
+    if (!want) return null;
+    this.strangerPages ??= new Map();
+    const hit = this.strangerPages.get(want);
+    if (hit?.page && !hit.page.isClosed()) {
+      hit.at = Date.now();
+      return hit.page;
+    }
+    return this.serialize(async () => {
+      const again = this.strangerPages.get(want);
+      if (again?.page && !again.page.isClosed()) return again.page;
+      // 超上限：关最久没动过的那个
+      if (this.strangerPages.size >= max) {
+        const [oldWho, old] = [...this.strangerPages.entries()].sort((a, b) => a[1].at - b[1].at)[0] ?? [];
+        if (oldWho) {
+          this.strangerPages.delete(oldWho);
+          if (old?.page && !old.page.isClosed()) await old.page.close().catch(() => {});
+        }
+      }
+      const ctx = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });
+      this._reserving = Number(this._reserving ?? 0) + 1;
+      let page;
+      try {
+        page = await ctx.newPage();
+        page.__strollRole = 'stranger';
+      } finally {
+        this._reserving = Math.max(0, Number(this._reserving ?? 0) - 1);
+      }
+      page.setDefaultTimeout(20000);
+      this.strangerPages.set(want, { page, at: Date.now(), thread: '' });
+      page.on('close', () => {
+        const cur = this.strangerPages.get(want);
+        if (cur?.page === page) this.strangerPages.delete(want);
+      });
+      try {
+        await this.gotoChat(page);
+        // 新页面：等「陌生人消息」入口渲染出来再点
+        /**
+         * 注意：有些账号根本没有「陌生人消息」文件夹（日志里 `hasBox: false`），
+         * 对方就排在主会话列表里。所以文件夹点不到还要退回主列表，否则常驻页永远建不起来。
+         */
+        await page
+          .waitForSelector('[class*="conversationStrangerBoxwrapper"]', { timeout: 3000 })
+          .catch(() => {});
+        let ok = await this.clickStrangerThread(page, want, { blind: true }).catch(() => false);
+        if (!ok) ok = await this.clickThread(page, want).catch(() => false);
+        if (!ok) throw new Error('no thread');
+        await this.closeStrangerInbox(page).catch(() => {});
+        this.strangerPages.get(want).thread = want;
+        return page;
+      } catch {
+        this.strangerPages.delete(want);
+        if (!page.isClosed()) await page.close().catch(() => {});
+        return null;
+      }
+    });
+  }
+
+  /**
+   * 刷新一个陌生人的常驻页：重新加载 → 重新点开会话。
+   *
+   * 后台标签页有时收不到新消息（列表还停在上一句），读出来自然对不上。
+   * 这条路只在「补图」时用，慢一点没关系。
+   */
+  async refreshStrangerPage(who) {
+    const want = String(who ?? '').trim();
+    const hit = this.strangerPages?.get(want);
+    if (!want || !hit?.page || hit.page.isClosed()) return false;
+    return this.serialize(async () => {
+      try {
+        await hit.page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await hit.page
+          .waitForSelector('[data-e2e="conversation-item"]', { timeout: 6000 })
+          .catch(() => {});
+        let ok = await this.clickStrangerThread(hit.page, want, { blind: true }).catch(() => false);
+        if (!ok) ok = await this.clickThread(hit.page, want).catch(() => false);
+        if (ok) {
+          hit.thread = want;
+          hit.at = Date.now();
+        }
+        return !!ok;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** 收掉所有陌生人常驻页。 */
+  async releaseStrangerPages() {
+    const all = [...(this.strangerPages?.values() ?? [])];
+    this.strangerPages?.clear();
+    for (const x of all) {
+      if (x?.page && !x.page.isClosed()) await x.page.close().catch(() => {});
+    }
+  }
+
+  /**
+   * 预热：把「回私信」那个常驻页提前切到某个陌生人。
+   *
+   * 纯后台：不读消息、不发请求，只把会话点开。这一步和模型思考**并行**，
+   * 等她想好回什么时页面已经停在对方那儿，发送就只剩打字回车（实测 ~200ms）。
+   * 点不到就算了，不影响正常流程（发送时会自己点一次）。
+   */
+  async prewarmStranger(who) {
+    const want = String(who ?? '').trim();
+    if (!want) return false;
+    if (this.chatThread === want) return true;
+    if (this._prewarm === want) return false;
+    this._prewarm = want;
+    try {
+      return await this.serialize(async () => {
+        let page = null;
+        let opened = false;
+        try {
+          page = await this.chatPageForSend();
+          if (this.chatThread === want) return true;
+          if (!/\/chat/.test(String(page.url?.() ?? ''))) await this.gotoChat(page);
+          const title = await this.currentChatTitle(page).catch(() => '');
+          if (title && this.threadTitleMatches(title, want)) {
+            this.chatThread = want;
+            return true;
+          }
+          let ok = await this.clickStrangerThread(page, want, { blind: true }).catch(() => false);
+          opened = !!ok;
+          // 没有「陌生人消息」文件夹的账号，人就排在主列表里
+          if (!ok) ok = await this.clickThread(page, want).catch(() => false);
+          if (ok) this.chatThread = want;
+          return !!ok;
+        } finally {
+          // 文件夹是浮层：收起来，别挡着后面打字
+          if (opened && page && !page.isClosed()) await this.closeStrangerInbox(page).catch(() => {});
+        }
+      });
+    } catch {
+      return false;
+    } finally {
+      this._prewarm = '';
+    }
+  }
+
+  /**
+   * 快速回到聊天页。
+   *
+   * `goto()` 是给「看视频/主页」用的：里面有人味停顿 2.2-3.6 秒 + 再死等 5.2 秒，
+   * 一次差不多 8 秒。回私信用它，就是「为什么回陌生人要 10 秒」的主要来源。
+   * 聊天页只需要「列表渲染出来」，等条件就够。
+   */
+  async gotoChat(page) {
+    this.openThread = '';
+    if (page === this.chatPage) this.chatThread = '';
+    const t0 = Date.now();
+    await page.goto(`${ORIGIN}/chat`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    const ready = await page
+      .waitForSelector('[data-e2e="conversation-item"]', { timeout: 6000 })
+      .then(() => true)
+      .catch(() => false);
+    await this.checkRisk(page).catch(() => {});
+    this.lastError = '';
+    return { ok: ready, ms: Date.now() - t0 };
   }
 
   async status() {
@@ -1360,6 +1586,15 @@ export class DouyinBrowser {
   }
 
   /** 私信监听期间把聊天页留在后台，别反复冷启动浏览器。 */
+  /** 收掉「回私信专用页」（关监听 / 退出时用）。 */
+  async releaseChatPage() {
+    const page = this.chatPage;
+    this.chatPage = null;
+    this.chatThread = '';
+    this.openThread = '';
+    if (page && !page.isClosed()) await page.close().catch(() => {});
+  }
+
   keepWarm(on) {
     this.warm = !!on;
     if (this.warm) {
@@ -1373,6 +1608,8 @@ export class DouyinBrowser {
     // 关监听时聊天页也收掉：留着只会白占内存
     this.releaseDmPage().catch(() => {});
     this.releaseGroupPage().catch(() => {});
+    this.releaseChatPage().catch(() => {});
+    this.releaseStrangerPages().catch(() => {});
     if (this.page && !this.page.isClosed()) this.scheduleClose(60);
   }
 
@@ -1388,6 +1625,418 @@ export class DouyinBrowser {
    * 新消息一进 DOM 就回调 onHit(messages)。
    * 只点一次会话（第一次），之后一直是同一个页面——没有反复点击，也就没有 -509。
    */
+  /**
+   * 读「陌生人消息」文件夹。
+   *
+   * 抖音把非好友的私信单独收在「陌生人消息」里，主会话列表**看不到**——
+   * 主列表那条 `conversation-item` 只含主人和群。入口本身带最新一条的预览，
+   * 所以先用入口文本判断有没有新东西，再点进去读完整列表，读完点返回。
+   */
+  /**
+   * 主会话列表里都有谁（不含「陌生人消息」文件夹里那批）。
+   * 用来兜底找人：主人和群之外的行，就是陌生人开的新会话。
+   */
+  async conversationRows(page = this.dmPage) {
+    if (!page || page.isClosed()) return [];
+    return await page
+      .evaluate(() => {
+        const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+        const TIME = /^(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/;
+        const TRAIL = /\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/;
+        return Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'))
+          .filter((el) => !el.closest('[class*="StrangerConversationList"]'))
+          .slice(0, 40)
+          .map((el) => {
+            const t = el.querySelector('[class*="ConversationItemtitle"]');
+            const lines = String(el.innerText || '')
+              .split('\n')
+              .map(norm)
+              .filter(Boolean);
+            let name = norm(t?.innerText || lines[0] || '');
+            let at = '';
+            // 标题块里常常连着时间：「海底月 9分钟前」。不剥掉的话，
+            // 名字每分钟变一次（9分钟前→刚刚），会话永远找不到、去重也永远不重合。
+            const m = TRAIL.exec(name);
+            if (m) {
+              at = m[1];
+              name = name.slice(0, m.index).trim();
+            }
+            if (!at) at = lines.find((l) => TIME.test(l)) || '';
+            // 预览：去掉标题那行（名字/时间）和纯时间行，再把开头重复的昵称切掉
+            const rest = lines.filter((l, i) => !(i === 0 && l.includes(name)) && !TIME.test(l));
+            let preview = rest.join(' ').trim();
+            if (name && preview.startsWith(name)) preview = preview.slice(name.length).replace(/^[\s:：]+/, '');
+            return { name, at, preview };
+          })
+          .filter((row) => row.name);
+      })
+      .catch(() => []);
+  }
+
+  /**
+   * 只读「陌生人消息」入口那一行文字，不点进去。
+   *
+   * 入口本身就带最新一条：「陌生人消息 刚刚 海底月：你好」。
+   * 很多账号/布局下根本点不开那个文件夹（或者类名换了），光靠入口也能发现新消息。
+   * 返回 { who, at, preview, raw } 或 null。
+   */
+  async strangerEntry(page = this.dmPage) {
+    if (!page || page.isClosed()) return null;
+    const raw = await page
+      .evaluate(() => {
+        const box =
+          document.querySelector('[class*="conversationStrangerBoxwrapper"]') ||
+          document.querySelector('[class*="StrangerBox"]') ||
+          document.querySelector('[class*="strangerBox"]');
+        return box ? String(box.innerText || '').replace(/\s+/g, ' ').trim() : '';
+      })
+      .catch(() => '');
+    if (!raw) return null;
+    const TIME = /(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})/;
+    // 「陌生人消息 刚刚 海底月：你好」→ 名字取「时间」后面、冒号前面那段
+    const afterTime = raw.replace(/^.*?陌生人消息\s*/, '');
+    const m = TIME.exec(afterTime);
+    const tail = m ? afterTime.slice(m.index + m[0].length).trim() : afterTime;
+    const nameHit = /^([^:：]{1,30})[:：]\s*(.*)$/.exec(tail);
+    const who = (nameHit?.[1] ?? '').trim();
+    const preview = (nameHit?.[2] ?? '').trim();
+    return {
+      who,
+      at: m ? m[1] : '',
+      preview: preview || tail,
+      raw,
+    };
+  }
+
+  /**
+   * 诊断用：把私信页里跟「陌生人」有关的东西全抓一份，落盘给主人/开发看。
+   * 线上出过一次「扫描一直空」，光看日志猜不出来，只能把 DOM 掏出来。
+   */
+  async strangerDebug(page = this.dmPage) {
+    if (!page || page.isClosed()) return { ok: false, error: '私信页没开' };
+    return await page
+      .evaluate(() => {
+        const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+        const cls = (el) => String(el?.className ?? '');
+        const box = Array.from(document.querySelectorAll('[class*="Stranger"],[class*="stranger"]')).map((el) => ({
+          tag: el.tagName,
+          cls: cls(el).slice(0, 120),
+          text: norm(el.innerText).slice(0, 120),
+        }));
+        const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]')).map((el) => ({
+          inFolder: !!el.closest('[class*="StrangerConversationList"]'),
+          text: norm(el.innerText).slice(0, 80),
+        }));
+        // 左栏所有容器的类名：抖音改版时靠这个找新入口
+        const wrap = Array.from(document.querySelectorAll('[class*="conversation" i],[class*="Conversation"]'))
+          .slice(0, 40)
+          .map((el) => cls(el).slice(0, 90))
+          .filter(Boolean);
+        return {
+          url: location.href,
+          hasBox: !!document.querySelector('[class*="conversationStrangerBoxwrapper"]'),
+          strangerNodes: box.slice(0, 12),
+          items: items.slice(0, 20),
+          wrapClasses: [...new Set(wrap)].slice(0, 20),
+        };
+      })
+      .catch((error) => ({ ok: false, error: String(error?.message ?? error) }));
+  }
+
+  async strangerThreads({ owner = '', groups = [] } = {}) {
+    const page = this.dmPage;
+    if (!page || page.isClosed()) return [];
+
+    const info = await page
+      .evaluate(() => {
+        const box = document.querySelector('[class*="conversationStrangerBoxwrapper"]');
+        if (!box) return null;
+        const text = String(box.innerText || '').replace(/\s+/g, ' ').trim();
+        // 入口上挂的红点/未读数也要算：只有「陌生人消息」四个字、预览不更新时，
+        // 光看文字永远发现不了新消息（线上就是这样漏的）
+        const badge = Array.from(box.querySelectorAll('[class*="adge"],[class*="Dot"],[class*="dot"],[class*="unread"],[class*="Unread"]'))
+          .map((n) => String(n.textContent || '').trim())
+          .filter((s) => s && s.length <= 4)
+          .join(',');
+        return { text, badge };
+      })
+      .catch(() => null);
+    if (!info) return [];
+    const sig = `${info.text}|${info.badge}`;
+    // 亮着红点时 3 分钟重看一次（红点可能一直不清），没红点就 10 分钟
+    const maxAge = info.badge ? 3 * 60 * 1000 : 10 * 60 * 1000;
+    // 入口没变化 = 上次已经读完这一屏，不用反复点进去
+    if (sig === this.strangerBoxSig && Date.now() - Number(this.strangerBoxSigAt ?? 0) < maxAge) {
+      return [];
+    }
+    this.strangerBoxSig = sig;
+    this.strangerBoxSigAt = Date.now();
+
+    const opened = await this.openStrangerInbox(page);
+    if (!opened) return [];
+    try {
+      return await this.readStrangerList(page, { owner, groups });
+    } finally {
+      await this.closeStrangerInbox(page);
+    }
+  }
+
+  /**
+   * 「陌生人消息」文件夹现在是不是真的开着。
+   *
+   * 关键：关过一次之后容器仍然留在 DOM 里，只是被 translateX 推到屏幕外 + opacity:0。
+   * 所以不能只看 count()>0 —— 那样会「以为开着」，然后去点一个屏幕外的行，什么都没发生。
+   */
+  async strangerInboxOpen(page = this.dmPage) {
+    if (!page || page.isClosed()) return false;
+    return await page
+      .evaluate(() => {
+        const wrap = document.querySelector('[class*="StrangerConversationListlistWrapper"]');
+        if (!wrap) return false;
+        const r = wrap.getBoundingClientRect();
+        if (r.width < 50 || r.left < -10) return false;
+        const cs = getComputedStyle(wrap);
+        return Number(cs.opacity || 1) > 0.5;
+      })
+      .catch(() => false);
+  }
+
+  /** 等文件夹滑出来。50ms 一轮：通常 150-300ms 就到位，比死等 700ms 快一半。 */
+  async waitStrangerInbox(page = this.dmPage, ms = 1500) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (await this.strangerInboxOpen(page)) return true;
+      await page.waitForTimeout(50);
+    }
+    return false;
+  }
+
+  /** 点开「陌生人消息」文件夹；打不开返回 false。 */
+  async openStrangerInbox(page = this.dmPage) {
+    if (!page || page.isClosed()) return false;
+    if (await this.strangerInboxOpen(page)) return true;
+    const box = page.locator('[class*="conversationStrangerBoxwrapper"]').first();
+    // 新开的页面要等列表渲染出来：以前直接 count() 判 0 就返回失败，
+    // 常驻页就是这么一直建不起来的（日志里 `stroll stranger page ok: false`）。
+    if (!(await box.count().catch(() => 0))) {
+      await page
+        .waitForSelector('[class*="conversationStrangerBoxwrapper"]', { timeout: 2500 })
+        .catch(() => {});
+    }
+    if (!(await box.count().catch(() => 0))) return false;
+    await box.click({ force: true }).catch(() => {});
+    if (await this.waitStrangerInbox(page, 1500)) return true;
+    // 老布局没有动画/样式读不出来时，退回 count 判断，别把能用的页面判死
+    return await page
+      .locator('[class*="StrangerConversationListlistWrapper"]')
+      .count()
+      .then((n) => n > 0)
+      .catch(() => false);
+  }
+
+  /**
+   * 在「陌生人消息」文件夹里找一个人：只读不点，找完把文件夹关回去。
+   * 用于「她能不能给这个人发私信」的判断——推送里给过名字，发送时得先确认这个人真的在。
+   */
+  async findStranger(name) {
+    const page = this.dmPage;
+    const want = String(name ?? '').trim();
+    if (!want || !page || page.isClosed()) return null;
+    const norm = (s) => String(s ?? '').replace(/[\s\u3000]+/g, '').toLowerCase();
+    const w = norm(want);
+    if (!w) return null;
+    const wasOpen = await this.strangerInboxOpen(page);
+    if (!wasOpen && !(await this.openStrangerInbox(page))) return null;
+    /** 在 rows 里按「整串相等 → 唯一包含」找，找不到返回 null。 */
+    const pick = (rows) => {
+      const exact = rows.find((r) => norm(r.who) === w);
+      if (exact) return exact;
+      // 只认唯一的包含命中：两个都像就不猜，宁可让她说「认不出」
+      const partial = rows.filter((r) => norm(r.who).includes(w) || w.includes(norm(r.who)));
+      return partial.length === 1 ? partial[0] : null;
+    };
+    try {
+      const rows = await this.readStrangerList(page, {});
+      const hit = pick(rows);
+      if (hit) return hit;
+      // 时间格式没认出来（版本差异）时退回「只看第一行」，至少还能按名字认人
+      const names = await page
+        .evaluate(() => {
+          const box = document.querySelector('[class*="StrangerConversationListlistWrapper"]');
+          if (!box) return [];
+          return Array.from(box.querySelectorAll('[data-e2e="conversation-item"]'))
+            .slice(0, 30)
+            .map((r) => String((r.innerText || '').split('\n')[0] || '').trim())
+            .filter(Boolean);
+        })
+        .catch(() => []);
+      return pick(names.map((who) => ({ who, at: '', preview: '', unread: 0 })));
+    } finally {
+      if (!wasOpen) await this.closeStrangerInbox(page);
+    }
+  }
+
+  /** 主列表找不到时，去「陌生人消息」文件夹里点开这个会话。 */
+  /**
+   * 点开「陌生人消息」里的某个人。
+   *
+   * `blind: true` = 标题读不出来时也认「点到了」。这个布局的聊天标题经常读不出
+   * （选择器全落空），严格核对会让这条路永远失败——调用方必须自己核对内容
+   * （`readStrangerThread` 会拿列表预览和读到的消息比对）。
+   */
+  async clickStrangerThread(page, name, { blind = false } = {}) {
+    const want = String(name ?? '').trim();
+    if (!want || !page || page.isClosed()) return false;
+    const norm = (s) => String(s ?? '').replace(/[\s\u3000]+/g, '').toLowerCase();
+    const open = async () => {
+      if (await this.strangerInboxOpen(page)) return true;
+      return await this.openStrangerInbox(page);
+    };
+    if (!(await open())) return false;
+    // 按昵称整串点，不用 hasText 子串：行里还有消息预览，可能正好含这个名字
+    const hit = await page
+      .evaluate(
+        ({ w }) => {
+          const box = document.querySelector('[class*="StrangerConversationListlistWrapper"]');
+          if (!box) return null;
+          const flat = (s) => String(s ?? '').replace(/\s+/g, '').toLowerCase();
+          const rows = Array.from(box.querySelectorAll('[data-e2e="conversation-item"]'));
+          const nameOf = (el) => {
+            const t = el.querySelector('[class*="ConversationItemtitle"]');
+            const raw = String(t?.innerText || (el.innerText || '').split('\n')[0] || '').trim();
+            /**
+             * 抖音把时间也塞进标题：「海底月 刚刚」「海底月 10:55」。
+             * 不剥掉的话整串相等永远不成立，blind 点击会一直判「点不到」。
+             */
+            return raw
+              .replace(
+                /\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/,
+                '',
+              )
+              .trim();
+          };
+          let el = rows.find((r) => flat(nameOf(r)) === w) ?? null;
+          const exact = !!el;
+          if (!el) {
+            const partial = rows.filter((r) => flat(nameOf(r)).includes(w) || w.includes(flat(nameOf(r))));
+            if (partial.length === 1) el = partial[0];
+          }
+          if (!el) return null;
+          el.scrollIntoView({ block: 'nearest' });
+          const r = el.getBoundingClientRect();
+          if (r.width < 10 || r.height < 10) return null;
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), exact };
+        },
+        { w: norm(want) },
+      )
+      .catch(() => null);
+    if (!hit) return false;
+    await page.mouse.click(hit.x, hit.y).catch(() => {});
+    /**
+     * 先看一眼标题读不读得出来：这个布局经常整块读不到。
+     * 读不到就别白等 1.2 秒——点了就返回，让调用方用内容去核对。
+     */
+    const probe = await this.currentChatTitle(page).catch(() => '');
+    if (!probe) return !!(blind && hit.exact);
+    /**
+     * 以前写死等 900ms。真正要等的是「右边聊天区切到这个人了」——
+     * 每 50ms 看一眼标题，通常 150-350ms 对上，慢的时候也不会比死等更久。
+     */
+    const deadline = Date.now() + 1200;
+    while (Date.now() < deadline) {
+      const title = await this.currentChatTitle(page).catch(() => '');
+      if (title && this.threadTitleMatches(title, want)) return true;
+      await page.waitForTimeout(50);
+    }
+    return false;
+  }
+
+  /** 诊断用：最近两条「谁说的 + 类型 + 开头」，读错会话时一眼能看出来。 */
+  sampleOf(msgs) {
+    return (Array.isArray(msgs) ? msgs : [])
+      .slice(-2)
+      .map((m) => `${m.from}:${m.kind}:${String(m.text ?? '').slice(0, 10)}`);
+  }
+
+  /**
+   * 读到的最后几条，和列表预览对得上吗？
+   *   'text'  = 正文里能找到预览那句话（最可信）
+   *   'media' = 预览是「表情/图片」这类占位，正文里也有表情/图片（可信度中等）
+   *   ''      = 对不上，多半是切错了会话
+   */
+  threadMatchMode(msgs, preview) {
+    const flat = (s) => String(s ?? '').replace(/[\s\u3000]+/g, '').toLowerCase();
+    // 预览常黏着未读数（「[撸袖子] 1」「在吗 2」），先剥掉再比，否则永远对不上
+    const pv = flat(String(preview ?? '').replace(/\s+\d{1,2}$/, ''));
+    const list = (Array.isArray(msgs) ? msgs : []).filter((m) => m && m.from !== 'me');
+    if (!list.length) return '';
+    if (!pv) return 'text';
+    // `[大力拥抱]` 这种表情名字也要认；关键词只是兜底（「[动画表情]」「转发图片」）
+    const media = /^\[[^\]]{1,12}\]$/.test(pv) || /(表情|图片|视频|分享|名片|语音|文件)/.test(pv);
+    const pv8 = pv.slice(0, 8);
+    for (const m of list.slice(-3)) {
+      const t = flat(m.text);
+      if (t && pv && (t.includes(pv) || pv.includes(t.slice(0, 8)) || (pv8 && t.includes(pv8)))) return 'text';
+      if (media && ['emoji', 'image', 'share', 'card'].includes(m.kind)) return 'media';
+    }
+    return '';
+  }
+
+  /** 读文件夹里的会话行（和主列表同一套 DOM，只是容器不同）。 */
+  async readStrangerList(page = this.dmPage, { owner = '', groups = [] } = {}) {
+    if (!page || page.isClosed()) return [];
+    const rows = await page
+      .evaluate(() => {
+        const box = document.querySelector('[class*="StrangerConversationListlistWrapper"]');
+        if (!box) return [];
+        return Array.from(box.querySelectorAll('[data-e2e="conversation-item"]'))
+          .slice(0, 30)
+          .map((r) => (r.innerText || '').replace(/\s+/g, ' ').trim());
+      })
+      .catch(() => []);
+
+    const TIME = /^(.*?)\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})\s+(.*)$/;
+    const ownerName = String(owner ?? '').trim();
+    const skip = new Set((groups ?? []).map((g) => String(g ?? '').trim()).filter(Boolean));
+    const out = [];
+    for (const text of rows) {
+      const m = String(text).match(TIME);
+      if (!m) continue;
+      const who = m[1].trim();
+      if (!who) continue;
+      if (ownerName && who === ownerName) continue;
+      if (skip.has(who)) continue;
+      let preview = m[3].trim();
+      let unread = 0;
+      // 行尾那个孤立数字是未读数
+      const tail = preview.match(/^(.*?)\s+(\d{1,2})$/);
+      if (tail) {
+        preview = tail[1].trim();
+        unread = Number(tail[2]);
+      }
+      out.push({ who, at: m[2], preview, unread, raw: text });
+    }
+    return out;
+  }
+
+  /** 退回主私信列表。 */
+  async closeStrangerInbox(page = this.dmPage) {
+    if (!page || page.isClosed()) return;
+    // 返回箭头是标题栏里那个 svg；点标题栏空白处没反应
+    const icon = page.locator('[class*="StrangerConversationListicon"]').first();
+    if (await icon.count().catch(() => 0)) {
+      await icon.click({ force: true }).catch(() => {});
+    } else {
+      const head = page.locator('[class*="StrangerConversationListhead"]').first();
+      if (await head.count().catch(() => 0)) {
+        await head.click({ force: true }).catch(() => {});
+      } else {
+        await page.keyboard.press('Escape').catch(() => {});
+      }
+    }
+    await page.waitForTimeout(500);
+  }
+
   async watchDm(name, onHit) {
     const who = String(name ?? '').trim();
     if (!who) return { ok: false, code: 'NO_NAME' };
@@ -2403,22 +3052,6 @@ export class DouyinBrowser {
   }
 
   /** note 页两段式展开评论输入框（先点图标展开侧栏，再点提示条）。 */
-  async openCommentEditorViaHint(page) {
-    const icon = page.locator('[data-e2e="feed-comment-icon"]').first();
-    const r = await icon.boundingBox().catch(() => null);
-    if (r) await page.mouse.click(r.x + r.width / 2, r.y + r.height / 2).catch(() => {});
-    // 侧栏展开 + 提示条渲染通常 0.6-1.2 秒；以前固定睡 2.2 秒，白白多等一秒
-    let hint = await this.commentHint(page);
-    const deadline = Date.now() + 3200;
-    while (!hint && Date.now() < deadline) {
-      await page.waitForTimeout(220);
-      hint = await this.commentHint(page);
-    }
-    if (!hint) return this.findCommentInput(page);
-    await page.mouse.click(hint.x, hint.y).catch(() => {});
-    return this.waitCommentInput(page, 1800);
-  }
-
   /**
    * 走抖音页面自己的发布接口发评论。
    * 实测（2026-11）：页面内 fetch 不需要额外签名，1 秒内就返回 cid/status；
@@ -3644,10 +4277,6 @@ export class DouyinBrowser {
     return await input.evaluate(toolbarProbeInPage).catch(() => []);
   }
 
-  async msgCount(page) {
-    return await page.locator('[data-e2e="msg-item-content"]').count().catch(() => 0);
-  }
-
   /**
    * 消息区的「指纹」：条数 + 末尾几条的文字 + 图的数量。
    * 图片/表情消息不一定带 msg-item-content，只数那个会漏，所以指纹要放宽到 msg-item*。
@@ -3663,6 +4292,42 @@ export class DouyinBrowser {
         return `${items.length}#${tail}`;
       })
       .catch(() => '');
+  }
+
+  /** 消息区状态：条数 + 图片总数 + 尾部文字。发图要拿它判断「真的落地了没有」。 */
+  async msgState(page) {
+    return await page
+      .evaluate(() => {
+        const items = Array.from(document.querySelectorAll('[data-e2e^="msg-item"]'));
+        let imgTotal = 0;
+        for (const el of items) imgTotal += el.querySelectorAll('img').length;
+        let tail = '';
+        for (const el of items.slice(-2)) {
+          tail += `|${String(el.innerText || '').replace(/\s+/g, ' ').slice(0, 24)}`;
+        }
+        return { count: items.length, imgTotal, tail };
+      })
+      .catch(() => null);
+  }
+
+  /**
+   * 等消息区稳定下来再取基线。
+   *
+   * 这是「她说发了、对方没收到」的根源：发图前页面上可能正在重渲染
+   * （刚点开会话、刚关掉表情面板），基线取在「还没渲染完」的那一刻，
+   * 之后列表从 0 变成 8 条，就被当成「我的图发出去了」。
+   * 连续两次读到的条数和尾部一样才算稳定。
+   */
+  async stableMsgState(page, { maxWait = 1200 } = {}) {
+    const deadline = Date.now() + maxWait;
+    let prev = await this.msgState(page);
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(100);
+      const next = await this.msgState(page);
+      if (next && prev && next.count === prev.count && next.tail === prev.tail) return next;
+      prev = next ?? prev;
+    }
+    return prev ?? { count: 0, imgTotal: 0, tail: '' };
   }
 
   async inputText(page, input) {
@@ -3705,7 +4370,8 @@ export class DouyinBrowser {
 
   /** 点面板里的第 i 个表情；点完确认真的发出去了（或至少进了输入框）。 */
   async clickPanelItem(page, input, item) {
-    const before = await this.chatSig(page);
+    // 基线必须取「稳定后」的条数：列表还在渲染时取，会把重渲染当成「发出去了」
+    const before = await this.stableMsgState(page);
     await page.mouse.click(item.x, item.y).catch(() => {});
     let sent = false;
     for (let i = 0; i < 18; i += 1) {
@@ -3730,11 +4396,32 @@ export class DouyinBrowser {
     return { ok: false, code: 'NOT_SENT', error: '表情插进输入框了，但回车没发出去' };
   }
 
-  /** 按 src 认人：抖音 CDN 的图带签名参数，比对时只看到 `?` 之前。 */
+  /**
+   * 按 src 认人。
+   *
+   * 抖音的图有两条会变：
+   *   - 查询串（签名、过期时间）每分钟都不同；
+   *   - **CDN 域名**会在 p3-sign / p26-sign / p9-sign 之间轮换。
+   * 以前只剥了协议和查询串，域名一换就认不出来 → 面板里明明有这张也判「没有」，
+   * 于是退回「按图片发」。现在只比路径（`/obj/im-resource/xxx`），两边都能认。
+   */
   sameSrc(a, b) {
-    const clean = (s) => String(s ?? '').split('?')[0].replace(/^https?:/, '');
-    if (!a || !b) return false;
-    return clean(a) === clean(b);
+    const norm = (v) => {
+      const t = String(v ?? '').trim();
+      if (!t) return '';
+      try {
+        return new URL(t, 'https://x.invalid').pathname || '';
+      } catch {
+        return t.split('?')[0].replace(/^https?:\/\/[^/]+/, '');
+      }
+    };
+    const x = norm(a);
+    const y = norm(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    // 兜底：路径末段一样也算（有的版本会给同一张图不同的目录前缀）
+    const tail = (v) => v.split('/').filter(Boolean).pop() ?? '';
+    return tail(x) === tail(y) && tail(x).length >= 12;
   }
 
   /**
@@ -3757,23 +4444,48 @@ export class DouyinBrowser {
   async sendStickerInChat(page, input, { file = '', src = '', name = '' } = {}) {
     // 有 src 才值得开面板找（开面板要一两秒）；纯本地文件直接走上传
     if (src) {
+      /**
+       * 表情面板是「带着动画弹出来」的：后台标签页里动画可能一直不推进，
+       * 元素读出来 opacity 还是 0，`probePanel` 就判定「面板没打开」。
+       * 先把这一页提到前台再点，命中率明显不一样（headless 下没有副作用）。
+       */
+      await page.bringToFront().catch(() => {});
       const opened = await this.openEmojiPanel(page, input);
       if (opened.ok) {
         const hit = opened.panel.items.find((it) => this.sameSrc(it.src, src));
         if (hit) {
           const r = await this.clickPanelItem(page, input, hit);
           await this.closeChatModals(page);
-          if (r.ok) return { ...r, sticker: name };
+          if (r.ok) return { ...r, sticker: name, panel: 'hit' };
         }
         // 面板开着会盖住输入区，走上传前先关掉，不然发送按钮点不到
         await this.closeChatModals(page);
+        /**
+         * 面板开着但没找到这张：留一条诊断，不然只能看到「退化成按图片发」。
+         * 常见原因是 src 的 CDN 域名换了（已按路径比对修过），或者这张根本不在收藏里。
+         */
+        this.lastStickerDiagnosis = {
+          at: Date.now(),
+          reason: 'not-in-panel',
+          items: opened.panel.items.length,
+          want: String(src).split('?')[0].split('/').pop() ?? '',
+          sample: opened.panel.items.slice(0, 3).map((it) => String(it.src ?? '').split('?')[0].split('/').pop() ?? ''),
+        };
+      } else {
+        this.lastStickerDiagnosis = {
+          at: Date.now(),
+          reason: opened.code ?? 'no-panel',
+          error: String(opened.error ?? '').slice(0, 120),
+        };
       }
+    } else {
+      this.lastStickerDiagnosis = { at: Date.now(), reason: 'no-src' };
     }
     if (file && fs.existsSync(file)) {
       const up = await this.sendChatImage(page, input, file);
-      return { ...up, sticker: name };
+      return { ...up, sticker: name, panel: 'fallback-image', diagnosis: this.lastStickerDiagnosis };
     }
-    return { ok: false, code: 'NO_STICKER', error: '表情面板里没有这张，也没有本地文件可发。' };
+    return { ok: false, code: 'NO_STICKER', error: '表情面板里没有这张，也没有本地文件可发。', diagnosis: this.lastStickerDiagnosis };
   }
 
   /** 抖音聊天上传只稳收 jpg/png/gif/mp4；webp/heic 转成 jpeg 再传（顺便缩到 1280，传得更快）。 */
@@ -3918,7 +4630,19 @@ export class DouyinBrowser {
   }
 
   async afterImagePicked(page, input, before) {
-    const changed = async () => (await this.chatSig(page)) !== before;
+    const beforeCount = Number(before?.count ?? -1);
+    /**
+     * 「发出去了」的唯一判据：消息条数比基线多。
+     *
+     * 以前是「指纹变了就算」——而指纹是 `条数#前三条文字`，列表一重渲染（或者对方正好来消息）
+     * 就变，于是明明没发出去也返回 ok:true，她就说「发了」，对方什么都没收到。
+     * 基线条数在上一步已经等稳定了，所以 +1 才是真消息。
+     */
+    const changed = async () => {
+      if (beforeCount < 0) return (await this.chatSig(page)) !== before;
+      const st = await this.msgState(page);
+      return !!st && st.count > beforeCount;
+    };
     /**
      * 抖音选完图会先弹一个确认框：
      *   「发送给 小月月一直在玩, 穹, 大萌神(3)   s_811c597ed5c8.png  118.2 KB   取消   发送（1）」
@@ -4471,11 +5195,13 @@ export class DouyinBrowser {
           if (s.startsWith('/')) return `https://www.douyin.com${s}`;
           return '';
         };
-        const urlsIn = (el) => {
+        const urlsIn = (el, allowSmall = false) => {
           const out = [];
           for (const im of el.querySelectorAll('img, source')) {
-            // 头像（36px）、表情小图标先排掉，别把发送人头像当成图片消息
-            if (im.tagName === 'IMG' && im.naturalWidth && im.naturalWidth < 60) continue;
+            // 头像是 36px 左右，先排掉，别把它当成图片消息。
+            // 但**表情消息本身就很小**（小黄脸 ~30px）：那条路要 allowSmall，
+            // 否则表情的图永远抓不到，只剩「[表情]」三个字。
+            if (im.tagName === 'IMG' && im.naturalWidth && im.naturalWidth < 60 && !allowSmall) continue;
             if (/aweme-avatar/i.test(String(im.currentSrc || im.src || ''))) continue;
             for (const attr of ['currentSrc', 'src', 'data-src', 'data-original', 'srcset']) {
               const v = im[attr] ?? im.getAttribute?.(attr);
@@ -4543,7 +5269,7 @@ export class DouyinBrowser {
          * 图源是 blob: / data: 时（抖音有些图是先取回来再用 blob URL 显示的），
          * 直接把字节读成 dataURL。blob 是同源的，不受 CORS 限制。
          */
-        const dataUrlOf = async (el) => {
+        const dataUrlOf = async (el, minSide = 0) => {
           /**
            * 抖音的聊天图是**加密存的**：CDN 上直接下回来是一堆随机字节（实测 200 + application/octet-stream），
            * 由页面脚本解密后再画出来。所以真正能用的只有「屏幕上已经解出来的画面」：
@@ -4554,7 +5280,8 @@ export class DouyinBrowser {
            */
           const big = (d) => d && d.length > 200;
           for (const cv of el.querySelectorAll('canvas')) {
-            if (!cv.width || !cv.height) continue;
+            // minSide：表情那条路要排除 16px 的 UI 小图标（画出来只会是一团糊）
+            if (!cv.width || !cv.height || cv.width < minSide) continue;
             if (cv.__strollData) return cv.__strollData;
             try {
               const d = cv.toDataURL('image/jpeg', 0.86);
@@ -4589,7 +5316,7 @@ export class DouyinBrowser {
             }
             // 普通 https 图：如果页面给它开了 CORS，画一轮也能拿到像素。
             // 头像不算（36px 那张，画出来也不是对方发的图）。
-            if (im.complete && im.naturalWidth && !/aweme-avatar/i.test(src)) {
+            if (im.complete && im.naturalWidth && im.naturalWidth >= minSide && !/aweme-avatar/i.test(src)) {
               try {
                 const c = document.createElement('canvas');
                 const scale = Math.min(1, 1280 / Math.max(im.naturalWidth, im.naturalHeight));
@@ -4640,6 +5367,21 @@ export class DouyinBrowser {
           let title = '';
           let author = '';
           let image = '';
+          /**
+           * 抖音的 emoji 经常把**名字**塞进 text / innerText（「[抠鼻]」「[微笑]」），
+           * 只看 `p.text` 就会当成一句文字，走到 text 分支，永远取不到图——
+           * 线上表现就是「只收到表情包的名字」。
+           */
+          const emojiFlag = !!(p.emoji_type || p.image_type || p.package_id || p.resource_type);
+          const bracketOnly = /^\[[^\]\n]{1,12}\]$/.test(raw);
+          const hasMedia = !!imgs || !!el.querySelector('canvas');
+          /**
+           * 只看名字就够了：抖音有些表情不是 <img>，而是 div 的 background-image
+           * （有些还是加密的下发图），那种 `imgs` 是 0——以前因此判成「文字」，
+           * 于是一个表情只剩个名字。进了这条分支至少会去 dataUrlOf / 背景图里捞一次。
+           */
+          const mediaLike = emojiFlag || bracketOnly;
+
           if (p.itemId) {
             // 分享的视频 / 图文。image_count > 1 是图集，规范地址是 /note/
             const photos = Number(p.image_count || 0) > 1 || Number(p.awemeType) === 68;
@@ -4654,29 +5396,35 @@ export class DouyinBrowser {
             author = cut(p.name || p.desc, 30);
             url = `https://www.douyin.com/user/${p.secUID}`;
             text = `[分享了 ${author || '某人的主页'}]`;
-          } else if (p.text) {
+          } else if (!mediaLike && p.text) {
             text = cut(p.text, 200);
             url = urlIn(text);
-          } else if (raw) {
+          } else if (!mediaLike && raw) {
             text = cut(raw, 200);
             url = urlIn(raw);
-          } else if (imgs || el.querySelector('canvas')) {
+          } else if (hasMedia || mediaLike) {
             // 大表情 / 贴纸也走 img，但 props 里有 emoji_type / package_id 这些标记；
             // 有些图是解密后画到 canvas 上的，没有 img
-            const isEmoji = !!(p.emoji_type || p.image_type || p.package_id || p.resource_type);
+            const isEmoji = emojiFlag || bracketOnly;
             kind = isEmoji ? 'emoji' : 'image';
-            text = isEmoji ? '[表情]' : `[图片${imgs > 1 ? `×${imgs}` : ''}]`;
-            // 图片消息：先拿「屏幕上已经解出来的画面」（抖音的 CDN 图是加密的），
-            // 拿不到再退回去找地址下载。
-            let shown = kind === 'image' ? await dataUrlOf(el) : '';
-            if (!shown && kind === 'image') {
+            // 有名字就用名字（「[抠鼻]」），比一个「[表情]」有用；没名字才用占位
+            text = isEmoji ? (bracketOnly ? raw : '[表情]') : `[图片${imgs > 1 ? `×${imgs}` : ''}]`;
+            /**
+             * 图片和表情走**同一条**取像素的路。
+             *
+             * 以前这行是 `kind === 'image' ? await dataUrlOf(el) : ''`——表情被明确跳过，
+             * 于是永远只有「[表情]」三个字，线上就是「看不到表情包，只有表情两个字」。
+             * 抖音的表情多半是加密 CDN、blob 或 canvas，只有这条路能拿到画面。
+             */
+            let shown = await dataUrlOf(el, isEmoji ? 16 : 0);
+            if (!shown) {
               const row = rowOf(el);
-              if (row && row !== el) shown = await dataUrlOf(row);
+              if (row && row !== el) shown = await dataUrlOf(row, isEmoji ? 16 : 0);
             }
-            let cand = urlsIn(el);
+            let cand = urlsIn(el, isEmoji);
             if (!cand.length) {
               const row = rowOf(el);
-              if (row && row !== el) cand = urlsIn(row);
+              if (row && row !== el) cand = urlsIn(row, isEmoji);
             }
             const propUrl = absUrl(imgFromProps(el) || p.url || p.image_url || p.origin_url || p.image?.url || '');
             // 有签名参数的那条才是能下的（srcset 里常混一条没有 query 的缩略图地址）
@@ -4901,6 +5649,118 @@ export class DouyinBrowser {
   }
 
   /** 点开某个会话并读消息。已经在这个会话里就不重复点。 */
+  /**
+   * 读某个**陌生人**的最后几条消息。
+   *
+   * 陌生人不在主会话列表里，`readThread` 那种 hasText 点击找不到；得走「陌生人消息」文件夹。
+   * 用「回私信」那个常驻页（chatPage），不碰主人的监听页（dmPage）——否则读一眼陌生人
+   * 就把主人那边的会话切走了。
+   *
+   * 读不到就返回 []：调用方退回列表预览。宁可只有一个占位文案，
+   * 也不能因为「切不过去」就把当前会话（可能是主人的）的话当成他说的。
+   */
+  async readStrangerThread(who, size = 8, { preview = '' } = {}) {
+    const want = String(who ?? '').trim();
+    if (!want) return [];
+    return this.serialize(async () => {
+      let page = null;
+      let openedFolder = false;
+      // 留一份诊断：读不到时能看出是「标题读不出」「点不到行」还是「内容对不上」
+      const trace = { who: want, via: '', title: '', clicked: false, mode: '', msgs: 0 };
+      try {
+        /**
+         * ① 有常驻页：直接读，不点、不导航——和主人私信完全同一条路。
+         * 这是「把主人那套复制过来」的关键：页面本来就停在对方身上。
+         */
+        const pinned = this.strangerPages?.get(want);
+        if (pinned?.page && !pinned.page.isClosed() && pinned.thread === want) {
+          trace.via = 'pinned';
+          const msgs = await this.readMessages(pinned.page, size).catch(() => []);
+          trace.msgs = Array.isArray(msgs) ? msgs.length : 0;
+          trace.sample = this.sampleOf(msgs);
+          const mode = this.threadMatchMode(msgs, preview);
+          trace.mode = mode;
+          if (mode) return this.pickStrangerMsgs(msgs, mode);
+          /**
+           * 常驻页读出来对不上：多半是**后台标签页还停在上一句**。
+           * 这里直接返回空，让上层走「补图」那条路（刷新页面再读）。
+           * 不再退到共享页再点一圈——那要 2.4 秒，而且读到的大概率也是旧内容。
+           */
+          trace.via = 'pinned-miss';
+          return [];
+        }
+        trace.via = 'chat';
+        page = await this.chatPageForSend();
+        // 不查 isLoggedIn：它要读 cookie 再探一次会话，白花几百毫秒。
+        // 没登录的话下面点会话本身就会失败，返回空即可。
+        if (!/\/chat/.test(String(page.url?.() ?? ''))) await this.gotoChat(page);
+        // ① 已经停在同一个人身上（标题读得出来时）
+        const title = await this.currentChatTitle(page).catch(() => '');
+        trace.title = String(title ?? '').slice(0, 24);
+        if (title && this.threadTitleMatches(title, want)) {
+          const msgs = await this.readMessages(page, size).catch(() => []);
+          const mode = this.threadMatchMode(msgs, preview);
+          if (mode) {
+            const picked = this.pickStrangerMsgs(msgs, mode);
+            trace.mode = mode;
+            trace.msgs = picked.length;
+            return picked;
+          }
+        }
+        /**
+         * ② 点开这个人。
+         * 标题在这个布局里读不出来是常态（上一版就是卡在这里，永远返回空）——
+         * 所以 blind 点一下，**用「读到的内容」去核对**，而不是靠标题。
+         */
+        const clicked = await this.clickStrangerThread(page, want, { blind: true }).catch(() => false);
+        trace.clicked = !!clicked;
+        // 这个函数会自己打开「陌生人消息」文件夹
+        if (clicked) {
+          openedFolder = true;
+          // 页面确实切过来了：记下来，后面发送就不用再点（200ms 级）
+          this.chatThread = want;
+        }
+        if (!clicked) {
+          // 也可能是已经变成好友的（在主列表里）
+          const main = await this.clickThread(page, want).catch(() => false);
+          if (!main) return [];
+        }
+        const deadline = Date.now() + 1200;
+        while (Date.now() < deadline) {
+          const msgs = await this.readMessages(page, size).catch(() => []);
+          trace.msgs = Array.isArray(msgs) ? msgs.length : 0;
+          trace.sample = this.sampleOf(msgs);
+          const mode = this.threadMatchMode(msgs, preview);
+          trace.mode = mode;
+          if (mode) return this.pickStrangerMsgs(msgs, mode);
+          await page.waitForTimeout(120);
+        }
+        return [];
+      } catch {
+        return [];
+      } finally {
+        this.lastStrangerRead = trace;
+        // 文件夹是浮层：只有我们自己打开的才收起来，别乱点返回
+        if (openedFolder && page && !page.isClosed()) await this.closeStrangerInbox(page).catch(() => {});
+      }
+    });
+  }
+
+  /**
+   * 只把「确认是这个会话」的消息交出去。
+   *
+   * media 模式下**只留表情/图片这类消息**：万一切错了会话，
+   * 顶多把别人的一个表情当成他的，不会把别人的文字带出去。
+   */
+  pickStrangerMsgs(msgs, mode) {
+    const list = (Array.isArray(msgs) ? msgs : []).filter((m) => m && m.from !== 'me');
+    if (!list.length) return [];
+    if (mode === 'media') {
+      return list.filter((m) => ['emoji', 'image', 'share', 'card'].includes(m.kind)).slice(-2);
+    }
+    return list.slice(-3);
+  }
+
   async readThread(page, name, size = 12) {
     const who = String(name ?? '').trim();
     if (!who) return [];
@@ -4917,13 +5777,6 @@ export class DouyinBrowser {
       await page.waitForTimeout(1600);
       msgs = await this.readMessages(page, size);
     }
-    return msgs;
-  }
-
-  /** 读某个会话，返回末尾几条（时间顺序）。 */
-  async readLatestThread(page, name, size = 12) {
-    const msgs = await this.readThread(page, name, size);
-    this.scheduleClose(60);
     return msgs;
   }
 
@@ -5084,6 +5937,23 @@ export class DouyinBrowser {
   async joinGroup(url) {
     const link = String(url ?? '').trim();
     if (!/^https?:\/\//i.test(link)) throw new DouyinError('BAD_LINK', '要一个 http/https 的群邀请链接');
+    /**
+     * 只认抖音自己的域名。
+     *
+     * 这个动作会真的把她的浏览器导航过去，然后在页面上按文字找「加入群聊」点一下——
+     * 等于「任意网址 + 一次可被诱导的点击」。别人发一个精心做的钓鱼页，
+     * 就能借她的手点不该点的地方。群邀请只会来自抖音，别的域名一律不进。
+     */
+    let host = '';
+    try {
+      host = new URL(link).hostname.toLowerCase();
+    } catch {
+      throw new DouyinError('BAD_LINK', '这个链接读不出来，换一个。');
+    }
+    const trusted = /(^|\.)douyin\.com$/.test(host) || /(^|\.)iesdouyin\.com$/.test(host);
+    if (!trusted) {
+      throw new DouyinError('BAD_LINK', `只认抖音的群邀请链接（douyin.com），这个是 ${host}，不进。`);
+    }
     return this.serialize(async () => {
       const page = await this.getPage();
       if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，进不了群');
@@ -5203,7 +6073,7 @@ export class DouyinBrowser {
    * 在聊天页发一条。mention 是「要真的 @ 到的昵称」（群里才有意义）：
    * 传了就会先从候选面板插一个真 chip，再写正文。
    */
-  async replyDm(name, text, { mention = '' } = {}) {
+  async replyDm(name, text, { mention = '', strict = false } = {}) {
     const who = String(name ?? '').trim();
     if (!who) throw new DouyinError('BAD_TARGET', '没有会话昵称，回不了');
     // 各段耗时带上：主人在追「一秒内」，得知道慢在哪一段（挂在回执里，不额外打日志）
@@ -5214,7 +6084,7 @@ export class DouyinBrowser {
     if (dm && !dm.isClosed() && this.dmThread === who) {
       // 先确认页面真的停在主人这个会话上。点不回来就别硬发——宁可走慢路径重开，
       // 也不能把私信打进别人的会话里（GLM 审出来的 #1）。
-      const onThread = await this.ensureThreadOpen(dm, who).catch(() => false);
+      const onThread = await this.ensureThreadOpen(dm, who, { strict }).catch(() => false);
       if (!onThread) {
         this.dmThread = '';
       } else {
@@ -5231,6 +6101,26 @@ export class DouyinBrowser {
             mentionDebug: this.lastMention ? '' : this.lastMentionDump || '',
           };
         }
+      }
+    }
+    /**
+     * 陌生人的常驻页：页面就停在他身上（建页时按整串同名点过，之后只读不导航）。
+     * 和主人私信那条一眼——不用找、不用点、不用跳转，直接打字回车。
+     */
+    const sp = this.strangerPages?.get(who);
+    if (sp?.page && !sp.page.isClosed() && sp.thread === who) {
+      const input = await this.waitMsgInput(sp.page, 3000).catch(() => null);
+      if (input) {
+        const t1 = Date.now();
+        await this.sendInChat(sp.page, input, text, { mention });
+        this.lastAction = `dm ${who}`;
+        sp.at = Date.now();
+        return {
+          ok: true, sent: true, fast: true, pinned: true,
+          ms: { prep: t1 - t0, input: 0, send: Date.now() - t1, total: Date.now() - t0 },
+          mentioned: mention ? !!this.lastMention : null,
+          mentionDebug: this.lastMention ? '' : this.lastMentionDump || '',
+        };
       }
     }
     // 群：那个群的监听页正停在群里，同样可以直接在那页打字（零跳转）
@@ -5254,20 +6144,31 @@ export class DouyinBrowser {
       }
     }
     return this.serialize(async () => {
-      const page = await this.getPage();
+      // 专用页：发完留在那个人的会话上，下一次同一个人的回复就是毫秒级
+      const page = await this.chatPageForSend();
       if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，发不了私信');
       try {
         // 已经在这个会话里就直接用：省一次整页跳转和点击，回私信快好几秒
-        if (this.openThread !== who || !/\/chat/.test(page.url())) {
-          if (!/\/chat/.test(page.url())) await this.goto(page, `${ORIGIN}/chat`, 5200);
-          const ok = await this.clickThread(page, who);
-          if (!ok) throw new DouyinError('NO_DM', '聊天列表里找不到这个会话，可能被新消息刷下去了');
+        // 用 chatThread 而不是 openThread：后者被 dmPage 的读取共用，会误判
+        if (this.chatThread !== who || !/\/chat/.test(page.url())) {
+          if (!/\/chat/.test(page.url())) await this.gotoChat(page);
+          let ok = await this.clickThread(page, who);
+          if (!ok) {
+            // 主列表里没有：抖音会把非好友的私信收进「陌生人消息」文件夹
+            ok = await this.clickStrangerThread(page, who);
+          }
+          if (!ok) {
+            throw new DouyinError('NO_DM', '聊天列表和「陌生人消息」里都找不到这个会话，可能被新消息刷下去了');
+          }
           this.openThread = who;
+          this.chatThread = who;
           // 点完不用干等两秒：下面 waitMsgInput 会一轮一轮等到输入框真的能打字
           await page.waitForTimeout(200);
         }
         // 慢路径也核一次标题：openThread 只是我们记的，页面可能没真的切过去
-        if (!(await this.ensureThreadOpen(page, who).catch(() => false))) {
+        if (!(await this.ensureThreadOpen(page, who, { strict }).catch(() => false))) {
+          const driftTitle = await this.currentChatTitle(page).catch(() => '');
+          this.log?.warn?.('stroll thread drift', { who, title: driftTitle, url: String(page.url?.() ?? '') });
           throw new DouyinError('THREAD_DRIFT', `页面没切到「${who}」这个会话，没发`);
         }
         const input = await this.waitMsgInput(page, 6000);
@@ -5340,7 +6241,7 @@ export class DouyinBrowser {
       .evaluate(() => {
         const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
         const nodes = document.querySelectorAll(
-          '[data-e2e="chat-title"], [data-e2e="conversation-title"], [class*="ConversationHeader"], [class*="ChatHeader"], [class*="conversationHeader"], [class*="chatHeader"]',
+          '[data-e2e="chat-title"], [data-e2e="conversation-title"], [class*="ConversationHeader"], [class*="ChatHeader"], [class*="conversationHeader"], [class*="chatHeader"], [class*="ChatTitle"], [class*="chatTitle"], [class*="ConversationTitle"], [class*="conversationTitle"]',
         );
         for (const n of nodes) {
           const r = n.getBoundingClientRect();
@@ -5348,6 +6249,11 @@ export class DouyinBrowser {
           const t = clean(n.innerText);
           if (t && t.length <= 60) return t;
         }
+        /**
+         * 不做「猜一个短文本」的兜底：猜错（比如抓到「发消息」按钮）比抓不到更糟——
+         * 抓不到时调用方按「读不出来」放行，猜错会变成「明明停在这个人这儿，却判定没切过去」。
+         * 类名全换了就返回空，靠下面的日志和 actual 行为去修选择器。
+         */
         return '';
       })
       .catch(() => '');
@@ -5378,11 +6284,41 @@ export class DouyinBrowser {
    * 群页是常驻的，抖音可能自己切到别的会话（新群、刷新、消息跳转）；
    * 不确认就往当前输入框里打字，话会落到另一个群里——看起来「发了」，群里却没有。
    */
-  async ensureThreadOpen(page, who) {
-    const title = await this.currentChatTitle(page).catch(() => '');
-    if (!title || this.threadTitleMatches(title, who)) return true;
-    const ok = await this.clickThread(page, who).catch(() => false);
-    if (ok) await page.waitForTimeout(120);
+  async ensureThreadOpen(page, who, { strict = false } = {}) {
+    let title = await this.currentChatTitle(page).catch(() => '');
+    if (!title) {
+      // 刚切换会话时标题可能还没重绘：再给一次机会
+      await page.waitForTimeout(120);
+      title = await this.currentChatTitle(page).catch(() => '');
+    }
+    /**
+     * 标题读不出来 = 没法确认停在谁那儿。
+     * 默认放行（群里/主人那条路径一直这么用，读不到标题时照发）；
+     * strict 是给陌生人用的：宁可报没发，也不能把话打进别人的会话里。
+     */
+    if (!title) {
+      // 读不出标题时放行：点会话那一步已经核过（点不到会直接抛 NO_DM），
+      // 这里再拦就变成「永远发不出去」。日志留一条，方便后面修标题选择器。
+      this.lastTitleMiss = { at: Date.now(), who, url: String(page.url?.() ?? '') };
+      return true;
+    }
+    if (this.threadTitleMatches(title, who)) return true;
+    let ok = await this.clickThread(page, who).catch(() => false);
+    // 主列表里没有：抖音把非好友的私信收在「陌生人消息」文件夹里，得点进去才看得到
+    if (!ok) ok = await this.clickStrangerThread(page, who).catch(() => false);
+    if (ok) {
+      await page.waitForTimeout(120);
+      if (strict) {
+        // 点完再核一次：点错行、动画没完、标题还是旧的，都不能算切过去
+        let after = await this.currentChatTitle(page).catch(() => '');
+        if (after && this.threadTitleMatches(after, who)) return true;
+        // 切换有时候要 300-500ms 才重绘完，再看一眼，别把「慢」当成「切错」
+        await page.waitForTimeout(400);
+        after = await this.currentChatTitle(page).catch(() => '');
+        if (!after) return true; // 读不出来就放行（和上面同一条规则）
+        return this.threadTitleMatches(after, who);
+      }
+    }
     return ok;
   }
 
@@ -5397,6 +6333,16 @@ export class DouyinBrowser {
       const input = await this.waitMsgInput(slot.page, 2500).catch(() => null);
       if (input) return { page: slot.page, input, group: true, fast: true };
     }
+    /**
+     * 陌生人的常驻页：页面就停在他身上，不用导航、不用点会话。
+     * 以前发表情/发图给陌生人走的是主页（getPage）——那边要 gotoChat + 点会话，
+     * 列表还在重渲染，发图很容易被误判成「发出去了」，实际没到。
+     */
+    const sp = this.strangerPages?.get?.(name);
+    if (name && sp?.page && !sp.page.isClosed() && sp.thread === name) {
+      const input = await this.waitMsgInput(sp.page, 2500).catch(() => null);
+      if (input) return { page: sp.page, input, stranger: true, fast: true };
+    }
     if (this.dmPage && !this.dmPage.isClosed() && (!name || this.dmThread === name)) {
       const input = await this.waitMsgInput(this.dmPage, 2500).catch(() => null);
       if (input) return { page: this.dmPage, input, fast: true };
@@ -5405,10 +6351,12 @@ export class DouyinBrowser {
       const page = await this.getPage();
       if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录');
       const opened = await (async () => {
-        if (!/\/chat/.test(page.url())) await this.goto(page, `${ORIGIN}/chat`, 5200);
+        if (!/\/chat/.test(page.url())) await this.gotoChat(page);
         if (name && this.openThread !== name) {
-          const ok = await this.clickThread(page, name);
-          if (!ok) throw new DouyinError('NO_DM', '聊天列表里找不到这个会话');
+          let ok = await this.clickThread(page, name);
+          // 陌生人会话不在主列表里
+          if (!ok) ok = await this.clickStrangerThread(page, name).catch(() => false);
+          if (!ok) throw new DouyinError('NO_DM', '聊天列表和「陌生人消息」里都找不到这个会话');
           this.openThread = name;
           await page.waitForTimeout(200);
         }
@@ -5747,6 +6695,11 @@ export class DouyinBrowser {
     this.dmPage = null;
     this.dmThread = '';
     this.dmArmedAt = 0;
+    await this.chatPage?.close().catch(() => {});
+    this.chatPage = null;
+    this.chatThread = '';
+    this.openThread = '';
+    await this.releaseStrangerPages().catch(() => {});
     for (const slot of this.groupPages.values()) {
       if (slot.settle) clearTimeout(slot.settle);
       await slot.page?.close().catch(() => {});

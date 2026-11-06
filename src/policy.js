@@ -6,12 +6,13 @@ import { clamp, dayKey, hourOf, weekKey } from './util.js';
  * 测试时很容易就撞墙，而且配置页上完全看不到这个数。
  */
 const ACTION_CAPS = {
-  like: { daily: 'dailyLikes', weeklyFactor: 7, label: '赞' },
-  comment: { daily: 'dailyComments', weeklyFactor: 7, label: '评' },
-  follow: { daily: 'dailyFollows', weeklyFactor: 7, label: '关' },
-  post: { daily: 'dailyPosts', weeklyFactor: 7, label: '发' },
-  dm: { daily: 'dailyDms', weeklyFactor: 7, label: '私' },
-  save: { daily: 'dailySaves', weeklyFactor: 7, label: '存' },
+  like: { daily: 'dailyLikes', weeklyFactor: 7, label: '点赞', short: '赞' },
+  comment: { daily: 'dailyComments', weeklyFactor: 7, label: '评论', short: '评' },
+  dm: { daily: 'dailyDms', weeklyFactor: 7, label: '私信', short: '私' },
+  group: { daily: 'dailyGroups', weeklyFactor: 7, label: '群聊', short: '群' },
+  follow: { daily: 'dailyFollows', weeklyFactor: 7, label: '关注', short: '关' },
+  post: { daily: 'dailyPosts', weeklyFactor: 7, label: '发动态', short: '发' },
+  save: { daily: 'dailySaves', weeklyFactor: 7, label: '稍后再看', short: '存' },
 };
 
 export class Policy {
@@ -85,8 +86,19 @@ export class Policy {
     return { paused: true, until, reason };
   }
 
-  /** 公开动作总闸。userInitiated 是你亲手点的：只做防连点，不再按节奏拦。 */
-  check(action, platform, target, { userInitiated = false, quotaAction = action, dedupeKey = '', free = false, skipQuota = false } = {}) {
+  /**
+   * 公开动作总闸。userInitiated 是你亲手点的：只做防连点，不再按节奏拦。
+   *
+   * free    = 回主人私信：不占额度、不查重、0.5 秒只防重发
+   * fast    = 聊天类（群里说话 / 回陌生人）：**要占额度**，但节奏按聊天算（0.5 秒），
+   *           而且不查重——不然「同一个群一天只能发一条」
+   */
+  check(
+    action,
+    platform,
+    target,
+    { userInitiated = false, quotaAction = action, dedupeKey = '', free = false, skipQuota = false, fast = false, noDedupe = false } = {},
+  ) {
     if (!this.cfg.enabled) return { ok: false, code: 'DISABLED', message: '摸鱼已停用。' };
     if (platform === 'bilibili' && !this.cfg.bilibili) return { ok: false, code: 'PLATFORM_OFF', message: 'B站这边关着。' };
     if (platform === 'douyin' && !this.cfg.douyin) return { ok: false, code: 'PLATFORM_OFF', message: '抖音这边关着。' };
@@ -96,8 +108,8 @@ export class Policy {
     // 默认 off 模式下频率限流不再堵任何动作（连试都不用试的那种验证码才拦）。
     const paused = this.paused();
     if (paused.paused) {
-      // 给主人的私信永远放行：风控冷却挡的是「她自己出门互动」，不该连主人的话都不回。
-      if (!free) {
+      // 回主人私信永远放行：风控冷却挡的是「她自己出门互动」，不该连主人的话都不回。
+      if (!free && !fast) {
         return { ok: false, code: 'RISK_PAUSE', message: `先歇着：${paused.reason}。到 ${new Date(paused.until).toLocaleString('zh-CN')} 再说。` };
       }
     }
@@ -124,19 +136,20 @@ export class Policy {
     const sincePlat = Date.now() - Number((this.store.data.lastWriteByPlat ?? {})[platform] ?? 0);
     const sinceAny = Date.now() - Number(this.store.data.lastWriteAt ?? 0);
     const sinceChat = Date.now() - Number(this.store.data.lastChatAt ?? 0);
-    const gap = free ? 500 : asked ? 1500 : minGap * 1000;
-    const since = free ? sinceChat : asked ? Math.min(sincePlat, sinceAny) : sinceAny;
+    const chatty = free || fast;
+    const gap = chatty ? 500 : asked ? 1500 : minGap * 1000;
+    const since = chatty ? sinceChat : asked ? Math.min(sincePlat, sinceAny) : sinceAny;
     if (since < gap) {
       return {
         ok: false,
         code: 'TOO_FAST',
-        message: asked || free
+        message: chatty || asked
           ? `刚发过一次，等 ${Math.max(1, Math.ceil((gap - since) / 1000))} 秒再说，别连点。`
           : `上一次动作才过去 ${Math.round(since / 1000)} 秒，再等等（至少 ${Math.round(gap / 1000)} 秒）。`,
       };
     }
 
-    if (!free && (target || dedupeKey)) {
+    if (!chatty && !noDedupe && (target || dedupeKey)) {
       const key = dedupeKey || `${platform}:${action}:${target}`;
       const seen = this.store.seenAt(key);
       const windowMs = action === 'comment' || action === 'reply' ? 7 * 86400000 : 24 * 3600 * 1000;
@@ -240,7 +253,7 @@ export class Policy {
 
   /** 给 ENV_PROMPT 的一行摘要。 */
   summary() {
-    const label = Object.fromEntries(Object.entries(ACTION_CAPS).map(([k, v]) => [k, v.label]));
+    const label = Object.fromEntries(Object.entries(ACTION_CAPS).map(([k, v]) => [k, v.short]));
     const parts = Object.keys(ACTION_CAPS)
       .map((action) => {
         const left = this.remaining(action);
@@ -274,10 +287,6 @@ export class Policy {
     };
   }
 }
-
-export const ACTION_LABELS = Object.fromEntries(
-  Object.entries(ACTION_CAPS).map(([k, v]) => [k, v.label]),
-);
 
 /** 审批矩阵：点赞可自动，公开文字/关注/私信默认要人点头。 */
 export function approvalFor(cfg, action) {

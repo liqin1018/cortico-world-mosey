@@ -104,6 +104,23 @@ function stripRowTime(name) {
     .trim();
 }
 
+/**
+ * 把记录里的 `at` 转成毫秒。
+ *
+ * `store.addAction` 写的是 **ISO 字符串**（`2026-11-06T16:11:13.327Z`），
+ * 而好几处判断写的是 `Number(a.at ?? 0)`——字符串转数字得到 **NaN**，
+ * `now - NaN > 30 分钟` 永远是 false，于是「30 分钟内说过的话」这个时间窗
+ * **完全失效**：她历史上说过的每一个字都永久参与「这是不是我说的」比对。
+ * 线上表现就是：对方说「在干啥」，因为她发过一个「在」，被判成自己的话、不推送。
+ */
+function atMs(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) return n;
+  const t = Date.parse(String(v ?? ''));
+  return Number.isFinite(t) ? t : 0;
+}
+
 /** 额度档位对应的动作名，面板点开「今天做了什么」时用。 */
 const METER_ACTIONS = {
   like: ['like', 'unlike'],
@@ -235,6 +252,42 @@ export class StrollWorld {
   }
 
   /**
+   * 一次性修：旧版本把「她说过一个『在』」当成「所有带『在』的话都是她说的」
+   * （`at` 是 ISO 字符串、`Number()` 出来是 NaN，30 分钟时间窗完全失效）。
+   * 误判之后指纹还写进了 `strangerSeen`，那条消息就永远推不出来。
+   *
+   * 这里把「现在用正确逻辑看，明显不是她说的」那些指纹删掉，让下一拍重新判断一次。
+   * 只处理 2 小时内活跃过的会话，避免把攒了几天的历史私信全推一遍。
+   */
+  migrateStrangerSeenEcho() {
+    const done = this.store.data.migrated ?? {};
+    if (done.strangerEcho) return;
+    this.store.data.migrated = { ...done, strangerEcho: true };
+    const seen = this.store.data.strangerSeen;
+    const seenAt = this.store.data.strangerSeenAt ?? {};
+    if (!seen || typeof seen !== 'object') {
+      this.store.save();
+      return;
+    }
+    let reset = 0;
+    for (const [key, fp] of Object.entries(seen)) {
+      if (!key.startsWith('douyin:')) continue;
+      const at = Number(seenAt[key] ?? 0);
+      if (!at || Date.now() - at > 2 * 3600 * 1000) continue;
+      const who = stripRowTime(key.slice('douyin:'.length));
+      // 老数据是 `时间|预览`，新数据只有预览
+      const preview = String(fp ?? '').split('|').pop() ?? '';
+      if (!preview) continue;
+      if (this.recentlySentTo(who, preview)) continue;
+      delete seen[key];
+      reset += 1;
+      this.log?.info?.('stroll seen reset', { who, preview: preview.slice(0, 20) });
+    }
+    this.store.save();
+    if (reset) this.log?.info?.('stroll seen reset done', { reset });
+  }
+
+  /**
    * 一次性退还：1.25.0 的循环推送 bug 会把当天的私信额度烧光
    * （一天推了 20 次、回的全是她自己说的话）。
    * 判断依据：额度已满 **而且** 推送次数明显超过额度 → 认定是那个 bug，退一次。
@@ -323,6 +376,7 @@ export class StrollWorld {
    */
   migrateConfig() {
     this.migrateStrangerKeys();
+    this.migrateStrangerSeenEcho();
     this.refundDmLoopQuota();
     const done = this.store.data.migrated ?? {};
     if (done.dmQuota) return;
@@ -1264,7 +1318,7 @@ export class StrollWorld {
       if (now - Number(replied[`douyin:${s.who}`] ?? 0) < 24 * 3600 * 1000) continue;
       // 老版本没记 strangerRepliedAt：翻一遍动作日志，24 小时内回过的人不再摆出来
       const repliedRecently = (this.store.data.actions ?? []).some(
-        (a) => a.action === 'dm' && String(a.target) === s.who && now - Number(a.at ?? 0) < 24 * 3600 * 1000,
+        (a) => a.action === 'dm' && String(a.target) === s.who && now - atMs(a.at) < 24 * 3600 * 1000,
       );
       if (repliedRecently) continue;
       if (this.strangerPendingList().some((x) => x.platform === 'douyin' && x.who === s.who)) continue;
@@ -1296,15 +1350,53 @@ export class StrollWorld {
     const now = Date.now();
     return (this.store.data.actions ?? []).some((a) => {
       if (a.action !== 'dm') return false;
-      if (now - Number(a.at ?? 0) > 30 * 60 * 1000) return false;
+      // 注意用 atMs：`at` 是 ISO 字符串，直接 Number() 会得到 NaN，时间窗就失效了
+      const at = atMs(a.at);
+      if (!at || now - at > 30 * 60 * 1000) return false;
       if (!flat(a.target).startsWith(key)) return false;
       const sent = flat(a.text);
       if (!sent) return false;
-      if (t.includes(sent) || sent.includes(t)) return true;
+      // 一模一样（哪怕只有一个字）：这就是她刚说的那句
+      if (t === sent) return true;
+      /**
+       * 包含比对必须有长度门槛。
+       * 以前 `t.includes(sent)` 不分长短：「在干啥」包含「在」，于是只要她说过一个「在」，
+       * 对方之后所有带「在」的话都被当成回声丢掉——「有人发消息但不提醒」就这么来的。
+       */
+      const MIN = 4;
+      if (sent.length >= MIN && t.includes(sent)) return true;
+      if (t.length >= MIN && sent.includes(t)) return true;
       // 列表预览常常被截断：前 6 个字一样也当成自己的话（不然截断后就认不出，开始循环）
       const head = Math.min(6, sent.length, t.length);
-      return head >= 6 && sent.slice(0, head) === t.slice(0, head);
+      return sent.length >= 6 && t.length >= 6 && sent.slice(0, head) === t.slice(0, head);
     });
+  }
+
+  /** 命中的那句原文（只给日志用，最多 24 字）。 */
+  echoHitOf(who, text) {
+    const flat = (s) => String(s ?? '').replace(/\s+/g, '').toLowerCase();
+    const t = flat(text);
+    const key = flat(who);
+    if (!t || !key) return '';
+    const now = Date.now();
+    for (let i = (this.store.data.actions ?? []).length - 1; i >= 0; i -= 1) {
+      const a = this.store.data.actions[i];
+      if (a.action !== 'dm') continue;
+      const at = atMs(a.at);
+      if (!at || now - at > 30 * 60 * 1000) continue;
+      if (!flat(a.target).startsWith(key)) continue;
+      const sent = flat(a.text);
+      if (!sent) continue;
+      if (sent === t) return String(a.text).slice(0, 24);
+      if ((sent.length >= 4 && t.includes(sent)) || (t.length >= 4 && sent.includes(t))) {
+        return String(a.text).slice(0, 24);
+      }
+      const head = Math.min(6, sent.length, t.length);
+      if (sent.length >= 6 && t.length >= 6 && sent.slice(0, head) === t.slice(0, head)) {
+        return String(a.text).slice(0, 24);
+      }
+    }
+    return '';
   }
 
   /** 给这个陌生人打个「快车道」标记：15 分钟内再来消息就一直续期。 */
@@ -1655,7 +1747,7 @@ export class StrollWorld {
      * 现在把「回过的次数、回信参数、不用再查」都写进来，她不需要额外动作。
      */
     const met = (this.store.data.actions ?? []).filter(
-      (a) => a.action === 'dm' && String(a.target) === String(who) && Date.now() - Number(a.at ?? 0) < 24 * 3600 * 1000,
+      (a) => a.action === 'dm' && String(a.target) === String(who) && Date.now() - atMs(a.at) < 24 * 3600 * 1000,
     ).length;
     const whoLine = met ? `${who}·之前回过 ${met} 次` : `${who}·第一次找你`;
     const hint =
@@ -1843,11 +1935,12 @@ export class StrollWorld {
        * 以前这些都静默跳过，线上表现就是「一句回、一句不回」，但日志里什么都没有。
        * 只在**预览变了**的时候记（指纹没变的那次是热路径，不记），不会刷屏。
        */
-      const skip = (why) =>
+      const skip = (why, extra = null) =>
         this.log?.info?.('stroll stranger skip', {
           who: row.who,
           preview: truncate(String(row.preview ?? ''), 20),
           why,
+          ...(extra ? { hit: truncate(String(extra), 24) } : {}),
         });
       if (!row.preview || /^\d+分钟内在线$|^在线$/.test(row.preview)) continue;
       if (knownGroups.some((g) => this.sameGroup(g, row.who))) continue;
@@ -1871,7 +1964,8 @@ export class StrollWorld {
       }
       // 主列表的预览没有「谁说的」标记：和她刚发出去的原文比对，命中就当她自己的话
       if (this.recentlySentTo(row.who, row.preview)) {
-        skip('echo');
+        // 带上「命中的是哪句她说过的话」：误判时不用再猜
+        skip('echo', this.echoHitOf(row.who, row.preview));
         continue;
       }
       // 不做时间冷却：对方紧跟着说的第二句要立刻叫她（冷却会把这类话吞成「已读不回」）。

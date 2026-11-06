@@ -32,6 +32,14 @@ const world = new StrollWorld({
 });
 
 const checks = [];
+function atMsProbe(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) return n;
+  const t = Date.parse(String(v ?? ''));
+  return Number.isFinite(t) ? t : 0;
+}
+
 const shouldQuick = (...a) => !!world.quickReplyKind(...a);
 
 function check(name, ok, detail) {
@@ -1615,6 +1623,27 @@ check('时间文案变了不重复推同一条', sPushes.length === 1, JSON.stri
 world.store.data.actions.push({ action: 'dm', target: '路人丙', text: '在的，怎么了', at: Date.now() });
 check('认出自己发过的话', world.recentlySentTo('路人丙', '在的，怎么了') === true);
 check('别人的话不算自己的', world.recentlySentTo('路人丙', '你是谁') === false);
+
+// `at` 是 ISO 字符串：以前用 Number() 会得到 NaN，时间窗失效，她历史上的每个字都永久参与比对
+const isoNow = () => new Date().toISOString();
+world.store.data.actions.push({ action: 'dm', target: '短句测试', text: '在', at: isoNow() });
+check('短句不会把对方的话吞掉', world.recentlySentTo('短句测试', '在干啥') === false);
+check('一模一样的短句还是认得出', world.recentlySentTo('短句测试', '在') === true);
+world.store.data.actions.push({
+  action: 'dm',
+  target: '短句测试',
+  text: '中午吃了面',
+  at: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
+});
+check(
+  '30 分钟以前说过的话不参与比对（ISO 字符串也要能算时间）',
+  world.recentlySentTo('短句测试', '中午吃了面') === false,
+);
+check('at 解析：ISO 字符串', Math.abs(Date.now() - atMsProbe(isoNow())) < 5000);
+
+// 命中的原话要能取出来（日志用）
+check('echo 能指出是命中哪句话', world.echoHitOf('短句测试', '在') === '在', world.echoHitOf('短句测试', '在'));
+world.store.data.actions = (world.store.data.actions ?? []).filter((a) => a.target !== '短句测试');
 world.store.data.actions.pop();
 
 // 不再用时间冷却：对方紧跟着说的第二句要立刻推（否则就是「已读不回」）
@@ -1906,6 +1935,31 @@ check(
 // 新增待批时也要洗（不然点「让她回」会拿「海底月 刚刚」去发）
 const cleanItem = world.addStrangerPending({ platform: 'douyin', who: '测试甲 刚刚', text: '在吗' });
 check('新增待批时洗掉时间', cleanItem.who === '测试甲', cleanItem.who);
+
+// 一次性重置：误判成「她自己的话」的指纹要删掉，下一拍重新判断
+const echoWorld = new StrollWorld({
+  cfg: { ...DEFAULTS, enabled: true, quietFrom: 0, quietTo: 0 },
+  timezone: 'Asia/Shanghai',
+  dataDir: path.join(tmp, 'echo-reset'),
+  persist: () => {},
+});
+echoWorld.log = { info: () => {}, warn: () => {} };
+echoWorld.store.load();
+const nowIso = new Date().toISOString();
+echoWorld.store.data.actions = [
+  { action: 'dm', platform: 'douyin', target: '海底月', text: '在', at: nowIso },
+  { action: 'dm', platform: 'douyin', target: '另一个人', text: '这张过来了。举着手笑的那个。', at: nowIso },
+];
+echoWorld.store.data.strangerSeen = {
+  'douyin:海底月': '在干啥',   // 对方说的，被误判过
+  'douyin:另一个人': '这张过来了。举着手笑的那个。', // 确实是她说的
+};
+echoWorld.store.data.strangerSeenAt = { 'douyin:海底月': Date.now(), 'douyin:另一个人': Date.now() };
+echoWorld.migrateStrangerSeenEcho();
+const seenAfter = echoWorld.store.data.strangerSeen ?? {};
+check('迁移：误判成自己的话的指纹被清掉', !('douyin:海底月' in seenAfter), JSON.stringify(seenAfter));
+check('迁移：确实是她说的那句保留', 'douyin:另一个人' in seenAfter, JSON.stringify(seenAfter));
+check('迁移：只跑一次', echoWorld.store.data.migrated?.strangerEcho === true);
 world.store.data.strangerPending = (world.store.data.strangerPending ?? []).filter((x) => x.id !== cleanItem.id);
 
 /* ---- 表情包：陌生人的那条也要拿到画面 ---- */

@@ -108,6 +108,9 @@ console.log('  1. git add -A && git commit -m "..." && git push');
 console.log('  2. npm publish');
 if (next) {
   console.log('');
-  console.log(`下次版本号参考：修 bug → ${next.patch}，加功能 → ${next.minor}，不兼容改动 → ${next.major}`);
+  console.log(
+    `下次版本号参考：修 bug → ${next.patch}，小幅新增/行为调整 → ${next.minor}，` +
+      `用户能明显感觉到的新能力 → ${next.major}`,
+  );
 }
 console.log('');

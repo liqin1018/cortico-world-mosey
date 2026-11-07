@@ -6207,7 +6207,19 @@ export class DouyinBrowser {
           const titleOf = (el) => {
             const t = el.querySelector('[class*="ConversationItemtitle"]');
             const line = String((el.innerText || '').split('\n')[0] || '');
-            return norm(t?.innerText || line);
+            const raw = norm(t?.innerText || line);
+            /**
+             * 列表标题常黏着时间（`海底月 刚刚`、`海底月 10:55`）。
+             * 不剥的话 exact 永远不成立，只能落到「包含」；而群名也可能含这个人名
+             * （`测试1、海底月`），包含就会同时命中两条 → 判成歧义 → 直接返回 false，
+             * 表现就是「列表里明明看得见，发的时候说找不到」。
+             */
+            return raw
+              .replace(
+                /\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/,
+                '',
+              )
+              .trim();
           };
           let hit = null;
           if (cid) hit = items.find((el) => el.getAttribute('data-stroll-cid') === cid) ?? null;
@@ -6230,9 +6242,98 @@ export class DouyinBrowser {
         { target: base, nth, cid },
       )
       .catch(() => null);
-    if (!box) return false;
-    await page.mouse.click(box.x, box.y).catch(() => {});
+    if (box) {
+      await page.mouse.click(box.x, box.y).catch(() => {});
+      return true;
+    }
+    /**
+     * 还没找到：会话可能在列表很下面（昨晚的消息，中间刷了十几个小时）。
+     * 抖音的会话列表是**虚拟滚动**，屏幕外的行根本不在 DOM 里，`querySelectorAll`
+     * 看不到——所以先滚到顶，再一屏一屏往下找。
+     */
+    const found = await this.scrollConversationList(page, async () =>
+      page
+        .evaluate(
+          ({ target, nth, cid }) => {
+            const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+            const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
+            const titleOf = (el) => {
+              const t = el.querySelector('[class*="ConversationItemtitle"]');
+              const line = String((el.innerText || '').split('\n')[0] || '');
+              return norm(t?.innerText || line)
+                .replace(
+                  /\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/,
+                  '',
+                )
+                .trim();
+            };
+            let hit = null;
+            if (cid) hit = items.find((el) => el.getAttribute('data-stroll-cid') === cid) ?? null;
+            if (!hit) {
+              const exact = items.filter((el) => titleOf(el) === norm(target));
+              hit = (nth > 0 ? exact[nth - 1] : exact[0]) ?? null;
+            }
+            if (!hit) {
+              const partial = items.filter((el) => titleOf(el).includes(norm(target)));
+              if (partial.length === 1) hit = partial[0];
+            }
+            if (!hit) return null;
+            hit.scrollIntoView({ block: 'nearest' });
+            const r = hit.getBoundingClientRect();
+            if (r.width < 10 || r.height < 10) return null;
+            return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+          },
+          { target: base, nth, cid },
+        )
+        .catch(() => null),
+    );
+    if (!found) return false;
+    await page.mouse.click(found.x, found.y).catch(() => {});
     return true;
+  }
+
+  /**
+   * 在会话列表里一段一段往下滚，每滚一次调一次 `find()`。
+   * 不依赖类名：从第一条会话往上找「overflow-y 真的能滚」的那个祖先。
+   */
+  async scrollConversationList(page, find, { tries = 10 } = {}) {
+    const toTop = () => {
+      const el = document.querySelector('[data-e2e="conversation-item"]');
+      let p = el?.parentElement ?? null;
+      while (p) {
+        const st = getComputedStyle(p);
+        if (/(auto|scroll|overlay)/.test(st.overflowY) && p.scrollHeight > p.clientHeight + 20) {
+          p.scrollTop = 0;
+          return;
+        }
+        p = p.parentElement;
+      }
+    };
+    const step = () => {
+      const el = document.querySelector('[data-e2e="conversation-item"]');
+      let p = el?.parentElement ?? null;
+      while (p) {
+        const st = getComputedStyle(p);
+        if (/(auto|scroll|overlay)/.test(st.overflowY) && p.scrollHeight > p.clientHeight + 20) {
+          const before = p.scrollTop;
+          p.scrollTop = before + Math.max(80, Math.round(p.clientHeight * 0.75));
+          return p.scrollTop !== before;
+        }
+        p = p.parentElement;
+      }
+      return false;
+    };
+    // 先回到顶部：目标可能在上面，从当前位置往下滚永远到不了
+    await page.evaluate(toTop).catch(() => {});
+    await page.waitForTimeout(120);
+    for (let i = 0; i < tries; i += 1) {
+      const moved = await page.evaluate(step).catch(() => false);
+      if (!moved) break;
+      await page.waitForTimeout(160);
+      const hit = await find();
+      if (hit) return hit;
+    }
+    return null;
   }
 
   /** 读聊天页顶部那个会话标题（认不出就返回空串，调用方当「不校验」处理）。 */

@@ -1704,6 +1704,20 @@ export class StrollWorld {
     const { mode } = this.strangerDmPolicy();
     const name = String(who ?? '').trim();
     if (!name) return { ok: false };
+    /**
+     * 目标就是她自己登录的那个抖音号：抖音不允许给自己发私信。
+     * 以前会一路走到「点开会话」，然后报「找不到这个会话」——听着像找不到人，
+     * 其实是根本不该发（她也只能跟着猜「是不是我自己的号」）。
+     */
+    const selfName = String(this.store.data.douyinSelf?.name ?? '').trim();
+    const norm = (v) => String(v ?? '').replace(/[\s\u3000]+/g, '').toLowerCase();
+    if (selfName && norm(selfName) === norm(name)) {
+      return {
+        ok: false,
+        code: 'SELF',
+        why: `「${name}」就是她自己登录的抖音号，抖音不能给自己发私信`,
+      };
+    }
     if (mode === 'off') return { ok: false, code: 'STRANGER_OFF', why: '陌生人私信设成「关」了' };
     if (this.isStrangerBlocked(name)) {
       return { ok: false, code: 'BLOCKED', why: `「${name}」在黑名单里，不回` };

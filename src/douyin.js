@@ -1654,7 +1654,7 @@ export class DouyinBrowser {
               .filter(Boolean);
             let name = norm(t?.innerText || lines[0] || '');
             let at = '';
-            // 标题块里常常连着时间：「海底月 9分钟前」。不剥掉的话，
+            // 标题块里常常连着时间：「小鹿 9分钟前」。不剥掉的话，
             // 名字每分钟变一次（9分钟前→刚刚），会话永远找不到、去重也永远不重合。
             const m = TRAIL.exec(name);
             if (m) {
@@ -1676,7 +1676,7 @@ export class DouyinBrowser {
   /**
    * 只读「陌生人消息」入口那一行文字，不点进去。
    *
-   * 入口本身就带最新一条：「陌生人消息 刚刚 海底月：你好」。
+   * 入口本身就带最新一条：「陌生人消息 刚刚 小鹿：你好」。
    * 很多账号/布局下根本点不开那个文件夹（或者类名换了），光靠入口也能发现新消息。
    * 返回 { who, at, preview, raw } 或 null。
    */
@@ -1693,7 +1693,7 @@ export class DouyinBrowser {
       .catch(() => '');
     if (!raw) return null;
     const TIME = /(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})/;
-    // 「陌生人消息 刚刚 海底月：你好」→ 名字取「时间」后面、冒号前面那段
+    // 「陌生人消息 刚刚 小鹿：你好」→ 名字取「时间」后面、冒号前面那段
     const afterTime = raw.replace(/^.*?陌生人消息\s*/, '');
     const m = TIME.exec(afterTime);
     const tail = m ? afterTime.slice(m.index + m[0].length).trim() : afterTime;
@@ -1905,7 +1905,7 @@ export class DouyinBrowser {
             const t = el.querySelector('[class*="ConversationItemtitle"]');
             const raw = String(t?.innerText || (el.innerText || '').split('\n')[0] || '').trim();
             /**
-             * 抖音把时间也塞进标题：「海底月 刚刚」「海底月 10:55」。
+             * 抖音把时间也塞进标题：「小鹿 刚刚」「小鹿 10:55」。
              * 不剥掉的话整串相等永远不成立，blind 点击会一直判「点不到」。
              */
             return raw
@@ -2416,7 +2416,7 @@ export class DouyinBrowser {
     if (slot.thread !== who) {
       /**
        * 用 clickThread 而不是 `locator(hasText: 群名)`。
-       * hasText 是**子串**匹配：两个群的标题都带「小月月一直在玩」时，
+       * hasText 是**子串**匹配：两个群的标题都带「阿柚」时，
        * 它可能把第二个群点成第一个群；而且标题被截断时又永远匹配不上。
        * clickThread 先按整串相等找，再退回「唯一包含」，两个群也分得清。
        */
@@ -4068,7 +4068,7 @@ export class DouyinBrowser {
             if (!t || t.length > 40) continue;
             if (key && !bare(t).includes(key)) continue;
             // 只有「子元素自己也能当一行」时才算外壳；名字那一小截不算，
-            // 否则「大萌神」这种前面没有身份标签的行会被整行丢掉
+            // 否则「老K」这种前面没有身份标签的行会被整行丢掉
             const shell = Array.from(n.children).some((c) => {
               if (String(c.textContent ?? '').replace(/\s+/g, ' ').trim() !== t) return false;
               const cr = c.getBoundingClientRect();
@@ -4645,7 +4645,7 @@ export class DouyinBrowser {
     };
     /**
      * 抖音选完图会先弹一个确认框：
-     *   「发送给 小月月一直在玩, 穹, 大萌神(3)   s_811c597ed5c8.png  118.2 KB   取消   发送（1）」
+     *   「发送给 阿柚, 阿澈, 老K(3)   s_811c597ed5c8.png  118.2 KB   取消   发送（1）」
      * 不点那个「发送」，图就一直挂在预览里——上一版漏了这一步，回执写「图选上了但没确认发出去」，
      * 界面上其实什么都不会出现。所以这里一边等消息变化，一边盯着这个确认框。
      */
@@ -4965,14 +4965,14 @@ export class DouyinBrowser {
           const badge = el.querySelector('[class*="unread"], [class*="Unread"]');
           const lines = (el.innerText || '').split('\n').map((s) => s.trim()).filter(Boolean);
           // 昵称优先取第一行：有未读时 title 元素的 class 会连带把时间包进来
-          //（实测 innerText = "小月月一直在玩 刚刚"），按 class 取会多一截。
+          //（实测 innerText = "阿柚 刚刚"），按 class 取会多一截。
           const name = lines[0] || clean(title?.innerText) || '';
           // 兜底：把标题/时间/在线状态剔掉，剩下的才可能是消息预览
           const junk = new Set([clean(name), clean(time?.innerText), clean(online?.innerText)].filter(Boolean));
           const fallback = lines.find((l) => !junk.has(clean(l))) ?? '';
           const unread = Number(clean(badge?.innerText).replace(/\D/g, '')) || 0;
           let previewText = clean(preview?.innerText) || fallback;
-          // 预览里常把未读角标一起算进来（实测「穹 2」），那个 2 不是消息内容
+          // 预览里常把未读角标一起算进来（实测「阿澈 2」），那个 2 不是消息内容
           if (unread > 0) previewText = previewText.replace(new RegExp(`\\s*${unread}$`), '').trim();
           return {
             name,
@@ -5134,7 +5134,7 @@ export class DouyinBrowser {
               }
             }
           }
-          // 角色标签可能拼在名字前面（「群主 小月月一直在玩」）也可能在后面
+          // 角色标签可能拼在名字前面（「群主 阿柚」）也可能在后面
           name = name
             .replace(/^(群主|管理员|群成员|成员)\s*/u, '')
             .replace(/\s*(群主|管理员|群成员|成员)$/u, '')
@@ -6209,9 +6209,9 @@ export class DouyinBrowser {
             const line = String((el.innerText || '').split('\n')[0] || '');
             const raw = norm(t?.innerText || line);
             /**
-             * 列表标题常黏着时间（`海底月 刚刚`、`海底月 10:55`）。
+             * 列表标题常黏着时间（`小鹿 刚刚`、`小鹿 10:55`）。
              * 不剥的话 exact 永远不成立，只能落到「包含」；而群名也可能含这个人名
-             * （`测试1、海底月`），包含就会同时命中两条 → 判成歧义 → 直接返回 false，
+             * （`群A、小鹿`），包含就会同时命中两条 → 判成歧义 → 直接返回 false，
              * 表现就是「列表里明明看得见，发的时候说找不到」。
              */
             return raw
@@ -6365,7 +6365,7 @@ export class DouyinBrowser {
     const norm = (s) =>
       String(s ?? '')
         .replace(/\s*#\d+$/, '')
-        // 标题常带群人数：「测试3（3）」「测试3 3人」
+        // 标题常带群人数：「群C（3）」「群C 3人」
         .replace(/[（(]\s*\d+\s*[)）]\s*$/, '')
         .replace(/^\d+\s*人\s*/, '')
         .replace(/[\s\u3000]+/g, '')

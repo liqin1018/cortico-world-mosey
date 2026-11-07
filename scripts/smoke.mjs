@@ -149,10 +149,10 @@ const batch = [
   { from: 'them', kind: 'text', text: '看看这个' },
 ];
 world.store.data.dmSeen = { douyin: { fp: '', at: 1 } };
-const tailHit = world.douyinDmTail(batch, '穹');
+const tailHit = world.douyinDmTail(batch, '阿澈');
 check('抖音私信连着几句一起取', !!tailHit && tailHit.text === '在吗 / 看看这个');
-check('同一批私信不重复推', world.douyinDmTail(batch, '穹') === null);
-check('末尾是自己发的不推', world.douyinDmTail([{ from: 'me', kind: 'text', text: '嗯' }], '穹') === null);
+check('同一批私信不重复推', world.douyinDmTail(batch, '阿澈') === null);
+check('末尾是自己发的不推', world.douyinDmTail([{ from: 'me', kind: 'text', text: '嗯' }], '阿澈') === null);
 
 // 事件通道整条线：页面回调 → 判重 → pushEvent(interrupt)
 const dmDir = path.join(tmp, 'dm');
@@ -171,7 +171,7 @@ dmWorld.host = {
   },
 };
 dmWorld.running = true;
-dmWorld.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '穹', at: Date.now() };
+dmWorld.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '阿澈', at: Date.now() };
 dmWorld.store.data.dmSeen = { douyin: { fp: '', at: 1 } };
 let onHit = null;
 dmWorld.douyin = {
@@ -237,8 +237,8 @@ world.store.data.ownerAskAt = 0;
 check('自己出门仍按节奏等', world.policy.check('comment', 'douyin', '7702414706065083677', {}).code === 'TOO_FAST');
 
 // 正文自带「@昵称」：插真 @ 前要剥掉，否则页面上是 @ 两次
-check('剥掉正文里自带的 @', stripAtName('@小月月 在西安，回民街。@小月月还在玩', '小月月') === '在西安，回民街。还在玩');
-check('没写 @ 的正文原样保留', stripAtName('在西安，回民街。', '小月月') === '在西安，回民街。');
+check('剥掉正文里自带的 @', stripAtName('@阿柚 在西安，回民街。@阿柚还在玩', '阿柚') === '在西安，回民街。还在玩');
+check('没写 @ 的正文原样保留', stripAtName('在西安，回民街。', '阿柚') === '在西安，回民街。');
 check('昵称带正则符号也不炸', stripAtName('@a.b 好', 'a.b') === '好');
 
 // 回私信的节奏：0.5 秒只防重发，不再卡 4 秒
@@ -271,21 +271,21 @@ cfg.douyinGroups = '';
 
 // 群消息指纹：末尾连着几句主人那边的都要一起接住；末尾是自己发的不算新话
 const gTail = world.groupTailFp([
-  { from: 'them', who: '大萌神', kind: 'text', text: '在吗' },
-  { from: 'them', who: '大萌神', kind: 'text', text: '这周六有空不' },
+  { from: 'them', who: '老K', kind: 'text', text: '在吗' },
+  { from: 'them', who: '老K', kind: 'text', text: '这周六有空不' },
 ]);
-check('群消息末尾连着几句一起取', gTail.tail.length === 2 && gTail.fp.startsWith('大萌神:text:在吗'));
+check('群消息末尾连着几句一起取', gTail.tail.length === 2 && gTail.fp.startsWith('老K:text:在吗'));
 check('群消息末尾是自己发的不算', world.groupTailFp([{ from: 'me', who: '', kind: 'text', text: '在' }]).tail.length === 0);
 // 上一屏见过的消息就是边界：新消息只取新的那些，不能把整段历史重推一遍
 const seenScreen = world.groupTailFp([
-  { from: 'them', who: '大萌神', kind: 'text', text: '在吗' },
-  { from: 'them', who: '大萌神', kind: 'text', text: '这周六有空不' },
+  { from: 'them', who: '老K', kind: 'text', text: '在吗' },
+  { from: 'them', who: '老K', kind: 'text', text: '这周六有空不' },
 ]);
 const afterOne = world.groupTailFp(
   [
-    { from: 'them', who: '大萌神', kind: 'text', text: '在吗' },
-    { from: 'them', who: '大萌神', kind: 'text', text: '这周六有空不' },
-    { from: 'them', who: '大萌神', kind: 'text', text: '晚上出来吃饭' },
+    { from: 'them', who: '老K', kind: 'text', text: '在吗' },
+    { from: 'them', who: '老K', kind: 'text', text: '这周六有空不' },
+    { from: 'them', who: '老K', kind: 'text', text: '晚上出来吃饭' },
   ],
   { tail: seenScreen.tailKeys, last: seenScreen.last },
 );
@@ -297,44 +297,44 @@ check(
   '群里最后一条没变就不推',
   world.groupTailFp(
     [
-      { from: 'them', who: '大萌神', kind: 'text', text: '在吗' },
-      { from: 'them', who: '大萌神', kind: 'text', text: '这周六有空不' },
+      { from: 'them', who: '老K', kind: 'text', text: '在吗' },
+      { from: 'them', who: '老K', kind: 'text', text: '这周六有空不' },
     ],
     { tail: seenScreen.tailKeys, last: seenScreen.last },
   ).tail.length === 0,
 );
 // 群名匹配：没起名的群标题是成员名拼接，她只写一部分也得认出来
 cfg.douyinGroups = '';
-world.groupAuto = { at: Date.now(), names: ['小月月一直在玩, 穹, 大萌神'] };
-check('自动识别的群名能用', world.groupNames()[0] === '小月月一直在玩, 穹, 大萌神');
-check('只写成员名也能对上群', world.sameGroup('小月月一直在玩, 穹, 大萌神', '穹') === true);
-check('不相干的名字对不上', world.sameGroup('小月月一直在玩, 穹, 大萌神', '路人甲') === false);
-// 两个群：标题里都带「小月月一直在玩」，靠"包含"就会发错群——必须认唯一
-world.groupAuto = { at: Date.now(), names: ['小月月一直在玩, 穹, 大萌神', '小月月一直在玩, 阿猫, 阿狗'] };
+world.groupAuto = { at: Date.now(), names: ['阿柚, 阿澈, 老K'] };
+check('自动识别的群名能用', world.groupNames()[0] === '阿柚, 阿澈, 老K');
+check('只写成员名也能对上群', world.sameGroup('阿柚, 阿澈, 老K', '阿澈') === true);
+check('不相干的名字对不上', world.sameGroup('阿柚, 阿澈, 老K', '路人甲') === false);
+// 两个群：标题里都带「阿柚」，靠"包含"就会发错群——必须认唯一
+world.groupAuto = { at: Date.now(), names: ['阿柚, 阿澈, 老K', '阿柚, 阿猫, 阿狗'] };
 check(
   '两个群时整串相等优先',
-  world.matchGroup(world.groupNames(), '小月月一直在玩, 穹, 大萌神') === '小月月一直在玩, 穹, 大萌神',
+  world.matchGroup(world.groupNames(), '阿柚, 阿澈, 老K') === '阿柚, 阿澈, 老K',
 );
-check('两个群都像就不猜', world.matchGroup(world.groupNames(), '小月月一直在玩') === null);
-const twoGroupPlan = await world.buildPlan('dm', { platform: 'douyin', target: '小月月一直在玩, 阿猫, 阿狗', text: '在的' });
-check('两个群时能精确发到第二个', twoGroupPlan.ok === true && twoGroupPlan.target === '小月月一直在玩, 阿猫, 阿狗');
-const ambiguousPlan = await world.buildPlan('dm', { platform: 'douyin', target: '小月月一直在玩', text: '在的' });
+check('两个群都像就不猜', world.matchGroup(world.groupNames(), '阿柚') === null);
+const twoGroupPlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿柚, 阿猫, 阿狗', text: '在的' });
+check('两个群时能精确发到第二个', twoGroupPlan.ok === true && twoGroupPlan.target === '阿柚, 阿猫, 阿狗');
+const ambiguousPlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿柚', text: '在的' });
 check('两个群都像时不乱发，让她问清楚', ambiguousPlan.ok === false);
 // 反向包含是个坑：她写的是更长的群名（群二），不能反过来命中更短的群一
-world.groupAuto = { at: Date.now(), names: ['小月月一直在玩, 穹, 大萌神'] };
+world.groupAuto = { at: Date.now(), names: ['阿柚, 阿澈, 老K'] };
 check(
   '写更长的群名不会误配到短群',
-  world.matchGroup(world.groupNames(), '小月月一直在玩, 穹, 大萌神, 阿猫') === null,
+  world.matchGroup(world.groupNames(), '阿柚, 阿澈, 老K, 阿猫') === null,
 );
 // 两个群同名（同一批人建的两个群）：第二个带 #2，能精确点到
-world.groupAuto = { at: Date.now(), names: ['小月月一直在玩, 穹, 大萌神', '小月月一直在玩, 穹, 大萌神 #2'] };
+world.groupAuto = { at: Date.now(), names: ['阿柚, 阿澈, 老K', '阿柚, 阿澈, 老K #2'] };
 check(
   '同名群用 #2 区分',
-  world.matchGroup(world.groupNames(), '小月月一直在玩, 穹, 大萌神 #2') === '小月月一直在玩, 穹, 大萌神 #2',
+  world.matchGroup(world.groupNames(), '阿柚, 阿澈, 老K #2') === '阿柚, 阿澈, 老K #2',
 );
 // 会话标题带群人数/尾注也算同一个会话（不然每发一条都会白点一次会话，慢半秒）
-check('标题带（3）也算同一个群', world.douyin.threadTitleMatches('测试3（3）', '测试3') === true);
-check('群标题不会被当成人的昵称', world.douyin.threadTitleMatches('小月月一直在玩', '小月月一直在玩, 穹, 大萌神') === false);
+check('标题带（3）也算同一个群', world.douyin.threadTitleMatches('群C（3）', '群C') === true);
+check('群标题不会被当成人的昵称', world.douyin.threadTitleMatches('阿柚', '阿柚, 阿澈, 老K') === false);
 // 限流和验证别混为一谈：主人看到的说法完全不一样
 const rateErr = world.douyin.riskError({ kind: 'rate', hit: '操作频繁@semi-toast' }, '发私信');
 check('限流说明是限流，不是验证', /限流/.test(rateErr.message) && !/验证/.test(rateErr.message), rateErr.message);
@@ -342,11 +342,11 @@ const verifyErr = world.douyin.riskError({ kind: 'verify', hit: '完成验证@se
 check('验证说明是验证', /验证/.test(verifyErr.message), verifyErr.message);
 world.douyin.rateUntil = 0;
 // 刚被群消息叫起来、回话漏了 target：必须让她写清楚，不能偷偷发成私信
-world.groupAuto = { at: Date.now(), names: ['小月月一直在玩, 穹, 大萌神'] };
-world.lastGroupPoke = { group: '小月月一直在玩, 穹, 大萌神', at: Date.now() };
+world.groupAuto = { at: Date.now(), names: ['阿柚, 阿澈, 老K'] };
+world.lastGroupPoke = { group: '阿柚, 阿澈, 老K', at: Date.now() };
 const noTargetAfterGroup = await world.buildPlan('dm', { platform: 'douyin', text: '来了' });
 check('群消息之后漏 target 不发私信', noTargetAfterGroup.ok === false && /群/.test(noTargetAfterGroup.error ?? ''));
-const pokedGroupPlan = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '来了' });
+const pokedGroupPlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '来了' });
 check('群消息之后写群名就发群', pokedGroupPlan.ok === true && pokedGroupPlan.group === true);
 // 主人刚私信过（90 秒内）：随后进群消息也不能把「回私信」判成「要回群」
 world.lastDmPoke = { at: Date.now() };
@@ -355,7 +355,7 @@ const dmWins = await world.buildPlan('dm', { platform: 'douyin', text: '在' });
 check('主人刚私信过就不拦私信', !(dmWins.ok === false && /群/.test(dmWins.error ?? '')), dmWins.error);
 world.lastDmPoke = { at: 0 };
 world.lastGroupPoke = null;
-world.groupAuto = { at: Date.now(), names: ['小月月一直在玩, 穹, 大萌神'] };
+world.groupAuto = { at: Date.now(), names: ['阿柚, 阿澈, 老K'] };
 const aliasPlan = await world.buildPlan('dm', { platform: 'douyin', target: '群', text: '在的' });
 check('只有一个群时 target 写「群」也能发', aliasPlan.ok === true && aliasPlan.group === true);
 // 群里 @ 人：手打的 @ 是假 @（只是文字，对方收不到通知），计划阶段就剥掉
@@ -363,62 +363,62 @@ const ownerBackup = world.store.data.douyinOwner;
 const ownerCfgBackup = cfg.ownerDouyin;
 // douyinOwner() 只有在 cfg.ownerDouyin 的 sec_uid 和保存的昵称对得上时才给 name
 cfg.ownerDouyin = 'MS4wLjABAAAAabcdefghijklmnop';
-world.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '小月月一直在玩', at: Date.now() };
+world.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '阿柚', at: Date.now() };
 const atPlan = await world.buildPlan('dm', {
   platform: 'douyin',
-  target: '穹',
-  text: '@小月月一直在玩 在吗',
+  target: '阿澈',
+  text: '@阿柚 在吗',
   mention_owner: true,
 });
 check(
   '群消息计划剥掉手打 @，只留正文',
-  atPlan.ok === true && atPlan.text === '在吗' && atPlan.mention === '小月月一直在玩',
+  atPlan.ok === true && atPlan.text === '在吗' && atPlan.mention === '阿柚',
 );
-const fakeOnly = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '@小月月一直在玩', mention_owner: true });
+const fakeOnly = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '@阿柚', mention_owner: true });
 check('只剩 @ 的群消息不让发', fakeOnly.ok === false);
-// 也可以指定 @ 群里的别人（她之前想 @ 大萌神，但只有 @ 主人的开关）
-const otherPlan = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '@大萌神 在吗', mention: '大萌神' });
-check('可以 @ 群里指定的人', otherPlan.ok === true && otherPlan.mention === '大萌神' && otherPlan.text === '在吗');
+// 也可以指定 @ 群里的别人（她之前想 @ 老K，但只有 @ 主人的开关）
+const otherPlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '@老K 在吗', mention: '老K' });
+check('可以 @ 群里指定的人', otherPlan.ok === true && otherPlan.mention === '老K' && otherPlan.text === '在吗');
 // 明确要私信主人：target 写「主人」，别再靠「没填 target」这种含糊写法
 const ownerDmPlan = await world.buildPlan('dm', { platform: 'douyin', target: '主人', text: '刚在群里回了' });
 check(
   'target=主人 明确发私信',
   ownerDmPlan.ok === true && !ownerDmPlan.group && ownerDmPlan.target === world.douyinOwner().secUid,
 );
-// target 写主人的昵称不能被群名匹配走（线上：她写「小月月一直在玩」，话进了群）
-const byNickPlan = await world.buildPlan('dm', { platform: 'douyin', target: '小月月一直在玩', text: '在的' });
+// target 写主人的昵称不能被群名匹配走（线上：她写「阿柚」，话进了群）
+const byNickPlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿柚', text: '在的' });
 check('target 写主人昵称也走私信', byNickPlan.ok === true && !byNickPlan.group);
 // 「@你」不是昵称：她不知道主人的抖音名时会这么写，应该当成 @ 主人，而不是拿「你」去候选里找人
-world.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '小月月一直在玩', at: Date.now() };
-const youPlan = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '@你 在吗', mention_owner: true });
-check('正文写 @你 也能 @ 到主人', youPlan.ok === true && youPlan.mention === '小月月一直在玩' && youPlan.text === '在吗');
-const youMention = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '在吗', mention: '你' });
-check('mention 传「你」也当主人', youMention.ok === true && youMention.mention === '小月月一直在玩');
-// 线上最常见的情况：她压根不传 mention，直接把名字写在正文开头（「大萌神，在吗」）
-const leadPlan = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '大萌神，在吗，这么晚还没睡。' });
-check('开头写群成员名字也算 @', leadPlan.ok === true && leadPlan.mention === '大萌神' && leadPlan.text === '在吗，这么晚还没睡。');
-const leadOwner = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '小月月一直在玩 在吗' });
-check('开头的名字是主人也能 @', leadOwner.ok === true && leadOwner.mention === '小月月一直在玩' && leadOwner.text === '在吗');
-const noName = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '今天好累啊' });
+world.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '阿柚', at: Date.now() };
+const youPlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '@你 在吗', mention_owner: true });
+check('正文写 @你 也能 @ 到主人', youPlan.ok === true && youPlan.mention === '阿柚' && youPlan.text === '在吗');
+const youMention = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '在吗', mention: '你' });
+check('mention 传「你」也当主人', youMention.ok === true && youMention.mention === '阿柚');
+// 线上最常见的情况：她压根不传 mention，直接把名字写在正文开头（「老K，在吗」）
+const leadPlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '老K，在吗，这么晚还没睡。' });
+check('开头写群成员名字也算 @', leadPlan.ok === true && leadPlan.mention === '老K' && leadPlan.text === '在吗，这么晚还没睡。');
+const leadOwner = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '阿柚 在吗' });
+check('开头的名字是主人也能 @', leadOwner.ok === true && leadOwner.mention === '阿柚' && leadOwner.text === '在吗');
+const noName = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '今天好累啊' });
 check('没写名字就不乱 @', noName.ok === true && !noName.mention);
 // 正文开头手打的 @别人：当成 @ 目标去插 chip，而不是发一串没有效果的蓝字
-const fromTextPlan = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '@大萌神 在吗' });
-check('正文开头写 @别人 会当 @ 目标', fromTextPlan.ok === true && fromTextPlan.mention === '大萌神' && fromTextPlan.text === '在吗');
+const fromTextPlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '@老K 在吗' });
+check('正文开头写 @别人 会当 @ 目标', fromTextPlan.ok === true && fromTextPlan.mention === '老K' && fromTextPlan.text === '在吗');
 world.store.data.douyinOwner = { ...ownerBackup, name: '' };
-const noNamePlan = await world.buildPlan('dm', { platform: 'douyin', target: '穹', text: '在吗', mention_owner: true });
+const noNamePlan = await world.buildPlan('dm', { platform: 'douyin', target: '阿澈', text: '在吗', mention_owner: true });
 check('不知道主人昵称时如实拒绝 @', noNamePlan.ok === false && /昵称/.test(noNamePlan.error ?? ''));
 world.store.data.douyinOwner = ownerBackup;
 cfg.ownerDouyin = ownerCfgBackup;
 world.groupAuto = { at: 0, names: [] };
 
 // 手打的 @ 只是普通字符：抖音会染成蓝色但不通知任何人，发出去前要剥掉
-check('剥掉开头手打的假 @', stripLeadingFakeAt('@大萌神 在吗') === '在吗');
+check('剥掉开头手打的假 @', stripLeadingFakeAt('@老K 在吗') === '在吗');
 check('剥掉孤零零的 @', stripLeadingFakeAt('@ 你了') === '你了');
 check('正文中间的 @ 不动', stripLeadingFakeAt('价格是 5@6 元') === '价格是 5@6 元');
 check('整条只剩 @ 就不发', stripLeadingFakeAt('@') === '');
 check('剥掉 @你', stripAtPlaceholder('@你 在吗') === '在吗');
 check('剥掉 @主人', stripAtPlaceholder('@主人，看看') === '，看看');
-check('正常昵称不动', stripAtPlaceholder('@大萌神 在吗') === '@大萌神 在吗');
+check('正常昵称不动', stripAtPlaceholder('@老K 在吗') === '@老K 在吗');
 world.store.data.lastWriteAt = 0;
 world.store.data.lastWriteByPlat = {};
 
@@ -591,10 +591,10 @@ world.douyin.sendStickerTo = async (who, opts) => {
   return { ok: true, via: 'upload' };
 };
 world.groupAuto = { at: Date.now(), names: ['图群'] };
-world.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '小月月一直在玩', at: Date.now() };
+world.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '阿柚', at: Date.now() };
 world.cfg.ownerDouyin = 'MS4wLjABAAAAabcdefghijklmnop';
 const rOwnerImg = JSON.parse(await world.toolAct({ action: 'image', target: '主人', file: imgB }));
-check('图发到主人私信', rOwnerImg.ok === true && sentImgs[0].who === '小月月一直在玩' && rOwnerImg.to === 'owner', JSON.stringify(rOwnerImg));
+check('图发到主人私信', rOwnerImg.ok === true && sentImgs[0].who === '阿柚' && rOwnerImg.to === 'owner', JSON.stringify(rOwnerImg));
 const rGroupImg = JSON.parse(await world.toolAct({ action: 'image', target: '图群', file: 'bbbb2222' }));
 check('图发到群里', rGroupImg.ok === true && sentImgs[1].who === '图群' && rGroupImg.to === 'group', JSON.stringify(rGroupImg));
 world.douyin.sendStickerTo = oldSendImg;
@@ -649,12 +649,12 @@ await world.push('stroll.reply', '带图测试', {}, 'flush', imgBlobs);
 check('推送带上图片附件', captured[0]?.blobs?.length === 2 && captured[0].text === '带图测试');
 world.host = null;
 
-// @ 候选行会把身份标签拼在名字前面（线上读到的是「群主 小月月一直在玩」），比对前要剥掉
-const atRows = [{ text: '群主 小月月一直在玩' }, { text: '大萌神' }, { text: '成员 穹' }];
-check('候选行带「群主」标签也能对上人', world.douyin.pickAtRow(atRows, '小月月一直在玩')?.text === '群主 小月月一直在玩');
-check('候选行带「成员」标签也能对上人', world.douyin.pickAtRow(atRows, '穹')?.text === '成员 穹');
-check('名字前有 @ 也能对上', world.douyin.pickAtRow([{ text: '@大萌神' }], '大萌神')?.text === '@大萌神');
-check('两个人选都像就不乱 @', world.douyin.pickAtRow([{ text: '小月月' }, { text: '小月月一直在玩' }], '小月') === null);
+// @ 候选行会把身份标签拼在名字前面（线上读到的是「群主 阿柚」），比对前要剥掉
+const atRows = [{ text: '群主 阿柚' }, { text: '老K' }, { text: '成员 阿澈' }];
+check('候选行带「群主」标签也能对上人', world.douyin.pickAtRow(atRows, '阿柚')?.text === '群主 阿柚');
+check('候选行带「成员」标签也能对上人', world.douyin.pickAtRow(atRows, '阿澈')?.text === '成员 阿澈');
+check('名字前有 @ 也能对上', world.douyin.pickAtRow([{ text: '@老K' }], '老K')?.text === '@老K');
+check('两个人选都像就不乱 @', world.douyin.pickAtRow([{ text: '阿柚' }, { text: '阿柚' }], '小月') === null);
 check('名单里没这个人就不 @', world.douyin.pickAtRow(atRows, '不存在的人') === null);
 // 老版本把 GBK 输出按 UTF-8 读，路径里会留下替换符；这种值不能再拿去 mkdir
 check('认得出坏路径', looksBrokenPath(`E:\\${String.fromCharCode(65533)}`) === true && looksBrokenPath('E:\\视频') === false);
@@ -1494,19 +1494,19 @@ const prevDmPage2 = world.douyin.dmPage;
 const fakeStrangerPage = {
   isClosed: () => false,
   evaluate: async () => [
-    '测试2 3 10:50 穹：嗯，在揉。',
-    '小月月一直在玩 10:40 30分钟内在线',
-    '海底月 刚刚 你好 1',
+    '群B 3 10:50 阿澈：嗯，在揉。',
+    '阿柚 10:40 30分钟内在线',
+    '小鹿 刚刚 你好 1',
     '路人甲 昨天 好久不见',
   ],
 };
 const rows = await world.douyin.readStrangerList(fakeStrangerPage, {
-  owner: '小月月一直在玩',
-  groups: ['测试2 3'],
+  owner: '阿柚',
+  groups: ['群B 3'],
 });
 check(
   '陌生人文件夹解析：排除主人和群、群名带空格也切得对',
-  rows.length === 2 && rows[0].who === '海底月' && rows[1].who === '路人甲',
+  rows.length === 2 && rows[0].who === '小鹿' && rows[1].who === '路人甲',
   JSON.stringify(rows),
 );
 check('行尾未读数被剥出来', rows[0].preview === '你好' && rows[0].unread === 1, JSON.stringify(rows[0]));
@@ -1522,28 +1522,28 @@ world.store.data.usage[sDay] = { ...(world.store.data.usage[sDay] ?? {}), dm: 0 
 world.cfg.strangerDmBlock = '';
 world.store.data.strangerDm[sDay] = 0;
 world.store.data.strangerSeen = {};
-world.store.data.douyinSelf = { ...(world.store.data.douyinSelf ?? {}), name: '穹' };
+world.store.data.douyinSelf = { ...(world.store.data.douyinSelf ?? {}), name: '阿澈' };
 world.douyin.dmPage = { isClosed: () => false };
 sPushes.length = 0;
 const prevStrangerThreads = world.douyin.strangerThreads;
 world.douyin.strangerThreads = async () => [
-  { who: '某网友', at: '10:55', preview: '穹：那你来。', unread: 0 },
+  { who: '某网友', at: '10:55', preview: '阿澈：那你来。', unread: 0 },
   { who: '新网友', at: '刚刚', preview: '在吗？', unread: 1 },
 ];
 world.strangerScanAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check(
   '自己发的预览不推，对方的推一条',
   sPushes.length === 1 && /新网友/.test(sPushes[0].text) && !/某网友/.test(sPushes[0].text),
   JSON.stringify(sPushes.map((p) => p.text)),
 );
 
-// 入口那一行的解析：「陌生人消息 刚刚 海底月：在吗在吗」
-const fakeEntryPage = { isClosed: () => false, evaluate: async () => '陌生人消息 刚刚 海底月：在吗在吗' };
+// 入口那一行的解析：「陌生人消息 刚刚 小鹿：在吗在吗」
+const fakeEntryPage = { isClosed: () => false, evaluate: async () => '陌生人消息 刚刚 小鹿：在吗在吗' };
 const entry = await world.douyin.strangerEntry(fakeEntryPage);
 check(
   '入口解析出昵称/时间/预览',
-  entry?.who === '海底月' && entry.at === '刚刚' && entry.preview === '在吗在吗',
+  entry?.who === '小鹿' && entry.at === '刚刚' && entry.preview === '在吗在吗',
   JSON.stringify(entry),
 );
 const entryBare = await world.douyin.strangerEntry({ isClosed: () => false, evaluate: async () => '陌生人消息' });
@@ -1558,12 +1558,12 @@ sPushes.length = 0;
 const prevST = world.douyin.strangerThreads;
 const prevSE = world.douyin.strangerEntry;
 world.douyin.strangerThreads = async () => [];
-world.douyin.strangerEntry = async () => ({ who: '海底月', at: '刚刚', preview: '在吗在吗', raw: '陌生人消息 刚刚 海底月：在吗在吗' });
+world.douyin.strangerEntry = async () => ({ who: '小鹿', at: '刚刚', preview: '在吗在吗', raw: '陌生人消息 刚刚 小鹿：在吗在吗' });
 world.strangerScanAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check(
   '文件夹空时靠入口也能发现',
-  sPushes.length === 1 && /海底月/.test(sPushes[0].text),
+  sPushes.length === 1 && /小鹿/.test(sPushes[0].text),
   JSON.stringify(sPushes.map((p) => p.text)),
 );
 
@@ -1584,13 +1584,13 @@ const prevRows = world.douyin.conversationRows;
 world.douyin.strangerThreads = async () => [];
 world.douyin.strangerEntry = async () => null;
 world.douyin.conversationRows = async () => [
-  { name: '小月月一直在玩', at: '10:20', preview: '在吗' },
+  { name: '阿柚', at: '10:20', preview: '在吗' },
   { name: '摸鱼群', at: '09:00', preview: '大家好' },
   { name: '陌生人阿', at: '刚刚', preview: '你好呀' },
 ];
 world.strangerScanAt = 0;
 world.strangerListAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check(
   '文件夹和入口都没有时，主列表差集也能发现',
   sPushes.length === 1 && /陌生人阿/.test(sPushes[0].text) && !/摸鱼群/.test(sPushes[0].text),
@@ -1612,11 +1612,11 @@ world.douyin.conversationRows = async () => [];
 world.douyin.strangerThreads = async () => [{ who: '路人丙', at: '9分钟前', preview: '在吗', unread: 0 }];
 world.strangerScanAt = 0;
 world.strangerListAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 world.douyin.strangerThreads = async () => [{ who: '路人丙', at: '刚刚', preview: '在吗', unread: 0 }];
 world.strangerScanAt = 0;
 world.strangerListAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check('时间文案变了不重复推同一条', sPushes.length === 1, JSON.stringify(sPushes.map((p) => p.text)));
 
 // 自己刚说过的话不能当成对方来消息
@@ -1651,7 +1651,7 @@ world.douyin.strangerThreads = async () => [{ who: '路人丙', at: '刚刚', pr
 world.store.data.strangerRepliedAt = { 'douyin:路人丙': Date.now() };
 world.strangerScanAt = 0;
 world.strangerListAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check(
   '回完紧跟着的第二句照样推',
   sPushes.length === 2 && /再来一句/.test(sPushes[1].text),
@@ -1665,7 +1665,7 @@ for (let i = 0; i < 6; i += 1) {
   world.douyin.strangerThreads = async () => [{ who: '路人丙', at: '刚刚', preview: `第${i}句`, unread: 0 }];
   world.strangerScanAt = 0;
   world.strangerListAt = 0;
-  await world.checkDouyinStrangers('小月月一直在玩'); // eslint-disable-line no-await-in-loop
+  await world.checkDouyinStrangers('阿柚'); // eslint-disable-line no-await-in-loop
 }
 check('同一人 60 秒最多推 3 次', sPushes.length === 3, `pushed=${sPushes.length}`);
 world.strangerPushLog = new Map();
@@ -1766,9 +1766,9 @@ world.cfg.strangerDmMode = 'ask';
 world.store.data.strangerPending = [];
 world.store.data.strangerSeen = {};
 sPushes.length = 0;
-await world.pushStrangerDm({ platform: 'douyin', who: '海底月', text: '你好' });
+await world.pushStrangerDm({ platform: 'douyin', who: '小鹿', text: '你好' });
 const pend = world.strangerPendingList();
-check('「先问我」会留一条待批准', pend.length === 1 && pend[0].who === '海底月', JSON.stringify(pend));
+check('「先问我」会留一条待批准', pend.length === 1 && pend[0].who === '小鹿', JSON.stringify(pend));
 const apRes = await world.approveStranger(pend[0].id);
 check(
   '点「让她回」会推给她，待办消失',
@@ -1892,7 +1892,7 @@ migCfg.dailyDms = 40;
 migWorld.migrateConfig();
 check('迁移只做一次，之后不动主人自己填的值', migCfg.dailyDms === 40, String(migCfg.dailyDms));
 
-// 旧版把列表上的相对时间写进了昵称：「douyin:海底月 刚刚」→ 洗成「douyin:海底月」
+// 旧版把列表上的相对时间写进了昵称：「douyin:小鹿 刚刚」→ 洗成「douyin:小鹿」
 const migKeysCfg = { ...DEFAULTS };
 const migKeys = new StrollWorld({
   cfg: migKeysCfg,
@@ -1902,21 +1902,21 @@ const migKeys = new StrollWorld({
 });
 migKeys.store.load();
 migKeys.store.data.strangerSeen = {
-  'douyin:海底月 刚刚': '刚刚|你好',
-  'douyin:海底月 9分钟前': '9分钟前|在吗',
+  'douyin:小鹿 刚刚': '刚刚|你好',
+  'douyin:小鹿 9分钟前': '9分钟前|在吗',
   'bilibili:888': '1',
 };
 migKeys.migrateStrangerKeys();
 check(
   '名单里黏的时间被洗干净并合并',
-  Object.keys(migKeys.store.data.strangerSeen).sort().join(',') === 'bilibili:888,douyin:海底月',
+  Object.keys(migKeys.store.data.strangerSeen).sort().join(',') === 'bilibili:888,douyin:小鹿',
   JSON.stringify(migKeys.store.data.strangerSeen),
 );
 
 // 待批记录里的脏昵称：洗掉，同一人的重复 pending 只留最新一条
 migKeys.store.data.strangerPending = [
-  { id: 'p1', platform: 'douyin', who: '海底月 刚刚', uid: '', text: '在吗', at: Date.now(), status: 'pending' },
-  { id: 'p2', platform: 'douyin', who: '海底月 5分钟前', uid: '', text: '旧的一条', at: Date.now() - 60000, status: 'pending' },
+  { id: 'p1', platform: 'douyin', who: '小鹿 刚刚', uid: '', text: '在吗', at: Date.now(), status: 'pending' },
+  { id: 'p2', platform: 'douyin', who: '小鹿 5分钟前', uid: '', text: '旧的一条', at: Date.now() - 60000, status: 'pending' },
   { id: 'p3', platform: 'douyin', who: '路人 刚刚', uid: '', text: '已回过的', at: Date.now(), status: 'done' },
 ];
 migKeys.migrateStrangerPending();
@@ -1932,7 +1932,7 @@ check(
   JSON.stringify(pendItems.map((x) => `${x.id}:${x.status}`)),
 );
 
-// 新增待批时也要洗（不然点「让她回」会拿「海底月 刚刚」去发）
+// 新增待批时也要洗（不然点「让她回」会拿「小鹿 刚刚」去发）
 const cleanItem = world.addStrangerPending({ platform: 'douyin', who: '测试甲 刚刚', text: '在吗' });
 check('新增待批时洗掉时间', cleanItem.who === '测试甲', cleanItem.who);
 
@@ -1947,17 +1947,17 @@ echoWorld.log = { info: () => {}, warn: () => {} };
 echoWorld.store.load();
 const nowIso = new Date().toISOString();
 echoWorld.store.data.actions = [
-  { action: 'dm', platform: 'douyin', target: '海底月', text: '在', at: nowIso },
+  { action: 'dm', platform: 'douyin', target: '小鹿', text: '在', at: nowIso },
   { action: 'dm', platform: 'douyin', target: '另一个人', text: '这张过来了。举着手笑的那个。', at: nowIso },
 ];
 echoWorld.store.data.strangerSeen = {
-  'douyin:海底月': '在干啥',   // 对方说的，被误判过
+  'douyin:小鹿': '在干啥',   // 对方说的，被误判过
   'douyin:另一个人': '这张过来了。举着手笑的那个。', // 确实是她说的
 };
-echoWorld.store.data.strangerSeenAt = { 'douyin:海底月': Date.now(), 'douyin:另一个人': Date.now() };
+echoWorld.store.data.strangerSeenAt = { 'douyin:小鹿': Date.now(), 'douyin:另一个人': Date.now() };
 echoWorld.migrateStrangerSeenEcho();
 const seenAfter = echoWorld.store.data.strangerSeen ?? {};
-check('迁移：误判成自己的话的指纹被清掉', !('douyin:海底月' in seenAfter), JSON.stringify(seenAfter));
+check('迁移：误判成自己的话的指纹被清掉', !('douyin:小鹿' in seenAfter), JSON.stringify(seenAfter));
 check('迁移：确实是她说的那句保留', 'douyin:另一个人' in seenAfter, JSON.stringify(seenAfter));
 check('迁移：只跑一次', echoWorld.store.data.migrated?.strangerEcho === true);
 world.store.data.strangerPending = (world.store.data.strangerPending ?? []).filter((x) => x.id !== cleanItem.id);
@@ -1989,7 +1989,7 @@ world.douyin.readStrangerThread = async () => {
 world.douyin.strangerThreads = async () => [{ who: '发表情的人', at: '刚刚', preview: '表情', unread: 1 }];
 world.strangerScanAt = 0;
 world.strangerListAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check('表情预览会去读会话正文', emojiReadCalls === 1, `calls=${emojiReadCalls}`);
 check(
   '表情的画面会作为附件推过去',
@@ -2009,7 +2009,7 @@ sPushes.length = 0;
 world.douyin.readStrangerThread = async () => [];
 world.douyin.strangerThreads = async () => [{ who: '只发表情的人', at: '刚刚', preview: '表情', unread: 1 }];
 world.strangerScanAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check(
   '读不到表情时说明没看到画面',
   sPushes.length === 1 && /没看到画面/.test(sPushes[0].text) && /对方发了一个表情/.test(sPushes[0].text),
@@ -2027,7 +2027,7 @@ world.douyin.readStrangerThread = async () => {
 };
 world.douyin.strangerThreads = async () => [{ who: '说话的人', at: '刚刚', preview: '在吗', unread: 1 }];
 world.strangerScanAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check('纯文字预览不去读正文', emojiReadCalls === 0 && sPushes.length === 1, `calls=${emojiReadCalls}`);
 
 // ④ 抖音把表情写成它的名字：「[抠鼻]」——这种也要算「不是文字」，否则又只剩名字
@@ -2044,7 +2044,7 @@ world.douyin.readStrangerThread = async () => {
 };
 world.douyin.strangerThreads = async () => [{ who: '抠鼻的人', at: '刚刚', preview: '[抠鼻] 1', unread: 1 }];
 world.strangerScanAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 check(
   '表情名字的预览也会去读正文',
   emojiReadCalls === 1 && sPushes.length === 1 && (sPushes[0].blobs?.length ?? 0) === 1,
@@ -2142,7 +2142,7 @@ world.douyin.readMessages = async () => [
   { from: 'them', kind: 'text', text: '前一句不该带出去', image: '' },
   { from: 'them', kind: 'emoji', text: '[表情]', image: pngDataUrl },
 ];
-const gotMedia = await world.douyin.readStrangerThread('海底月', 8, { preview: '动画表情' });
+const gotMedia = await world.douyin.readStrangerThread('小鹿', 8, { preview: '动画表情' });
 check(
   '标题读不出来时靠内容核对也能读到表情',
   gotMedia.length === 1 && gotMedia[0].kind === 'emoji' && !!gotMedia[0].image,
@@ -2151,12 +2151,12 @@ check(
 
 // 内容对不上（多半切错会话）→ 返回空，宁可用占位，也不把别人的话当成他说的
 world.douyin.readMessages = async () => [{ from: 'them', kind: 'text', text: '完全无关的话', image: '' }];
-const gotNone = await world.douyin.readStrangerThread('海底月', 8, { preview: '动画表情' });
+const gotNone = await world.douyin.readStrangerThread('小鹿', 8, { preview: '动画表情' });
 check('内容对不上就不返回', gotNone.length === 0, JSON.stringify(gotNone));
 
 // 纯文字预览按文字核对
 world.douyin.readMessages = async () => [{ from: 'them', kind: 'text', text: '在吗在吗', image: '' }];
-const gotText = await world.douyin.readStrangerThread('海底月', 8, { preview: '在吗在吗' });
+const gotText = await world.douyin.readStrangerThread('小鹿', 8, { preview: '在吗在吗' });
 check('文字预览按文字核对', gotText.length === 1 && /在吗/.test(gotText[0].text), JSON.stringify(gotText));
 
 /* ---- 陌生人常驻页：像主人私信那样直接读 ---- */
@@ -2227,12 +2227,12 @@ const skipLogs = [];
 const prevLog = world.log;
 world.log = { info: (...a) => skipLogs.push(a), warn: () => {} };
 world.cfg.strangerDmMode = 'auto';
-world.store.data.douyinSelf = { ...(world.store.data.douyinSelf ?? {}), name: '穹' };
+world.store.data.douyinSelf = { ...(world.store.data.douyinSelf ?? {}), name: '阿澈' };
 world.store.data.strangerSeen = {};
 sPushes.length = 0;
-world.douyin.strangerThreads = async () => [{ who: '自己回声', at: '刚刚', preview: '穹：我在', unread: 0 }];
+world.douyin.strangerThreads = async () => [{ who: '自己回声', at: '刚刚', preview: '阿澈：我在', unread: 0 }];
 world.strangerScanAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 world.log = prevLog;
 check(
   '自己发的回声会记一条 skip',
@@ -2286,24 +2286,24 @@ liveWorld.strangerDmPolicy();
 check('热更新：文件没变就不重复同步', liveLogs.length === logCount, `logs=${liveLogs.length - logCount}`);
 
 /* ---- 群名是「几个人的昵称拼起来」时，不能把人当成群 ---- */
-check('群名含人名：这个人是人不是群', world.looksLikeKnownGroup('海底月', ['海底月、小月月']) === false);
+check('群名含人名：这个人是人不是群', world.looksLikeKnownGroup('小鹿', ['小鹿、阿柚']) === false);
 check(
   '群名含人名：会话标题是群才算群',
-  world.looksLikeKnownGroup('海底月、小月月(3)', ['海底月、小月月']) === true,
+  world.looksLikeKnownGroup('小鹿、阿柚(3)', ['小鹿、阿柚']) === true,
 );
-check('普通群名相等也算群', world.looksLikeKnownGroup('测试1', ['测试1']) === true);
-check('不认识的名字不算群', world.looksLikeKnownGroup('路人甲', ['测试1', '测试2']) === false);
+check('普通群名相等也算群', world.looksLikeKnownGroup('群A', ['群A']) === true);
+check('不认识的名字不算群', world.looksLikeKnownGroup('路人甲', ['群A', '群B']) === false);
 
 // 抖音拉群默认群名 = 成员昵称拼起来；这时发私信不能再被判成「发群」（内容会公开在群里）
 const prevGroupsCfg2 = world.cfg.douyinGroups;
 const prevGroupAuto2 = world.groupAuto;
-world.cfg.douyinGroups = '海底月、小月月';
-world.groupAuto = { names: ['海底月、小月月'] };
+world.cfg.douyinGroups = '小鹿、阿柚';
+world.groupAuto = { names: ['小鹿、阿柚'] };
 world.cfg.strangerDmMode = 'auto';
 world.cfg.dailyDms = 100;
 world.store.data.usage[sDay] = { ...(world.store.data.usage[sDay] ?? {}), dm: 0 };
-world.store.data.strangerSeen = { ...(world.store.data.strangerSeen ?? {}), 'douyin:海底月': '在干啥' };
-const namePlan = await world.buildPlan('dm', { platform: 'douyin', target: '海底月', text: '在的' });
+world.store.data.strangerSeen = { ...(world.store.data.strangerSeen ?? {}), 'douyin:小鹿': '在干啥' };
+const namePlan = await world.buildPlan('dm', { platform: 'douyin', target: '小鹿', text: '在的' });
 check(
   '群名含人名时，私信按人发（不发群）',
   namePlan.ok === true && namePlan.stranger === true && !namePlan.group,
@@ -2324,14 +2324,14 @@ world.douyin.strangerEntry = async () => null;
 world.douyin.strangerThreads = async () => [];
 world.douyin.conversationRows = async () => [
   { name: '摸鱼群', at: '10:00', preview: '大家好' },
-  { name: '小月月一直在玩', at: '10:01', preview: '在吗' },
-  { name: '海底月', at: '刚刚', preview: '在干啥' },
+  { name: '阿柚', at: '10:01', preview: '在吗' },
+  { name: '小鹿', at: '刚刚', preview: '在干啥' },
 ];
 world.store.data.strangerSeen = {};
 world.strangerRowsLogAt = 0;
 world.strangerScanAt = 0;
 world.strangerListAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 world.log = prevLogForRows;
 world.cfg.douyinGroups = prevGroupsCfg;
 world.groupAuto = prevGroupAuto;
@@ -2341,8 +2341,8 @@ check(
   !!rowsLog &&
     rowsLog[1].rows.length === 3 &&
     /摸鱼群\|.*\|group/.test(rowsLog[1].rows[0]) &&
-    /小月月一直在玩\|.*\|owner/.test(rowsLog[1].rows[1]) &&
-    /海底月\|.*\|stranger/.test(rowsLog[1].rows[2]),
+    /阿柚\|.*\|owner/.test(rowsLog[1].rows[1]) &&
+    /小鹿\|.*\|stranger/.test(rowsLog[1].rows[2]),
   JSON.stringify(rowsLog?.[1] ?? null),
 );
 
@@ -2356,7 +2356,7 @@ world.douyin.strangerThreads = async () => [];
 world.strangerRowsLogAt = 0;
 world.strangerScanAt = 0;
 world.strangerListAt = 0;
-await world.checkDouyinStrangers('小月月一直在玩');
+await world.checkDouyinStrangers('阿柚');
 world.log = prevLogForRows;
 world.groupAuto = prevGroupAuto;
 check(

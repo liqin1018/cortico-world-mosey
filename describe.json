@@ -175,7 +175,7 @@
           },
           "mention": {
             "type": "string",
-            "description": "群里 @ 谁的昵称（照抄群成员列表，比如「大萌神」）。@主人不用填这个，用 mention_owner: true —— 系统知道主人的抖音昵称。不要填「你」「主人」这种称呼，也不要自己写 @ 符号。"
+            "description": "群里 @ 谁的昵称（照抄群成员列表，比如「老K」）。@主人不用填这个，用 mention_owner: true —— 系统知道主人的抖音昵称。不要填「你」「主人」这种称呼，也不要自己写 @ 符号。"
           },
           "draft_id": {
             "type": "string",

@@ -1317,7 +1317,7 @@ export class Bilibili {
       const name = await this.ownerName(ownerUid);
       if (name) {
         // 正文里如果已经写了「@昵称」，再前置一个就成了 @ 两次（实测 2026-11 动态里
-        // 就是「@小月月 … @小月月还在玩」）。剥得干净才前置；正文本来就只是 @昵称 的，
+        // 就是「@阿柚 … @阿柚还在玩」）。剥得干净才前置；正文本来就只是 @昵称 的，
         // 不前置、靠下面的 at_name_to_mid 把正文里那个变成真 @。
         const clean = stripAtName(bodyText, name);
         if (clean) {

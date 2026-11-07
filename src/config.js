@@ -75,7 +75,13 @@ export const DEFAULTS = {
   /** 她自己出门时的动作间隔；主人当场让她做的事不走这个数（只防连点）。 */
   minGapSeconds: 20,
 
-  /** 0 = 不自己出门；默认一天五次，比较像会自己刷手机的人。 */
+  /**
+   * 出门方式：off=不自己出门 / sessions=按次数 / quota=按额度。
+   * 以前是「次数」和「额度」两道闸门同时生效，谁先撞谁停——
+   * 次数用完之后必做还没做完，就只能干等到明天。
+   */
+  outingMode: 'sessions',
+  /** 0 = 不自己出门（等同于 outingMode=off）；按次数模式时一天出门几次。 */
   autoSessionsPerDay: 5,
   /** 两次自动出门之间至少隔多少分钟；和主人手动互动无关。 */
   autoGapMinutes: 90,
@@ -141,7 +147,7 @@ export const DEFAULTS = {
 
 const P = 'worlds.stroll.';
 
-/** 基础：开关、平台、放行方式、身份。 */
+/** 基础：开关、平台、放行方式。 */
 const BASIC = {
   id: 'world:stroll',
   owner: 'world:stroll',
@@ -179,42 +185,6 @@ const BASIC = {
         description: '评论/关注/发动态/私信默认等你点头；「按额度自动」跳过确认。',
         'x-hot': true,
         'x-warning': true,
-      },
-      [P + 'autoSessionsPerDay']: {
-        type: 'integer',
-        title: '每天自己出门',
-        description: '0＝只在你叫的时候；5 次像正常人刷手机。',
-        minimum: 0,
-        maximum: 10,
-        'x-suffix': ' 次/天',
-        'x-hot': true,
-      },
-      [P + 'autoGapMinutes']: {
-        type: 'integer',
-        title: '两次出门至少隔',
-        description: '太密容易撞风控；90 分钟≈一天 5 次。',
-        minimum: 30,
-        maximum: 360,
-        'x-suffix': ' 分钟',
-        'x-hot': true,
-      },
-      [P + 'outingFrom']: {
-        type: 'integer',
-        title: '出门时段：从几点',
-        description: '只在这个时间段自己出门。想只走谷时可以填 1 到 6。',
-        minimum: 0,
-        maximum: 23,
-        'x-suffix': ' 点',
-        'x-hot': true,
-      },
-      [P + 'outingTo']: {
-        type: 'integer',
-        title: '出门时段：到几点',
-        description: '填 24 表示到当天结束。和上面填一样的值＝全天都能出门；跨天也行，比如 22 到 6。',
-        minimum: 0,
-        maximum: 24,
-        'x-suffix': ' 点',
-        'x-hot': true,
       },
     },
   },
@@ -266,7 +236,8 @@ const QUOTA = {
   schema: {
     type: 'object',
     title: '每日额度',
-    description: '每天最多做多少，自己填。勾「必做」就从上限变成目标；周上限自动是日上限 × 7。',
+    description:
+      '每天最多做多少。「必做」＝当成今天的目标：按额度出门时，勾了的要做满才收工；按次数出门时只决定先补哪个，不会额外催她出门（所以切模式不用取消勾选）。没勾的只当上限。周上限自动是日上限 × 7。',
     properties: {
 
       [P + 'dailyLikes']: {
@@ -276,12 +247,22 @@ const QUOTA = {
         maximum: 200,
         'x-suffix': ' 次',
       },
+      [P + 'mustLike']: {
+        type: 'boolean',
+        title: '必做：点赞',
+        description: '勾上后，今天要做满「每天最多点赞」的次数；按额度出门时这是收工条件之一。',
+      },
       [P + 'dailyComments']: {
         type: 'integer',
         title: '每天最多评论',
         minimum: 0,
         maximum: 100,
         'x-suffix': ' 条',
+      },
+      [P + 'mustComment']: {
+        type: 'boolean',
+        title: '必做：评论',
+        description: '勾上后，今天要做满「每天最多评论」的条数。审批不是 auto 时评论会进草稿，批准后才算完成。',
       },
       [P + 'dailyDms']: {
         type: 'integer',
@@ -291,12 +272,23 @@ const QUOTA = {
         minimum: 0,
         'x-suffix': ' 条',
       },
+      [P + 'mustDm']: {
+        type: 'boolean',
+        title: '必做：私信',
+        description:
+          '勾上后，今天要发够「每天最多私信」的条数，晚上没做完会提醒你。但按额度出门不拿它当收工条件——没人给你发消息时，硬凑会变成骚扰陌生人。',
+      },
       [P + 'dailyGroups']: {
         type: 'integer',
         title: '每天最多群聊',
         description: '在抖音群里说话的条数（不算私信额度）。',
         minimum: 0,
         'x-suffix': ' 条',
+      },
+      [P + 'mustGroup']: {
+        type: 'boolean',
+        title: '必做：群聊',
+        description: '勾上后，今天要在群里说够「每天最多群聊」的条数。**按额度出门也不拿它当收工条件**（群里没人说话时不能硬插话）。',
       },
       [P + 'dailyFollows']: {
         type: 'integer',
@@ -305,6 +297,11 @@ const QUOTA = {
         maximum: 100,
         'x-suffix': ' 人',
       },
+      [P + 'mustFollow']: {
+        type: 'boolean',
+        title: '必做：关注',
+        description: '勾上后，今天要关注够「每天最多关注」的人数；按额度出门时这是收工条件之一。',
+      },
       [P + 'dailyPosts']: {
         type: 'integer',
         title: '每天最多发动态',
@@ -312,42 +309,17 @@ const QUOTA = {
         maximum: 30,
         'x-suffix': ' 条',
       },
+      [P + 'mustPost']: {
+        type: 'boolean',
+        title: '必做：发动态',
+        description: '勾上后，今天要发够「每天最多发动态」的条数。审批不是 auto 时会进草稿，批准后才算完成。',
+      },
       [P + 'dailySaves']: {
         type: 'integer',
         title: '每天最多稍后再看',
         minimum: 0,
         maximum: 100,
         'x-suffix': ' 条',
-      },
-      [P + 'mustLike']: {
-        type: 'boolean',
-        title: '必做：点赞',
-        description: '勾上后，今天必须完成「每天最多点赞」的次数，没完成她会优先去补。',
-      },
-      [P + 'mustComment']: {
-        type: 'boolean',
-        title: '必做：评论',
-        description: '勾上后，今天必须完成「每天最多评论」的条数。审批不是 auto 时评论会进草稿，批准后才算完成。',
-      },
-      [P + 'mustDm']: {
-        type: 'boolean',
-        title: '必做：私信',
-        description: '勾上后，今天必须发够「每天最多私信」的条数。没有可回的人时她会告诉你，不会硬找陌生人发。',
-      },
-      [P + 'mustGroup']: {
-        type: 'boolean',
-        title: '必做：群聊',
-        description: '勾上后，今天必须在群里说够「每天最多群聊」的条数。群里没人说话时不算她的错，她会说明。',
-      },
-      [P + 'mustFollow']: {
-        type: 'boolean',
-        title: '必做：关注',
-        description: '勾上后，今天必须关注够「每天最多关注」的人数。',
-      },
-      [P + 'mustPost']: {
-        type: 'boolean',
-        title: '必做：发动态',
-        description: '勾上后，今天必须发够「每天最多发动态」的条数。审批不是 auto 时会进草稿，批准后才算完成。',
       },
 
     },
@@ -399,23 +371,61 @@ const INTERACT = {
   },
 };
 
-/** 高级：兴趣、省 token、一起看、风控。 */
-const ADVANCED = {
-  id: 'world:stroll-advanced',
+/** 自己出门：方式、次数、间隔、时段、预算——她自己的节奏全在这一组。 */
+const OUTING = {
+  id: 'world:stroll-outing',
   owner: 'world:stroll',
   schema: {
     type: 'object',
-    title: '高级与节奏',
-    description: '一般不用改。改错最多多花点 token 或多等一会儿。',
+    title: '自己出门',
+    description:
+      '她什么时候出去、一天出去几次、被什么挡住。按次数＝出去几次就收工；按额度＝把勾了必做的项做满才收工。',
     properties: {
-
-      [P + 'tokenDailyBudget']: {
+      [P + 'outingMode']: {
+        type: 'string',
+        title: '出门方式',
+        'x-options': 'stroll-outing-mode',
+        description:
+          '按次数：每天出去几次就收工，额度只当单个动作的上限。' +
+          '按额度：出去几次不限，把勾了必做的项做满才收工（一个都没勾时按全部主动额度算）；' +
+          '私信/群聊不算，没人找你时这两项永远做不满。没勾必做的额度只当上限，不会逼她做。',
+        'x-hot': true,
+      },
+      [P + 'autoSessionsPerDay']: {
         type: 'integer',
-        title: '每天模型预算',
-        description: '只限制主动出门的频率，不拦你找她。',
-        minimum: 1000,
-        maximum: 50000,
-        'x-suffix': ' token',
+        title: '每天自己出门',
+        description: '只在「出门方式＝按次数」时生效；0＝不自己出门。',
+        minimum: 0,
+        maximum: 10,
+        'x-suffix': ' 次/天',
+        'x-hot': true,
+      },
+      [P + 'autoGapMinutes']: {
+        type: 'integer',
+        title: '两次出门至少隔',
+        description: '太密容易撞风控；90 分钟≈一天 5 次。按额度模式也按这个间隔走。',
+        minimum: 30,
+        maximum: 360,
+        'x-suffix': ' 分钟',
+        'x-hot': true,
+      },
+      [P + 'outingFrom']: {
+        type: 'integer',
+        title: '出门时段：从几点',
+        description: '只在这个时间段自己出门。想只走谷时可以填 1 到 6。',
+        minimum: 0,
+        maximum: 23,
+        'x-suffix': ' 点',
+        'x-hot': true,
+      },
+      [P + 'outingTo']: {
+        type: 'integer',
+        title: '出门时段：到几点',
+        description: '填 24 表示到当天结束。和上面填一样的值＝全天都能出门；跨天也行，比如 22 到 6。',
+        minimum: 0,
+        maximum: 24,
+        'x-suffix': ' 点',
+        'x-hot': true,
       },
       [P + 'quietFrom']: {
         type: 'integer',
@@ -449,6 +459,28 @@ const ADVANCED = {
         maximum: 12,
         'x-suffix': ' 条',
       },
+      [P + 'tokenDailyBudget']: {
+        type: 'integer',
+        title: '每天模型预算',
+        description: '按每出门一次约 1500 token 折算成「今天最多还能出门几次」，两种出门方式都受它限制。',
+        minimum: 1000,
+        maximum: 50000,
+        'x-suffix': ' token',
+      },
+    },
+  },
+};
+
+/** 高级：兴趣、评论、风控、图片目录。 */
+const ADVANCED = {
+  id: 'world:stroll-advanced',
+  owner: 'world:stroll',
+  schema: {
+    type: 'object',
+    title: '高级',
+    description: '一般不用改。改错最多多花点 token 或多等一会儿。',
+    properties: {
+
       [P + 'commentMaxChars']: {
         type: 'integer',
         title: '评论最多几个字',
@@ -781,7 +813,12 @@ const MESSAGES = {
   },
 };
 
-export const CONFIG_GROUPS = [BASIC, OWNER, QUOTA, VIEWING, WATCH, SHORTS, MESSAGES, INTERACT, ADVANCED];
+/**
+ * 设置页的顺序（从「最常改」到「一般不动」）：
+ *   基础 → 主人 → 公开动作（她能做什么）→ 每日额度（做多少 / 哪些必做）
+ *   → 自己出门（怎么出去）→ 私信与群 → 看视频 → 一起看 → 抖音一起刷 → 高级
+ */
+export const CONFIG_GROUPS = [BASIC, OWNER, INTERACT, QUOTA, OUTING, MESSAGES, VIEWING, WATCH, SHORTS, ADVANCED];
 
 /** 旧引用兼容：第一组即基础组。 */
 
@@ -835,6 +872,7 @@ export const POLICY_FIELDS = {
   minGapSeconds: { type: 'int', min: 10, max: 600 },
   riskGuard: { type: 'enum', values: ['off', 'light', 'strict'] },
   autoSessionsPerDay: { type: 'int', min: 0, max: 10 },
+  outingMode: { type: 'enum', values: ['off', 'sessions', 'quota'] },
   autoGapMinutes: { type: 'int', min: 30, max: 360 },
   outingFrom: { type: 'int', min: 0, max: 23 },
   outingTo: { type: 'int', min: 0, max: 24 },

@@ -60,6 +60,13 @@ export const STROLL = {
         { value: 'strict', label: zh ? '严格' : 'Strict' },
       ];
     }
+    if (kind === 'stroll-outing-mode') {
+      return [
+        { value: 'sessions', label: zh ? '按次数：出去几次就收工（默认）' : 'By trip count (default)' },
+        { value: 'quota', label: zh ? '按额度：额度做满才收工' : 'By daily quota' },
+        { value: 'off', label: zh ? '不自己出门' : 'Never go out on its own' },
+      ];
+    }
     if (kind !== 'stroll-approval') return [];
     return [
       { value: 'confirm', label: zh ? '全部等我批准（推荐）' : 'Ask me first (recommended)' },

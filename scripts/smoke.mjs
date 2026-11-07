@@ -200,10 +200,27 @@ check('连发第二句继续推', pushes.length === 2 && /看这个/.test(pushes
 
 // 风控默认「只记账不拦人」：-509 不该再把主人的事一起停掉
 world.store.clearRisk();
+world.store.data.lastWriteAt = 0;
+world.store.data.lastChatAt = 0;
 const soft = world.policy.noteRisk('-509', '请求过于频繁，请稍后再试');
 check('默认 off：-509 只记账不暂停', soft.hours === 0 && soft.guard === 'off');
-check('off 下限流不拦评论', world.policy.check('comment', 'douyin', '7702414706065083674', {}).ok === true);
+check('off 下限流只歇她自己出门的几分钟', world.policy.check('comment', 'douyin', '7702414706065083674', {}).code === 'SOFT_WAIT');
+check(
+  'off 下限流不拦主人当场点的事',
+  world.policy.check('comment', 'douyin', '7702414706065083674', { userInitiated: true }).ok === true,
+);
 check('off 下回主人私信当然放行', world.policy.check('dm', 'douyin', 'owner', { free: true, userInitiated: true }).ok === true);
+
+// -509 退避分级：2 / 5 / 10 / 20 / 30 分钟封顶，一小时后重新从头算
+world.store.clearRisk();
+const waits = [];
+for (let i = 0; i < 6; i += 1) waits.push(world.policy.noteRisk('-509', '请求过于频繁').soft?.minutes ?? 0);
+check('限流退避按 2/5/10/20/30 递增并封顶', waits.join(',') === '2,5,10,20,30,30', waits.join(','));
+check('限流退避结束会自动放行', (() => {
+  world.store.data.softBackoff.until = Date.now() - 1;
+  return world.policy.rateWait().waiting === false && world.policy.check('comment', 'douyin', '7702414706065083674', {}).ok === true;
+})());
+world.store.clearRisk();
 
 // light：只有验证码类才停，频率限流继续放行
 cfg.riskGuard = 'light';
@@ -341,6 +358,8 @@ check('限流说明是限流，不是验证', /限流/.test(rateErr.message) && 
 const verifyErr = world.douyin.riskError({ kind: 'verify', hit: '完成验证@semi-modal' }, '发私信');
 check('验证说明是验证', /验证/.test(verifyErr.message), verifyErr.message);
 world.douyin.rateUntil = 0;
+// 上面两条模拟的限流会留下退避（2 分钟），清掉，免得后面的正常动作被它挡住
+world.store.data.softBackoff = { until: 0, at: 0, n: 0, reason: '' };
 // 刚被群消息叫起来、回话漏了 target：必须让她写清楚，不能偷偷发成私信
 world.groupAuto = { at: Date.now(), names: ['阿柚, 阿澈, 老K'] };
 world.lastGroupPoke = { group: '阿柚, 阿澈, 老K', at: Date.now() };
@@ -710,16 +729,226 @@ const mustNoon = new Date();
 mustNoon.setHours(12, 0, 0, 0);
 await world.tick(mustNoon.getTime());
 check(
-  '必做没完成会强制出门',
+  '按次数模式：必做不压间隔（不用为了省 token 去关必做）',
+  mustPushes.length === 0 && Number(world.store.data.autoSessions[mustDay]) === 0,
+  JSON.stringify(mustPushes).slice(0, 160),
+);
+// 正常间隔到了照样出门，推送里仍然告诉她先补差距大的
+world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+for (let i = 0; i < 12 && !mustPushes.length; i += 1) await world.tick(mustNoon.getTime());
+check(
+  '按次数模式：到点出门时仍提示先补必做',
   mustPushes.some((p) => p.type === 'stroll.due' && /必做日/.test(p.text)) && Number(world.store.data.autoSessions[mustDay]) === 1,
   JSON.stringify(mustPushes).slice(0, 160),
 );
 
+/* 出门方式：按次数 / 按额度 / 不自己出门 */
+const prevModeCfg = { mode: world.cfg.outingMode, budget: world.cfg.tokenDailyBudget };
+check('默认按次数', DEFAULTS.outingMode === 'sessions' && world.outingMode() === 'sessions');
+check(
+  '出门方式能在设置里改',
+  !!CONFIG_GROUPS.find((g) => /自己出门/.test(g.schema.title))?.schema.properties?.['worlds.stroll.outingMode'],
+);
+// 设置页顺序：常改的在前，节奏项都收进「自己出门」，一般不动的一律沉底
+check(
+  '设置页分组顺序',
+  CONFIG_GROUPS.map((g) => g.schema.title).join('→') ===
+    '基础→主人→公开动作→每日额度→自己出门→私信与群→看视频→一起看→抖音一起刷→高级',
+  CONFIG_GROUPS.map((g) => g.schema.title).join('→'),
+);
+check(
+  '出门的节奏项都在「自己出门」组里',
+  ['outingMode', 'autoSessionsPerDay', 'autoGapMinutes', 'outingFrom', 'outingTo', 'quietFrom', 'quietTo', 'minGapSeconds', 'sessionMaxItems', 'tokenDailyBudget'].every(
+    (key) => !!CONFIG_GROUPS.find((g) => g.id === 'world:stroll-outing')?.schema.properties[`worlds.stroll.${key}`],
+  ),
+);
+check(
+  '每个额度都和自己的「必做」挨着',
+  (() => {
+    const keys = Object.keys(CONFIG_GROUPS.find((g) => /每日额度/.test(g.schema.title)).schema.properties).map((k) =>
+      k.replace('worlds.stroll.', ''),
+    );
+    return (
+      keys.indexOf('mustLike') === keys.indexOf('dailyLikes') + 1 &&
+      keys.indexOf('mustComment') === keys.indexOf('dailyComments') + 1 &&
+      keys.indexOf('mustFollow') === keys.indexOf('dailyFollows') + 1 &&
+      keys.indexOf('mustPost') === keys.indexOf('dailyPosts') + 1
+    );
+  })(),
+);
+
+// 按次数：次数用完就收工（额度还有剩也不出去，和 2.0 一样）
+world.cfg.outingMode = 'sessions';
+world.cfg.autoSessionsPerDay = 3;
+world.store.data.autoSessions[mustDay] = 3;
+world.store.data.lastAutoAt = Date.now() - 31 * 60 * 1000;
+mustPushes.length = 0;
+await world.tick(mustNoon.getTime());
+check('按次数：次数用完就不再出门', Number(world.store.data.autoSessions[mustDay]) === 3 && mustPushes.length === 0);
+
+// 按额度：次数用完照样出门，直到主动额度做满（按额度不压缩间隔，等满 90 分钟）
+world.cfg.outingMode = 'quota';
+world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+mustPushes.length = 0;
+await world.tick(mustNoon.getTime());
+check(
+  '按额度：次数用完还能出门',
+  Number(world.store.data.autoSessions[mustDay]) === 4 && /按额度/.test(mustPushes.at(-1)?.text ?? ''),
+  JSON.stringify(mustPushes.at(-1) ?? {}).slice(0, 200),
+);
+const quotaNext = world.autoNextView();
+check('面板：按额度模式下不看次数', quotaNext.mode === 'quota' && quotaNext.quotaLeft > 0 && quotaNext.done === false, JSON.stringify(quotaNext));
+
+// 主动额度做满就收工；私信/群聊不算在内（没人找时永远做不满）
+const usageSnap = { ...(world.store.data.usage[mustDay] ?? {}) };
+const full = {};
+for (const key of ['like', 'comment', 'follow', 'post', 'save']) full[key] = world.policy.cap(key).daily;
+world.store.data.usage[mustDay] = { ...usageSnap, ...full };
+world.store.data.autoSessions[mustDay] = 4;
+world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+mustPushes.length = 0;
+await world.tick(mustNoon.getTime());
+check(
+  '按额度：主动额度做满就收工',
+  Number(world.store.data.autoSessions[mustDay]) === 4 && mustPushes.length === 0 && world.quotaLeftForOuting() === 0,
+);
+check('私信/群聊不算进「额度做满」', world.policy.cap('dm').daily > 0 && world.policy.remaining('dm').daily > 0);
+check('面板：做满显示收工', world.autoNextView().done === true && world.autoNextView().reason === 'quota');
+world.store.data.usage[mustDay] = usageSnap;
+
+// 目标只认「勾了必做」的项：没勾关注的额度不会被当成任务，不会逼她关注
+world.cfg.mustLike = true;
+world.cfg.mustFollow = false;
+check('按额度只追勾了必做的项', world.quotaTargetKeys().join(',') === 'like', world.quotaTargetKeys().join(','));
+world.store.data.usage[mustDay] = { ...usageSnap, like: world.policy.cap('like').daily };
+check('点赞做满就收工，不逼关注', world.quotaLeftForOuting() === 0 && world.autoNextView()?.reason === 'quota');
+world.store.data.usage[mustDay] = usageSnap;
+
+// 一个必做都没勾 → 退回全部主动额度（不然额度模式会永远不出门）
+world.cfg.mustLike = false;
+check(
+  '没勾必做就退回全部主动额度',
+  world.quotaTargetKeys().length === 5 && world.quotaTargetKeys().includes('follow'),
+  world.quotaTargetKeys().join(','),
+);
+world.cfg.mustLike = true;
+
+// 关掉的动作不算目标：不然额度模式会一直出门白跑
+const prevAllowPost = world.cfg.allowPost;
+world.cfg.allowPost = false;
+world.cfg.mustLike = false;
+world.cfg.mustPost = true;
+check(
+  '关掉的动作不算目标',
+  !world.quotaTargetKeys().includes('post') && world.quotaTargetKeys().includes('like'),
+  world.quotaTargetKeys().join(','),
+);
+world.cfg.mustPost = false;
+world.cfg.allowPost = prevAllowPost;
+world.cfg.mustLike = true;
+
+// 只读 / 动作全关：直接不出门，面板说「没有能做的动作」
+const prevApprovalMode = world.cfg.approval;
+world.store.clearRisk();
+world.cfg.approval = 'dry_run';
+world.store.data.usage[mustDay] = usageSnap;
+world.store.data.autoSessions[mustDay] = 0;
+world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+mustPushes.length = 0;
+await world.tick(mustNoon.getTime());
+check('只读模式不会自己出门', mustPushes.length === 0 && world.autoNextView()?.reason === 'none');
+world.cfg.approval = prevApprovalMode;
+world.store.data.usage[mustDay] = usageSnap;
+
+// 草稿堆着没人批：先别出门（「等我批准」模式下草稿不涨额度，越跑越多）
+const draftsSnap = world.store.data.drafts;
+world.store.data.drafts = Array.from({ length: 8 }, (_, i) => ({
+  id: `smoke-draft-${i}`,
+  action: 'like',
+  platform: 'douyin',
+  target: `smoke-${i}`,
+  text: '',
+  status: 'pending',
+  createdAt: new Date().toISOString(),
+}));
+world.store.data.autoSessions[mustDay] = 0;
+world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+mustPushes.length = 0;
+await world.tick(mustNoon.getTime());
+check('草稿堆着就不出门', mustPushes.length === 0 && world.autoNextView()?.reason === 'drafts');
+world.store.data.drafts = draftsSnap;
+
+// token 预算是两种模式共用的天花板
+world.cfg.tokenDailyBudget = 3000; // 3000 / 1500 = 2 次
+world.store.data.autoSessions[mustDay] = 2;
+world.store.data.lastAutoAt = Date.now() - 31 * 60 * 1000;
+mustPushes.length = 0;
+await world.tick(mustNoon.getTime());
+check('预算用完就不出门（按额度也一样）', mustPushes.length === 0 && world.autoNextView()?.reason === 'budget');
+world.cfg.tokenDailyBudget = prevModeCfg.budget;
+
+// 不自己出门：一次都不推
+world.cfg.outingMode = 'off';
+world.store.data.autoSessions[mustDay] = 0;
+world.store.data.lastAutoAt = 0;
+mustPushes.length = 0;
+await world.tick(mustNoon.getTime());
+check('不自己出门就一次都不推', mustPushes.length === 0 && Number(world.store.data.autoSessions[mustDay]) === 0);
+check('关着时面板不显示下次', world.autoNextView() === null);
+
+// 老配置没有 outingMode、次数填 0 → 迁移成「不自己出门」
+const migModeCfg = { ...DEFAULTS, enabled: true, autoSessionsPerDay: 0 };
+delete migModeCfg.outingMode;
+const migModeWorld = new StrollWorld({
+  cfg: migModeCfg,
+  timezone: 'Asia/Shanghai',
+  dataDir: path.join(tmp, 'migrate-outing'),
+  persist: (patch) => Object.assign(migModeCfg, patch),
+});
+migModeWorld.migrateOutingMode();
+check('老配置次数=0 → 不自己出门', migModeCfg.outingMode === 'off' && migModeWorld.outingMode() === 'off', JSON.stringify(migModeCfg.outingMode));
+const migModeCfg2 = { ...DEFAULTS, enabled: true, autoSessionsPerDay: 4 };
+delete migModeCfg2.outingMode;
+const migModeWorld2 = new StrollWorld({
+  cfg: migModeCfg2,
+  timezone: 'Asia/Shanghai',
+  dataDir: path.join(tmp, 'migrate-outing2'),
+  persist: (patch) => Object.assign(migModeCfg2, patch),
+});
+migModeWorld2.migrateOutingMode();
+check('老配置正数次数 → 按次数', migModeCfg2.outingMode === 'sessions' && migModeWorld2.outingMode() === 'sessions');
+migModeWorld.stop?.();
+migModeWorld2.stop?.();
+// 催办只在按额度模式下发生：按次数 / 不自己出门都不该再把她叫出去补必做
+const pendingMust = world.mustDoList().filter((x) => x.left > 0);
+world.cfg.outingMode = 'sessions';
+mustPushes.length = 0;
+world.store.data.mustNudge = { day: mustDay, n: 0, at: 0 };
+await world.maybeMustNudge(pendingMust, 19, mustDay);
+check('按次数模式不催必做', mustPushes.length === 0, JSON.stringify(mustPushes));
+world.cfg.outingMode = 'off';
+mustPushes.length = 0;
+world.store.data.mustNudge = { day: mustDay, n: 0, at: 0 };
+await world.maybeMustNudge(pendingMust, 19, mustDay);
+check('不自己出门也不催', mustPushes.length === 0);
+
+// 按额度模式才催，而且 30 分钟内只催一次
+world.cfg.outingMode = 'quota';
+mustPushes.length = 0;
+world.store.data.mustNudge = { day: mustDay, n: 0, at: 0 };
+await world.maybeMustNudge(pendingMust, 19, mustDay);
+await world.maybeMustNudge(pendingMust, 19, mustDay);
+check('按额度：晚上必做会催，且 30 分钟内只催一次', mustPushes.filter((p) => /必做没完成/.test(p.text)).length === 1);
+
+// 私信/群聊不在目标里：勾了也不催（没人找她时做不完，催也白催）
+const prevMustDm = world.cfg.mustDm;
+world.cfg.mustDm = true;
 mustPushes.length = 0;
 world.store.data.mustNudge = { day: mustDay, n: 0, at: 0 };
 await world.maybeMustNudge(world.mustDoList().filter((x) => x.left > 0), 19, mustDay);
-await world.maybeMustNudge(world.mustDoList().filter((x) => x.left > 0), 19, mustDay);
-check('晚上必做会催，且 30 分钟内只催一次', mustPushes.filter((p) => /必做没完成/.test(p.text)).length === 1);
+check('私信没做完也不会催（不在目标里）', !mustPushes.some((p) => /私信/.test(p.text)), JSON.stringify(mustPushes));
+world.cfg.mustDm = prevMustDm;
+world.cfg.outingMode = prevModeCfg.mode;
 
 world.push = oldMustPush;
 world.running = wasRunning;

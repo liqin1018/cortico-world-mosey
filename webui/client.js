@@ -738,8 +738,9 @@ export default {
         let liveWatch = null;
         let toastTimer = null;
         let lastPresenceKey = '';
-        // 关掉「自己出门」再打开时，恢复上次的次数，而不是硬塞成 1 次
+        // 关掉「自己出门」再打开时，恢复上次的次数/方式，而不是硬塞成 1 次
         let autoRemember = 5;
+        let autoRememberMode = 'sessions';
 
         function msgSet(text, bad = false) {
           msg.textContent = text || '';
@@ -838,7 +839,15 @@ export default {
           const rawComment = Number(cfg.dailyComments ?? caps.comment);
           const rawAuto = Number(cfg.autoSessionsPerDay ?? 0);
           const rawGap = Number(cfg.autoGapMinutes ?? 90);
-          const tail = rawAuto > 0 ? ` · 自己出门 ${rawAuto} 次（每 ${rawGap} 分钟一次）` : ' · 不自己出门';
+          const rawMode = String(cfg.outingMode ?? 'sessions');
+          const tail =
+            rawMode === 'off'
+              ? ' · 不自己出门'
+              : rawMode === 'quota'
+                ? ` · 按额度出门（每 ${rawGap} 分钟一次，做满就停）`
+                : rawAuto > 0
+                  ? ` · 自己出门 ${rawAuto} 次（每 ${rawGap} 分钟一次）`
+                  : ' · 不自己出门';
           activityNote.textContent =
             activityKey === 'custom'
               ? `自定义：每天 ${rawLike} 赞 / ${rawComment} 评${tail}`
@@ -894,24 +903,62 @@ export default {
           switchTrack.classList.toggle('on', bgOn);
           switchLabel.textContent = bgOn ? '后台模式' : '开窗模式';
           browseSwitch.setAttribute('aria-checked', String(bgOn));
+          const outingMode = String(cfg.outingMode ?? 'sessions');
+          if (outingMode !== 'off') autoRememberMode = outingMode;
+          const autoOn = outingMode !== 'off';
           const autoCap = Number(cfg.autoSessionsPerDay ?? 0);
           if (autoCap > 0) autoRemember = autoCap;
-          autoTrack.classList.toggle('on', autoCap > 0);
-          autoSwitch.setAttribute('aria-checked', String(autoCap > 0));
+          autoTrack.classList.toggle('on', autoOn);
+          autoSwitch.setAttribute('aria-checked', String(autoOn));
           const autoNext = data?.autoNext;
-          let autoText = autoCap > 0 ? `每天自己逛 ${autoCap} 次` : '关着，只在你叫的时候';
-          if (autoCap > 0) {
-            if (autoNext?.done) autoText += ' · 今天够了';
-            else if (autoNext?.at) {
-              const remainMs = Number(autoNext.at) - Date.now();
-              autoText += remainMs > 5 * 60 * 1000 ? ` · 下次约 ${hhmm(Number(autoNext.at))}` : ' · 快出门了';
+          const autoUsed = Number(data?.autoSessions ?? 0);
+          const quotaLeft = Number(autoNext?.quotaLeft ?? 0);
+          const quotaTotal = Number(autoNext?.quotaTotal ?? 0);
+          const quotaDone = Math.max(0, quotaTotal - quotaLeft);
+          let autoText = '关着，只在你叫的时候';
+          if (autoOn) {
+            if (outingMode === 'quota') {
+              // 按额度：目标项 = 勾了必做的那几项（没勾就按全部主动额度）
+              const targets = Array.isArray(autoNext?.targets) ? autoNext.targets : [];
+              const pendingText = targets.map((t) => `${t.label} ${t.left}`).join('、');
+              if (autoNext?.done && autoNext?.reason === 'budget') {
+                autoText = `按额度 · token 预算用完了（还差 ${pendingText || `${quotaLeft} 个`}）`;
+              } else if (autoNext?.done && autoNext?.reason === 'none') {
+                autoText = '按额度 · 没有能做的动作（看「公开动作」和是不是只读模式）';
+              } else if (autoNext?.done && autoNext?.reason === 'drafts') {
+                autoText = `按额度 · 还有 ${Number(autoNext?.drafts ?? 0)} 条草稿等你批，先不出门`;
+              } else if (quotaLeft <= 0) {
+                autoText = '按额度 · 目标做完了，今天收工';
+              } else {
+                autoText = `按额度 · 还差 ${pendingText || `${quotaLeft} 个`}`;
+                if (autoNext?.at) {
+                  const remainMs = Number(autoNext.at) - Date.now();
+                  autoText += remainMs > 5 * 60 * 1000 ? ` · 下次约 ${hhmm(Number(autoNext.at))}` : ' · 快出门了';
+                }
+              }
+            } else {
+              autoText = autoCap > 0 ? `按次数 · 每天自己逛 ${autoCap} 次` : '按次数 · 次数是 0，不会自己出门';
+              const effCap = Number(autoNext?.cap ?? autoCap);
+              if (autoCap > 0 && effCap < autoCap) autoText += `（token 预算只够 ${effCap} 次）`;
+              if (autoCap > 0) {
+                if (autoNext?.done) autoText += ' · 今天够了';
+                else if (autoNext?.at) {
+                  const remainMs = Number(autoNext.at) - Date.now();
+                  autoText += remainMs > 5 * 60 * 1000 ? ` · 下次约 ${hhmm(Number(autoNext.at))}` : ' · 快出门了';
+                }
+              }
             }
+            // 撞了 -509 会自己歇几分钟：面板上说清楚，别让主人以为她卡住了
+            const rateWait = p?.caps?.rateWait;
+            if (rateWait?.waiting) autoText += ` · 限流歇 ${Number(rateWait.minutes ?? 0)} 分钟`;
           }
           autoLabel.textContent = autoText;
           statReads.set(Number(data?.todayReads ?? 0), ' 条');
+          // 按次数看「出门几次」；按额度看「额度做了多少」，两边的分母不是一个东西
+          const autoShownCap = Number(autoNext?.cap ?? autoCap);
           statAuto.set(
-            autoCap > 0 ? `${Number(data?.autoSessions ?? 0)}/${autoCap}` : String(Number(data?.autoSessions ?? 0)),
-            autoCap > 0 ? ' 次' : ' 次 · 关着',
+            autoOn && outingMode === 'sessions' ? `${autoUsed}/${autoShownCap}` : String(autoUsed),
+            !autoOn ? ' 次 · 关着' : outingMode === 'quota' ? ` 次 · 额度 ${quotaDone}/${quotaTotal}` : ' 次',
           );
           // 这是「预算」（配置值），不是已用量；原来 Math.round(8600/1000) 会显示成 9k，看着像超了
           const budgetK = (Number(cfg.tokenDailyBudget ?? 0) / 1000).toFixed(1).replace(/\.0$/, '');
@@ -2211,16 +2258,23 @@ export default {
         }
 
         async function toggleAuto() {
-          const cur = Number(lastData?.config?.autoSessionsPerDay ?? 0);
-          const next = cur > 0 ? 0 : autoRemember > 0 ? autoRemember : 5;
-          msgSet(cur > 0 ? '正在关掉自己出门…' : '正在开启自己出门…');
+          const cur = String(lastData?.config?.outingMode ?? 'sessions');
+          const turningOn = cur === 'off';
+          const next = turningOn ? autoRememberMode || 'sessions' : 'off';
+          msgSet(turningOn ? '正在开启自己出门…' : '正在关掉自己出门…');
           try {
-            const result = await ctx.invoke('set_auto', [next]);
+            // 按次数但次数是 0：顺手把次数填回去，不然开了等于没开
+            const needCount = turningOn && next === 'sessions' && Number(lastData?.config?.autoSessionsPerDay ?? 0) <= 0;
+            const result = needCount
+              ? await ctx.invoke('set_auto', [autoRemember > 0 ? autoRemember : 5])
+              : await ctx.invoke('set_outing', [next]);
             if (result?.ok === false) throw new Error(result.error || '没改成');
             msgSet(
-              cur > 0
+              !turningOn
                 ? '已关掉自己出门，只在你叫的时候逛。'
-                : `已开启：每天最多自己逛 ${next} 次，两次之间会隔一会儿。`,
+                : next === 'quota'
+                  ? '已开启：按额度出门，主动额度做满才收工。'
+                  : `已开启：每天最多自己逛 ${Number(lastData?.config?.autoSessionsPerDay ?? 5)} 次，两次之间会隔一会儿。`,
             );
             await refresh();
           } catch (error) {

@@ -1,6 +1,15 @@
 import { clamp, dayKey, hourOf, weekKey } from './util.js';
 
 /**
+ * -509 / 429 这类「只是太快了」的限流：按撞墙次数退避 2 / 5 / 10 / 20 分钟，封顶 30 分钟。
+ * 和 riskGuard 解耦——riskGuard 管「要不要把所有动作停掉」，这里只管「她自己出门的节奏」，
+ * 主人当场点的、回主人私信的一律不拦（不然被限流一次就连主人叫都不应了）。
+ */
+const RATE_BACKOFF_MIN = [2, 5, 10, 20, 30];
+/** 离上次限流超过一小时，就当上一波已经过去，退避从头算。 */
+const RATE_RESET_MS = 60 * 60 * 1000;
+
+/**
  * 日额度直接读配置；周额度 = 日额度 × 7（不再另设一个写死的周上限）。
  * 以前 follow 的 weeklyMax 是 12——即使主人把日额度调到 5，一周也只能关注 12 个，
  * 测试时很容易就撞墙，而且配置页上完全看不到这个数。
@@ -87,6 +96,24 @@ export class Policy {
   }
 
   /**
+   * 限流退避：`{ waiting, until, minutes, n, reason }`。
+   * 只拦「她自己出门」时做的动作；主人当场点的、回主人私信的不受影响。
+   */
+  rateWait() {
+    const soft = this.store.data.softBackoff ?? {};
+    const until = Number(soft.until ?? 0);
+    const n = Number(soft.n ?? 0);
+    if (!until || until <= Date.now()) return { waiting: false, until: 0, minutes: 0, n, reason: '' };
+    return {
+      waiting: true,
+      until,
+      minutes: Math.max(1, Math.ceil((until - Date.now()) / 60000)),
+      n,
+      reason: String(soft.reason ?? '-509'),
+    };
+  }
+
+  /**
    * 公开动作总闸。userInitiated 是你亲手点的：只做防连点，不再按节奏拦。
    *
    * free    = 回主人私信：不占额度、不查重、0.5 秒只防重发
@@ -132,6 +159,20 @@ export class Policy {
     //                    永远撞 90 秒的 TOO_FAST，表现就是每次评论都要等一两分钟
     //   自己出门         minGapSeconds（默认 20 秒）
     const asked = userInitiated || this.ownerActive();
+    /**
+     * 刚被 -509/429 挡过：她自己先歇几分钟，别继续撞（撞得越勤退避越长）。
+     * 只拦「她自己出门」的动作：主人当场点的（asked）、回主人私信的（free）照旧——
+     * 以前这里一刀切，结果一次限流连主人叫她做的事都做不了。
+     */
+    const wait = this.rateWait();
+    if (wait.waiting && !asked && !free) {
+      return {
+        ok: false,
+        code: 'SOFT_WAIT',
+        message: `刚被平台限流（${wait.reason}），歇 ${wait.minutes} 分钟再动。`,
+        until: wait.until,
+      };
+    }
     const minGap = Math.max(5, Number(this.cfg.minGapSeconds ?? 20));
     const sincePlat = Date.now() - Number((this.store.data.lastWriteByPlat ?? {})[platform] ?? 0);
     const sinceAny = Date.now() - Number(this.store.data.lastWriteAt ?? 0);
@@ -222,6 +263,22 @@ export class Policy {
     const guard = this.guard();
     const before = Number(this.store.data.risk.strikes ?? 0);
     const strikes = rate ? before + 1 : before;
+    // 限流退避（和 riskGuard 无关）：-509 只是「太快了」，几分钟自己就好，
+    // 但一路硬撞会越来越久——按次数 2/5/10/20/30 分钟递增。
+    let soft = null;
+    if (rate) {
+      const prev = this.store.data.softBackoff ?? {};
+      const fresh = Date.now() - Number(prev.at ?? 0) > RATE_RESET_MS;
+      const n = fresh ? 1 : Math.max(1, Number(prev.n ?? 0) + 1);
+      const minutes = RATE_BACKOFF_MIN[Math.min(n, RATE_BACKOFF_MIN.length) - 1];
+      this.store.data.softBackoff = {
+        n,
+        at: Date.now(),
+        until: Date.now() + minutes * 60 * 1000,
+        reason: String(message ?? code ?? '-509').slice(0, 120),
+      };
+      soft = this.rateWait();
+    }
 
     let hours = 0;
     if (guard === 'strict') {
@@ -248,7 +305,7 @@ export class Policy {
       result: hours > 0 ? 'paused' : 'noted',
     });
     this.store.save();
-    return { until, hours, reason: this.store.data.risk.reason, guard };
+    return { until, hours, reason: this.store.data.risk.reason, guard, soft };
   }
 
   /** 给 ENV_PROMPT 的一行摘要。 */
@@ -261,9 +318,10 @@ export class Policy {
       })
       .join(' ');
     const paused = this.paused();
+    const wait = this.rateWait();
     const risk = paused.paused ? `停到 ${new Date(paused.until).toLocaleString('zh-CN')}` : '正常';
     const approval = { confirm: '全批准', auto_low_risk: '赞自动', auto_all: '按额度', dry_run: '只读' }[this.cfg.approval] ?? this.cfg.approval;
-    return `今日 ${parts} · 风险 ${risk} · 审批 ${approval}`;
+    return `今日 ${parts} · 风险 ${risk}${wait.waiting ? ` · 限流歇 ${wait.minutes} 分钟` : ''} · 审批 ${approval}`;
   }
 
   /** 给面板的完整计数。 */
@@ -281,6 +339,7 @@ export class Policy {
       caps,
       quiet: this.isQuiet(),
       paused: this.paused(),
+      rateWait: this.rateWait(),
       ramp: this.rampFactor(),
       approval: this.cfg.approval,
       summary: this.summary(),

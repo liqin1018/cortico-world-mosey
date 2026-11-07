@@ -46,6 +46,9 @@ const ACTION_NAMES = {
 
 const PLATFORM_NAMES = { bilibili: 'B站', douyin: '抖音' };
 
+/** 额度模式里给主人看的短名：出门推送和面板上的「还差 赞 17、评 3」用它。 */
+const QUOTA_SHORT = { like: '赞', comment: '评', follow: '关注', post: '动态', save: '稍后再看' };
+
 /**
  * 别人发来的内容统一加边界。
  *
@@ -370,6 +373,27 @@ export class StrollWorld {
   }
 
   /**
+   * 一次性迁移：2.0 以前用「每天自己出门 = 0」表示不出去。
+   * 2.1 起这件事交给「出门方式」，这里把老配置翻译过去，之后主人改的就不动了：
+   * 0 → 不自己出门；正数 → 按次数（和原来完全一样）。
+   */
+  migrateOutingMode() {
+    if (String(this.cfg.outingMode ?? '').trim()) return;
+    const mode = Number(this.cfg.autoSessionsPerDay ?? 5) > 0 ? 'sessions' : 'off';
+    try {
+      this.cfg.outingMode = mode;
+    } catch {
+      // 宿主冻结了配置对象：outingMode() 会自己按次数推断，不影响这一版的行为
+    }
+    try {
+      this.persist({ outingMode: mode });
+    } catch {
+      // 宿主不让写就只影响这次进程，面板里还能手改
+    }
+    this.log?.info?.('stroll migrate outing mode', { to: mode, autoSessionsPerDay: this.cfg.autoSessionsPerDay });
+  }
+
+  /**
    * 一次性迁移：旧版本里 `dailyDms` 有个值（默认 3），但那时候私信一律 free，
    * 这个数从来没生效过，主人也没在界面上见过。1.25.0 起它真的开始限额了，
    * 直接沿用会让人莫名只剩 3 条私信 —— 升上来时统一放回默认 10，之后主人自己改的不动。
@@ -377,6 +401,7 @@ export class StrollWorld {
   migrateConfig() {
     this.migrateStrangerKeys();
     this.migrateStrangerSeenEcho();
+    this.migrateOutingMode();
     this.refundDmLoopQuota();
     const done = this.store.data.migrated ?? {};
     if (done.dmQuota) return;
@@ -413,20 +438,42 @@ export class StrollWorld {
     if (!this.inOutingWindow(hour)) return;
     if (this.policy.isQuiet() || this.policy.paused().paused) return;
     const day = dayKey(new Date(now), this.timeZone);
-    // 勾了「必做」但今天还没做够的项：出门要优先补，晚上到点还要单独催
+    // 勾了「必做」但今天还没做够的项：按额度模式下决定要不要出门，按次数模式下只决定先补哪个
     const pending = this.mustDoList().filter((x) => x.left > 0);
     await this.maybeMustNudge(pending, hour, day);
-    if (this.cfg.autoSessionsPerDay <= 0) return;
+    const mode = this.outingMode();
+    if (mode === 'off') return;
+    // 刚被 -509/429 挡过：她先歇几分钟再出门（主人当场点的事不受影响）
+    if (this.policy.rateWait().waiting) return;
     const used = Number(this.store.data.autoSessions[day] ?? 0);
+    // token 预算是两种模式共用的天花板：每出门一次大约 1500 token
     const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? DEFAULTS.tokenDailyBudget) / 1500));
-    const cap = Math.min(Number(this.cfg.autoSessionsPerDay), budgetCap);
-    if (used >= cap) return;
+    if (used >= budgetCap) return;
+    let gap;
+    if (mode === 'quota') {
+      // 按额度：出去几次不限，目标做满才收工（私信/群聊不算——没人找时永远做不满）
+      if (this.quotaLeftForOuting() <= 0) return;
+      /**
+       * 还堆着一批草稿等你点头：先别出去。
+       * 「等我批准」模式下草稿不涨额度，不拦的话她会一趟趟出去、草稿越堆越多。
+       */
+      if (this.store.pendingDrafts().length >= 8) return;
+      gap = this.autoGapMs();
+    } else {
+      // 按次数：次数用完就收工；额度仍然拦每个动作
+      if (used >= Math.min(Number(this.cfg.autoSessionsPerDay ?? 0), budgetCap)) return;
+      /**
+       * 节奏只看次数，**不看必做**：必做在按次数模式下只决定「先补哪个」，
+       * 不压缩间隔、也不取消 40% 的随机跳过。
+       * 以前压到 30 分钟，等于切到按次数后还得把必做一个个关掉才省得下 token。
+       */
+      gap = this.autoGapMs();
+    }
     // 用 lastAutoAt 而不是 lastSessionAt：主人手动让她看东西，不该把自动出门往后推
     const lastAuto = Number(this.store.data.lastAutoAt ?? this.store.data.lastSessionAt ?? 0);
-    // 有必做没完成：间隔压到最多 30 分钟，而且不再掷骰子跳过
-    const gap = pending.length ? Math.min(this.autoGapMs(), 30 * 60 * 1000) : this.autoGapMs();
     if (Date.now() - lastAuto < gap) return;
-    if (!pending.length && Math.random() > 0.6) return;
+    // 按次数保留 40% 跳过（像人一样不是每次都去）；按额度是「有活就干」，不掷骰子
+    if (mode === 'sessions' && Math.random() > 0.6) return;
     this.store.data.lastAutoAt = Date.now();
     this.store.data.autoSessions[day] = used + 1;
     // 记住「这是一次自己出门」：出门窗口内她连续做动作要按 20 秒节奏，
@@ -434,15 +481,101 @@ export class StrollWorld {
     this.autoWalkAt = Date.now();
     this.store.save();
     const mustLine = pending.length
-      ? `\n今天是必做日，还差：${pending.map((x) => `${x.label} ${x.left}`).join('、')}。先补这些，别只刷着看。`
+      ? `\n今天是必做日，还差：${[...pending]
+          .sort((a, b) => b.left - a.left)
+          .map((x) => `${x.label} ${x.left}`)
+          .join('、')}。先补差得多的（一次出门做不完就挑差距最大的），别只刷着看。`
       : '';
+    const quotaLine =
+      mode === 'quota'
+        ? `\n现在是「按额度」出门：还差 ${this.quotaLeftList()
+            .filter((x) => x.left > 0)
+            .map((x) => `${x.label} ${x.left}`)
+            .join('、')}，做满就收工（私信和群聊没人找你时不算没做完）。`
+        : '';
     const maxItems = clamp(Number(this.cfg.sessionMaxItems ?? 8), 3, 12);
     await this.push(
       'stroll.due',
-      `该出门溜达了。今天还剩：${this.policy.summary()}。${mustLine}\n这次最多看 ${maxItems} 条，看完就回来。\n想逛就调 stroll action=brief（一次拿全，别连续 status/feed/inbox）；不想去就回「今天不逛」。`,
-      { day, used: used + 1, must: pending.length > 0 },
+      `该出门溜达了。今天还剩：${this.policy.summary()}。${mustLine}${quotaLine}\n这次最多看 ${maxItems} 条，看完就回来。\n想逛就调 stroll action=brief（一次拿全，别连续 status/feed/inbox）；不想去就回「今天不逛」。`,
+      { day, used: used + 1, must: pending.length > 0, mode },
       'debounce',
     );
+  }
+
+  /**
+   * 出门方式：
+   *   off      = 不自己出门（只在你叫的时候）
+   *   sessions = 按次数（默认，和 2.0 一模一样）
+   *   quota    = 按额度（次数不限，主动额度做满才收工）
+   * 没填这个键（老配置）时按「次数」理解；次数填 0 一律当作不出去。
+   */
+  outingMode() {
+    const raw = String(this.cfg.outingMode ?? '').toLowerCase();
+    if (raw === 'off') return 'off';
+    if (raw === 'quota') return 'quota';
+    return Number(this.cfg.autoSessionsPerDay ?? 0) > 0 ? 'sessions' : 'off';
+  }
+
+  /**
+   * 额度模式追哪些项：**勾了必做的**才算目标；一个都没勾就退回全部主动额度。
+   * 私信、群聊永远不算——没人找她的时候这两项做不满，算进去就变成一直出门却没事干。
+   */
+  quotaTargetKeys() {
+    const wanted = [
+      ['like', 'mustLike'],
+      ['comment', 'mustComment'],
+      ['follow', 'mustFollow'],
+      ['post', 'mustPost'],
+    ]
+      .filter(([, flag]) => this.cfg[flag] === true)
+      .map(([key]) => key)
+      .filter((key) => this.canAct(key));
+    if (wanted.length) return wanted;
+    // 没勾必做（或者勾了但都做不了）：退回全部主动额度，不然额度模式会永远不出门
+    return ['like', 'comment', 'follow', 'post', 'save'].filter((key) => this.canAct(key));
+  }
+
+  /** 这个动作现在还有没有可能做成：开关关掉、只读模式就不算目标。 */
+  canAct(key) {
+    if (this.cfg.approval === 'dry_run') return false;
+    if (key === 'follow') {
+      if (!this.cfg.allowFollow) return false;
+      // 两个平台都关注不了才算做不了：B站关掉、抖音关注方式也关掉
+      const bili = this.cfg.bilibili !== false;
+      const douyin = this.cfg.douyin !== false && String(this.cfg.douyinFollowMode ?? 'browser') !== 'off';
+      if (!bili && !douyin) return false;
+    }
+    if (key === 'post' && !this.cfg.allowPost) return false;
+    if (key === 'save' && !this.cfg.allowSave) return false;
+    return true;
+  }
+
+  /** 额度模式的进度（只算目标项）。 */
+  quotaProgress() {
+    let left = 0;
+    let total = 0;
+    const keys = this.quotaTargetKeys();
+    for (const key of keys) {
+      const r = this.policy.remaining(key);
+      left += Math.max(0, Math.min(r.daily, r.weekly));
+      total += Math.max(0, Math.min(r.dailyCap, r.weeklyCap));
+    }
+    return { left, total, done: Math.max(0, total - left), keys };
+  }
+
+  /** 额度模式还差哪几项（差距从大到小），给出门推送和面板用。 */
+  quotaLeftList() {
+    return this.quotaTargetKeys()
+      .map((key) => {
+        const r = this.policy.remaining(key);
+        return { key, label: QUOTA_SHORT[key] ?? key, left: Math.max(0, Math.min(r.daily, r.weekly)) };
+      })
+      .sort((a, b) => b.left - a.left);
+  }
+
+  /** 额度模式还能不能出门：目标项只要还剩一个动作就还能出去。 */
+  quotaLeftForOuting() {
+    return this.quotaProgress().left;
   }
 
   /**
@@ -470,9 +603,22 @@ export class StrollWorld {
       .filter((x) => x.need > 0);
   }
 
-  /** 晚上还没做完必做：单独催她，最多 3 次、每次间隔 30 分钟。 */
+  /** 晚上还没做完必做：单独催她，最多 3 次、每次间隔 30 分钟。**只在按额度模式下催**。 */
   async maybeMustNudge(pending, hour, day) {
     if (!pending?.length) return;
+    /**
+     * 按次数 / 不自己出门都不催。
+     * 按次数模式的语义就是「出去几次就收工」，次数用完之后再把她叫出去补必做，
+     * 等于逼主人切模式时顺手把必做一个个关掉——那不该是主人的活儿。
+     */
+    if (this.outingMode() !== 'quota') return;
+    /**
+     * 只催「额度模式真正在追的项」。
+     * 私信/群聊（以及被关掉的动作）不在目标里，催了也没用——没人找她的时候做不完。
+     */
+    const targets = new Set(this.quotaTargetKeys());
+    const list = pending.filter((x) => targets.has(x.action));
+    if (!list.length) return;
     // 原来写死「18 点后催」；窗口换成凌晨就永远催不到。
     // 改成「离窗口结束不到 4 小时」才开始催。
     const { to } = this.outingWindow();
@@ -493,7 +639,7 @@ export class StrollWorld {
     this.store.save();
     await this.push(
       'stroll.due',
-      `今天还有必做没完成：${pending.map((x) => `${x.label} ${x.done}/${x.need}`).join('、')}。现在就去补，不用等下一次出门；补完再回我一句。`,
+      `今天还有必做没完成：${list.map((x) => `${x.label} ${x.done}/${x.need}`).join('、')}。现在就去补，不用等下一次出门；补完再回我一句。`,
       { must: true, day },
       'flush',
     );
@@ -3044,7 +3190,10 @@ export class StrollWorld {
       pending: this.store.pendingDrafts().map((d) => ({ id: d.id, action: d.action, platform: d.platform, preview: this.previewText(d) })),
       last: this.store.lastActions(3),
       interests: this.store.topInterests(6),
+      // 出门方式（off/sessions/quota）和「按额度」还剩多少个主动动作
+      outingMode: this.outingMode(),
       autoSessions: this.store.data.autoSessions[dayKey()] ?? 0,
+      quotaLeft: this.quotaLeftForOuting(),
       // 必做清单（勾了开关的项）：她出门前先看还差多少
       mustDo: this.mustDoList(),
     };
@@ -3099,6 +3248,10 @@ export class StrollWorld {
         policy: status.policy.summary,
         pending: status.pending.length,
         owner: status.owner,
+        // 出门方式：sessions 按次数 / quota 按额度（quotaLeft = 主动动作还剩多少个）/ off 不自己出门
+        outingMode: status.outingMode,
+        autoSessions: status.autoSessions,
+        quotaLeft: status.quotaLeft,
         // 必做清单要跟着 brief 一起给她，不然出门推送里只能看到「还剩几次」却不知道目标
         mustDo: status.mustDo ?? this.mustDoList(),
       },
@@ -4474,7 +4627,7 @@ export class StrollWorld {
     }
     return (
       `「${s}」不在能发的目录里。现在只能发这几个目录里的图：\n${dirs.join('\n')}\n` +
-      '想放开别的目录：设置 → 高级与节奏 → 额外允许发图的目录，填绝对路径（逗号分隔）。'
+      '想放开别的目录：设置 → 高级 → 额外允许发图的目录，填绝对路径（逗号分隔）。'
     );
   }
 
@@ -5433,6 +5586,9 @@ export class StrollWorld {
       caps: this.policy.snapshot(),
       quiet: { from: this.cfg.quietFrom, to: this.cfg.quietTo },
       autoSessionsPerDay: this.cfg.autoSessionsPerDay,
+      // 出门方式：sessions 按次数 / quota 按额度 / off 不自己出门
+      outingMode: this.outingMode(),
+      quotaLeft: this.quotaLeftForOuting(),
       interests: this.cfg.interests,
       avoid: this.cfg.avoid,
       tokenDailyBudget: this.cfg.tokenDailyBudget,
@@ -5532,7 +5688,26 @@ export class StrollWorld {
       if (method === 'set_auto') {
         const n = clamp(Number(args[0] ?? 0), 0, 10);
         this.persist({ autoSessionsPerDay: n });
-        return { ok: true, autoSessionsPerDay: n };
+        // 面板上那个开关只管「开/关」：填 0 等于不自己出门，填正数等于按次数
+        const mode = n > 0 ? 'sessions' : 'off';
+        try {
+          this.cfg.outingMode = mode;
+        } catch {
+          // 配置对象被冻结：下面的 persist 已经把磁盘改了，宿主热更新会接上
+        }
+        this.persist({ outingMode: mode });
+        return { ok: true, autoSessionsPerDay: n, outingMode: mode };
+      }
+      if (method === 'set_outing') {
+        const v = String(args[0] ?? '');
+        if (!['off', 'sessions', 'quota'].includes(v)) return { ok: false, error: '不认识这个出门方式。' };
+        try {
+          this.cfg.outingMode = v;
+        } catch {
+          // 同上
+        }
+        this.persist({ outingMode: v });
+        return { ok: true, outingMode: v };
       }
       if (method === 'set_approval') {
         const v = String(args[0] ?? '');
@@ -5825,22 +6000,52 @@ export class StrollWorld {
     }
   }
 
-  /** 下一次自动出门大概什么时候；今天用完或关着就返回 null。 */
+  /** 下一次自动出门大概什么时候；今天收工或关着就返回 null。 */
   autoNextView() {
-    const daily = Number(this.cfg.autoSessionsPerDay ?? 0);
-    if (daily <= 0 || !this.cfg.enabled) return null;
+    const mode = this.outingMode();
+    if (!this.cfg.enabled || mode === 'off') return null;
     const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? DEFAULTS.tokenDailyBudget) / 1500));
-    const cap = Math.min(daily, budgetCap);
     const day = dayKey(new Date(), this.timeZone);
     const used = Number(this.store.data.autoSessions[day] ?? 0);
-    if (used >= cap) return { done: true, used, cap };
+    const quota = this.quotaProgress();
+    const daily = Math.max(0, Math.floor(Number(this.cfg.autoSessionsPerDay ?? 0)));
+    // 按额度模式不看「每天自己出门」；按次数模式才看
+    const cap = mode === 'quota' ? budgetCap : Math.min(daily, budgetCap);
+    const base = {
+      mode,
+      used,
+      cap,
+      quotaLeft: quota.left,
+      quotaTotal: quota.total,
+      // 还差哪几项（只剩没做满的）：面板和推送都直接照这个念，别只说一个总数
+      targets: mode === 'quota' ? this.quotaLeftList().filter((x) => x.left > 0) : [],
+      drafts: this.store.pendingDrafts().length,
+      budgetLeft: Math.max(0, budgetCap - used),
+    };
+    // token 预算是两种模式共用的天花板
+    if (used >= budgetCap) return { ...base, done: true, reason: 'budget' };
+    // 按额度但一个能做的动作都没有（只读模式、公开动作全关）：不出门，别空跑
+    if (mode === 'quota' && !quota.keys.length) return { ...base, done: true, reason: 'none' };
+    // 按额度但草稿堆着没人批：先等你批完再出去
+    if (mode === 'quota' && this.store.pendingDrafts().length >= 8) return { ...base, done: true, reason: 'drafts' };
+    // 按额度：目标做满 = 今天收工
+    if (mode === 'quota' && quota.left <= 0) return { ...base, done: true, reason: 'quota' };
+    // 按次数：次数用完 = 今天收工
+    if (mode === 'sessions' && used >= cap) return { ...base, done: true, reason: 'sessions' };
+
     const last = Number(this.store.data.lastAutoAt ?? this.store.data.lastSessionAt ?? 0);
-    // tick 里有 40% 概率跳过（Math.random() > 0.6 才出门），按期望 1/0.6 折算，
+    // 两种模式都按正常间隔走：必做不影响节奏（按额度里它决定的是「还出不出门」）
+    const gapMs = this.autoGapMs();
+    // tick 里有 40% 概率跳过（只发生在按次数模式下），按期望 1/0.6 折算，
     // 不然显示的时间永远比实际早一截
-    const gap = this.autoGapMs() / 0.6;
-    let at = last ? last + gap : Date.now() + 90 * 1000;
+    const skip = mode === 'sessions';
+    const expect = skip ? gapMs / 0.6 : gapMs;
+    let at = last ? last + expect : Date.now() + 90 * 1000;
     at = this.nextOutingWindow(Math.max(at, Date.now()));
-    return { done: false, used, cap, gapMinutes: Math.round(this.autoGapMs() / 60000), at };
+    // 限流退避中：把「下次」推到歇完之后，不然面板显示「快出门了」却动不了
+    const wait = this.policy.rateWait();
+    if (wait.waiting) at = Math.max(at, wait.until);
+    return { ...base, done: false, at, gapMinutes: Math.round(gapMs / 60000) };
   }
 
   /** 自动出门只在 9:00-23:00；落在窗外就推到下一个 9:00。 */
@@ -6015,6 +6220,7 @@ export class StrollWorld {
         background: this.cfg.background !== false,
         approval: this.cfg.approval,
         autoSessionsPerDay: Number(this.cfg.autoSessionsPerDay ?? 0),
+        outingMode: this.outingMode(),
         outingFrom: Number(this.cfg.outingFrom ?? 9),
         outingTo: Number(this.cfg.outingTo ?? 23),
         dailyLikes: Number(this.cfg.dailyLikes ?? 0),

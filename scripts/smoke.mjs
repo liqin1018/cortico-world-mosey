@@ -2285,6 +2285,33 @@ liveWorld._cfgAt = 0;
 liveWorld.strangerDmPolicy();
 check('热更新：文件没变就不重复同步', liveLogs.length === logCount, `logs=${liveLogs.length - logCount}`);
 
+/* ---- 群名是「几个人的昵称拼起来」时，不能把人当成群 ---- */
+check('群名含人名：这个人是人不是群', world.looksLikeKnownGroup('海底月', ['海底月、小月月']) === false);
+check(
+  '群名含人名：会话标题是群才算群',
+  world.looksLikeKnownGroup('海底月、小月月(3)', ['海底月、小月月']) === true,
+);
+check('普通群名相等也算群', world.looksLikeKnownGroup('测试1', ['测试1']) === true);
+check('不认识的名字不算群', world.looksLikeKnownGroup('路人甲', ['测试1', '测试2']) === false);
+
+// 抖音拉群默认群名 = 成员昵称拼起来；这时发私信不能再被判成「发群」（内容会公开在群里）
+const prevGroupsCfg2 = world.cfg.douyinGroups;
+const prevGroupAuto2 = world.groupAuto;
+world.cfg.douyinGroups = '海底月、小月月';
+world.groupAuto = { names: ['海底月、小月月'] };
+world.cfg.strangerDmMode = 'auto';
+world.cfg.dailyDms = 100;
+world.store.data.usage[sDay] = { ...(world.store.data.usage[sDay] ?? {}), dm: 0 };
+world.store.data.strangerSeen = { ...(world.store.data.strangerSeen ?? {}), 'douyin:海底月': '在干啥' };
+const namePlan = await world.buildPlan('dm', { platform: 'douyin', target: '海底月', text: '在的' });
+check(
+  '群名含人名时，私信按人发（不发群）',
+  namePlan.ok === true && namePlan.stranger === true && !namePlan.group,
+  JSON.stringify(namePlan).slice(0, 200),
+);
+world.cfg.douyinGroups = prevGroupsCfg2;
+world.groupAuto = prevGroupAuto2;
+
 /* ---- 主列表诊断：谁被当成群排掉了 ---- */
 const rowsLogs = [];
 const prevLogForRows = world.log;

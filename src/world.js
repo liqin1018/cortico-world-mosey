@@ -618,6 +618,31 @@ export class StrollWorld {
     return x === y || x.includes(y) || y.includes(x);
   }
 
+  /**
+   * 这一行/这个名字是不是「已知的群」。
+   *
+   * 和 `sameGroup` 的区别是**单向包含**：只认「会话标题包含群名」，不认反过来。
+   * 因为抖音拉群时群名默认是**几个成员的昵称拼起来**（`海底月、小月月、大萌神`），
+   * 用双向包含会把「海底月」这个**人**也判成群——后果有两个：
+   *   1. 她的私信永远发现不了（主列表差集把它当群排掉）；
+   *   2. 发给「海底月」的私信被判成「发群」，内容公开在群里。
+   * 所以只留「标题 ⊇ 群名」这个方向：群标题通常就是群名（可能带人数后缀），
+   * 而人名一定比群名短。
+   */
+  looksLikeKnownGroup(name, known = []) {
+    const norm = (s) =>
+      String(s ?? '')
+        .replace(/[\s\u3000]+/g, '')
+        .replace(/\(\d+\)$|（\d+）$/, '')
+        .toLowerCase();
+    const y = norm(name);
+    if (!y) return false;
+    return (known ?? []).some((n) => {
+      const x = norm(n);
+      return !!x && (x === y || y.includes(x));
+    });
+  }
+
   /** 群名的比较键：去掉空白、大小写，以及同名群加的「#2」后缀。 */
   groupKey(name) {
     return String(name ?? '')
@@ -1623,7 +1648,7 @@ export class StrollWorld {
     const list = Object.keys(this.store.data.strangerSeen ?? {})
       .filter((k) => k.startsWith('douyin:'))
       .map((k) => stripRowTime(k.slice('douyin:'.length)))
-      .filter((who) => !groups.some((g) => this.sameGroup(g, who)));
+      .filter((who) => !this.looksLikeKnownGroup(who, groups));
     return this.matchStranger(list, wanted);
   }
 
@@ -1657,7 +1682,7 @@ export class StrollWorld {
       .filter((k) => k.startsWith('douyin:'))
       .map((k) => stripRowTime(k.slice('douyin:'.length)))
       // 名单里可能混进过群（旧版本没排除干净）：认得出的群不当人看
-      .filter((who) => !groups.some((g) => this.sameGroup(g, who)));
+      .filter((who) => !this.looksLikeKnownGroup(who, groups));
     let who = this.matchStranger(seen, wanted);
     if (!who) {
       const found =
@@ -1890,7 +1915,7 @@ export class StrollWorld {
               const pv = String(r.preview ?? '');
               let why = 'stranger';
               if (ownerName && this.sameGroup(ownerName, who)) why = 'owner';
-              else if (known.some((n) => this.sameGroup(n, who))) why = 'group';
+              else if (this.looksLikeKnownGroup(who, known)) why = 'group';
               else if (!pv) why = 'no-preview';
               else if (/^\d+分钟内在线$|^在线$/.test(pv)) why = 'online';
               return `${truncate(who, 12)}|${truncate(pv, 12)}|${why}`;
@@ -1898,7 +1923,7 @@ export class StrollWorld {
           });
         }
         const extra = rows
-          .filter((r) => r.name && !known.some((n) => this.sameGroup(n, r.name)))
+          .filter((r) => r.name && !this.looksLikeKnownGroup(r.name, known))
           .map((r) => ({ who: r.name, at: r.at || '', preview: r.preview || '', unread: 0 }))
           .filter((r) => r.preview && !/^\d+分钟内在线$|^在线$/.test(r.preview));
         if (extra.length) {
@@ -1943,7 +1968,7 @@ export class StrollWorld {
           ...(extra ? { hit: truncate(String(extra), 24) } : {}),
         });
       if (!row.preview || /^\d+分钟内在线$|^在线$/.test(row.preview)) continue;
-      if (knownGroups.some((g) => this.sameGroup(g, row.who))) continue;
+      if (this.looksLikeKnownGroup(row.who, knownGroups)) continue;
       const key = `douyin:${row.who}`;
       /**
        * 指纹只用正文，**不带时间**。
@@ -4240,15 +4265,19 @@ export class StrollWorld {
     const OWNER_ALIAS = /^(主人|主人私信|私信|私聊|owner|dm|你|您)$/i;
     let groups = await this.resolveGroups().catch(() => this.groupNames());
     if (wanted && !OWNER_ALIAS.test(wanted)) {
-      let hit = this.matchGroup(groups, wanted);
-      if (!hit) {
+      // 和私信一样：群名可能是「几个人的昵称拼起来的」，命中陌生人名单就优先当人
+      const quick = this.cachedStranger(wanted, groups);
+      let hit = quick ? null : this.matchGroup(groups, wanted);
+      if (!hit && !quick) {
         // 名单可能是旧的（刚被拉进新群）：强刷一次再认，别把群名当成「不认识的人」
         groups = await this.resolveGroups(true, { deep: true }).catch(() => groups);
         hit = this.matchGroup(groups, wanted);
       }
       if (hit) return { ok: true, who: hit, group: true };
       // 不是群：也可能是「陌生人消息」里给她发过话的人（图和表情一样能发过去）
-      const stranger = await this.strangerTargetOf(wanted).catch(() => ({ ok: false }));
+      const stranger = quick
+        ? this.strangerGuard(quick)
+        : await this.strangerTargetOf(wanted).catch(() => ({ ok: false }));
       if (stranger.ok) return { ok: true, who: stranger.who, group: false, stranger: true };
       const list = groups.length ? groups.map((g) => `「${g}」`).join(' 或 ') : '（现在一个群都没认出来）';
       return {
@@ -4920,20 +4949,38 @@ export class StrollWorld {
           !dmFresh && this.lastGroupPoke && Date.now() - Number(this.lastGroupPoke.at ?? 0) < 10 * 60 * 1000
             ? String(this.lastGroupPoke.group ?? '')
             : '';
-        let asGroup = wanted ? this.matchGroup(groups, wanted) : null;
-        if (!asGroup && wanted && groups.length === 1 && /^(群|群聊|那个群|抖音群|group|the group)$/i.test(wanted)) {
-          asGroup = groups[0];
-        }
-        if (!asGroup && wanted && pokedGroup && this.matchGroup([pokedGroup], wanted)) asGroup = pokedGroup;
         /**
          * 先看「这是不是一个给她发过消息的陌生人」——**只查本地名单，不读页面**。
          *
-         * 以前这一步排在「强刷群名单」后面：任何不是群名的 target 都要先深刷一次
-         * 会话列表（真的去读页面，实测 0.85 秒），陌生人也照刷。
-         * 现在命中本地名单就直接走陌生人分支，那 0.85 秒全省下来。
+         * 顺序很关键。抖音拉群时群名默认是**几个成员的昵称拼起来**
+         * （`海底月、小月月、大萌神`），而 `matchGroup` 允许「她写的是群名的一部分」。
+         * 于是 `target=海底月` 会被判成「发到那个群」——**她的私信内容直接公开在群里**。
+         * 所以：能当人就当人，命中陌生人名单就不再做群匹配。
+         * （副作用：想发到这种群得写完整群名，这个代价可以接受。）
          */
-        let quickStranger = '';
-        if (!asGroup && wanted) quickStranger = this.cachedStranger(wanted, groups);
+        let quickStranger = wanted ? this.cachedStranger(wanted, groups) : '';
+        if (quickStranger) {
+          const wouldBeGroup = this.matchGroup(groups, wanted);
+          if (wouldBeGroup) {
+            this.log?.warn?.('stroll target ambiguous', {
+              target: wanted,
+              stranger: quickStranger,
+              group: wouldBeGroup,
+              pick: 'dm',
+            });
+          }
+        }
+        let asGroup = wanted && !quickStranger ? this.matchGroup(groups, wanted) : null;
+        if (
+          !asGroup &&
+          !quickStranger &&
+          wanted &&
+          groups.length === 1 &&
+          /^(群|群聊|那个群|抖音群|group|the group)$/i.test(wanted)
+        ) {
+          asGroup = groups[0];
+        }
+        if (!asGroup && !quickStranger && wanted && pokedGroup && this.matchGroup([pokedGroup], wanted)) asGroup = pokedGroup;
         if (!asGroup && wanted && !quickStranger) {
           // 名单可能是旧的（主人刚把她拉进新群）：滚动会话列表强刷一次再认
           groups = await this.resolveGroups(true, { deep: true }).catch(() => groups);

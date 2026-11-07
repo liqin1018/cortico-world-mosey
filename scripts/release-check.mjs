@@ -108,7 +108,11 @@ console.log('  1. git add -A && git commit -m "..." && git push');
 console.log('  2. npm publish');
 if (next) {
   console.log('');
-  // 项目约定（用户定的）：每次更新只 +1 个末位数字，不跳 minor / major
-  console.log(`下次版本号：${next.patch}`);
+  // 项目约定（用户定的）：修 bug 加末位、加功能加中间、大更新加最前面
+  console.log(
+    `下次版本号：修 bug（末尾 +1）→ ${next.patch}，` +
+      `加功能（中间 +1）→ ${next.minor}，` +
+      `大更新（最前面 +1）→ ${next.major}`,
+  );
 }
 console.log('');

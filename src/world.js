@@ -4405,7 +4405,14 @@ export class StrollWorld {
       const ok = await this.douyin
         .replyDm(name, cutChars(text, 300), { strict: true, requireTitle: true })
         .then(() => true)
-        .catch(() => false);
+        .catch((error) => {
+          // 诊断用：走兜底就记下原因（NO_DM / NO_INPUT / THREAD_DRIFT…），好定位是哪一步过不去
+          this.log?.warn?.('stroll dm fast failed', {
+            code: error?.code ?? '',
+            error: String(error?.message ?? error ?? '').slice(0, 120),
+          });
+          return false;
+        });
       if (ok) return { ok: true, sent: true, via: 'chat' };
     }
     return await this.douyin.dm(secUid, text);

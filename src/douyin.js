@@ -6003,6 +6003,8 @@ export class DouyinBrowser {
     // 私信页正停在主人这个会话上：直接读它。零点击、零导航，实测几十毫秒。
     // 这一步不走 serialize 队列——队列里可能正排着一次十几秒的评论，主人的话不该等它。
     const dm = this.dmPage;
+    // 诊断用：只在失败/走兜底时打一行，正常发送零开销
+    const diag = { who, dmThread: this.dmThread, chatThread: this.chatThread, steps: [] };
     if (dm && !dm.isClosed() && this.dmThread === who) {
       /**
        * 先确认这一页还停在主人身上。
@@ -6097,6 +6099,9 @@ export class DouyinBrowser {
       const onThread = await this.ensureThreadOpen(dm, who, { strict, requireTitle }).catch(() => false);
       if (!onThread) {
         this.dmThread = '';
+        diag.steps.push('dmPage:verify-fail');
+        diag.dmTitle = await this.currentChatTitle(dm).catch(() => '');
+        diag.dmUrl = String(dm.url?.() ?? '');
       } else {
         const t1 = Date.now();
         const input = await this.waitMsgInput(dm, 3000).catch(() => null);
@@ -6163,11 +6168,16 @@ export class DouyinBrowser {
         if (this.chatThread !== who || !/\/chat/.test(page.url())) {
           if (!/\/chat/.test(page.url())) await this.gotoChat(page);
           let ok = await this.clickThread(page, who);
+          diag.steps.push(`click:${ok ? 'ok' : 'miss'}`);
           if (!ok) {
             // 主列表里没有：抖音会把非好友的私信收进「陌生人消息」文件夹
             ok = await this.clickStrangerThread(page, who);
+            diag.steps.push(`stranger:${ok ? 'ok' : 'miss'}`);
           }
           if (!ok) {
+            diag.chatUrl = String(page.url?.() ?? '');
+            diag.chatTitle = await this.currentChatTitle(page).catch(() => '');
+            this.log?.warn?.('stroll dm diag', { ...diag, fail: 'NO_DM' });
             throw new DouyinError('NO_DM', '聊天列表和「陌生人消息」里都找不到这个会话，可能被新消息刷下去了');
           }
           // 点完不用干等两秒：下面 waitMsgInput 会一轮一轮等到输入框真的能打字
@@ -6188,13 +6198,19 @@ export class DouyinBrowser {
             title: driftTitle,
             url: String(page.url?.() ?? ''),
             requireTitle,
+            steps: diag.steps,
           });
           throw new DouyinError('THREAD_DRIFT', `页面没切到「${who}」这个会话，没发`);
         }
         this.openThread = who;
         this.chatThread = who;
         const input = await this.waitMsgInput(page, 6000);
-        if (!input) throw new DouyinError('NO_INPUT', '没找到输入框，抖音可能改版了');
+        if (!input) {
+          diag.chatUrl = String(page.url?.() ?? '');
+          diag.chatTitle = await this.currentChatTitle(page).catch(() => '');
+          this.log?.warn?.('stroll dm diag', { ...diag, fail: 'NO_INPUT' });
+          throw new DouyinError('NO_INPUT', '没找到输入框，抖音可能改版了');
+        }
         await this.sendInChat(page, input, text, { mention });
         this.lastAction = `dm ${who}`;
         return { ok: true, sent: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };

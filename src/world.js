@@ -386,6 +386,12 @@ export class StrollWorld {
     if (kept.length > 20) {
       this.store.data.actions = list.filter((a, i) => a?.action !== 'risk' || i >= keepFrom);
     }
+    // 顺手把被只读请求刷高的 strikes 归零：以前累计到 800 多，切严格模式会直接触发 6 小时冷却
+    const strikes = Number(this.store.data.risk?.strikes ?? 0);
+    if (strikes > 20) {
+      this.store.data.risk = { ...(this.store.data.risk ?? {}), strikes: 0 };
+      this.log?.info?.('stroll reset inflated strikes', { before: strikes });
+    }
     this.store.data.migrated = { ...done, riskPrune: true };
     this.store.save();
     if (kept.length > 20) {

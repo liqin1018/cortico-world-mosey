@@ -4397,8 +4397,13 @@ export class StrollWorld {
   async douyinDmFast(secUid, text) {
     const name = this.douyinOwner().name || (await this.douyinOwnerName().catch(() => ''));
     if (name) {
+      /**
+       * 主人私信也要求「先核实会话再发」：
+       * strict + requireTitle —— 标题读不出来就当作没切过去，走下面按 secUid 的慢路径。
+       * 2026-11-08 那次三条私信落进群聊，就是因为这里不核实就按「当前开着的会话」发了。
+       */
       const ok = await this.douyin
-        .replyDm(name, cutChars(text, 300))
+        .replyDm(name, cutChars(text, 300), { strict: true, requireTitle: true })
         .then(() => true)
         .catch(() => false);
       if (ok) return { ok: true, sent: true, via: 'chat' };

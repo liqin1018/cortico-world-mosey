@@ -428,6 +428,20 @@ check(
 // 会话标题带群人数/尾注也算同一个会话（不然每发一条都会白点一次会话，慢半秒）
 check('标题带（3）也算同一个群', world.douyin.threadTitleMatches('群C（3）', '群C') === true);
 check('群标题不会被当成人的昵称', world.douyin.threadTitleMatches('阿柚', '阿柚, 阿澈, 老K') === false);
+
+// 私信前必须核实会话：标题读不出来时主人私信不发（11-08 三条私信落进群聊就是没核实）
+const titlePage = (title) => ({
+  url: () => 'https://www.douyin.com/chat',
+  waitForTimeout: async () => {},
+  evaluate: async (fn) => (String(fn).includes('chat-title') ? title : null),
+  mouse: { click: async () => {} },
+});
+check(
+  '读不出标题时主人私信不发',
+  (await world.douyin.ensureThreadOpen(titlePage(''), '小月月', { requireTitle: true })) === false,
+);
+check('其它路径读不出标题仍放行（老行为不变）', (await world.douyin.ensureThreadOpen(titlePage(''), '小月月', {})) === true);
+check('标题对不上（停在群里）也不发', (await world.douyin.ensureThreadOpen(titlePage('测试2'), '小月月', {})) === false);
 // 限流和验证别混为一谈：主人看到的说法完全不一样
 const rateErr = world.douyin.riskError({ kind: 'rate', hit: '操作频繁@semi-toast' }, '发私信');
 check('限流说明是限流，不是验证', /限流/.test(rateErr.message) && !/验证/.test(rateErr.message), rateErr.message);

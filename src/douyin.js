@@ -1036,7 +1036,13 @@ export class DouyinBrowser {
           opened = !!ok;
           // 没有「陌生人消息」文件夹的账号，人就排在主列表里
           if (!ok) ok = await this.clickThread(page, want).catch(() => false);
-          if (ok) this.chatThread = want;
+          if (ok) {
+            // 点完核一次标题：点空了就别把 chatThread 记成这个人，
+            // 否则下一次回复会跳过点击、直接打进当前开着的会话（11-08 私信进群就是这么来的）
+            await page.waitForTimeout(120);
+            const after = await this.currentChatTitle(page).catch(() => '');
+            if (after && this.threadTitleMatches(after, want)) this.chatThread = want;
+          }
           return !!ok;
         } finally {
           // 文件夹是浮层：收起来，别挡着后面打字
@@ -6077,7 +6083,7 @@ export class DouyinBrowser {
    * 在聊天页发一条。mention 是「要真的 @ 到的昵称」（群里才有意义）：
    * 传了就会先从候选面板插一个真 chip，再写正文。
    */
-  async replyDm(name, text, { mention = '', strict = false } = {}) {
+  async replyDm(name, text, { mention = '', strict = false, requireTitle = false } = {}) {
     const who = String(name ?? '').trim();
     if (!who) throw new DouyinError('BAD_TARGET', '没有会话昵称，回不了');
     // 各段耗时带上：主人在追「一秒内」，得知道慢在哪一段（挂在回执里，不额外打日志）
@@ -6088,7 +6094,7 @@ export class DouyinBrowser {
     if (dm && !dm.isClosed() && this.dmThread === who) {
       // 先确认页面真的停在主人这个会话上。点不回来就别硬发——宁可走慢路径重开，
       // 也不能把私信打进别人的会话里（GLM 审出来的 #1）。
-      const onThread = await this.ensureThreadOpen(dm, who, { strict }).catch(() => false);
+      const onThread = await this.ensureThreadOpen(dm, who, { strict, requireTitle }).catch(() => false);
       if (!onThread) {
         this.dmThread = '';
       } else {
@@ -6164,17 +6170,29 @@ export class DouyinBrowser {
           if (!ok) {
             throw new DouyinError('NO_DM', '聊天列表和「陌生人消息」里都找不到这个会话，可能被新消息刷下去了');
           }
-          this.openThread = who;
-          this.chatThread = who;
           // 点完不用干等两秒：下面 waitMsgInput 会一轮一轮等到输入框真的能打字
           await page.waitForTimeout(200);
         }
-        // 慢路径也核一次标题：openThread 只是我们记的，页面可能没真的切过去
-        if (!(await this.ensureThreadOpen(page, who, { strict }).catch(() => false))) {
+        /**
+         * 先核实、再认账。
+         * 以前点完就把 chatThread 记成 who：只要那一下点空了（限流 toast 盖住列表时很常见），
+         * 后面每一条都会跳过点击、直接打进当前开着的会话——2026-11-08 那三条私信进群就是这么来的。
+         */
+        if (!(await this.ensureThreadOpen(page, who, { strict, requireTitle }).catch(() => false))) {
+          // 没核实通过就把缓存清掉，别让下一条继续错下去
+          if (this.chatThread === who) this.chatThread = '';
+          if (this.openThread === who) this.openThread = '';
           const driftTitle = await this.currentChatTitle(page).catch(() => '');
-          this.log?.warn?.('stroll thread drift', { who, title: driftTitle, url: String(page.url?.() ?? '') });
+          this.log?.warn?.('stroll thread drift', {
+            who,
+            title: driftTitle,
+            url: String(page.url?.() ?? ''),
+            requireTitle,
+          });
           throw new DouyinError('THREAD_DRIFT', `页面没切到「${who}」这个会话，没发`);
         }
+        this.openThread = who;
+        this.chatThread = who;
         const input = await this.waitMsgInput(page, 6000);
         if (!input) throw new DouyinError('NO_INPUT', '没找到输入框，抖音可能改版了');
         await this.sendInChat(page, input, text, { mention });
@@ -6389,7 +6407,7 @@ export class DouyinBrowser {
    * 群页是常驻的，抖音可能自己切到别的会话（新群、刷新、消息跳转）；
    * 不确认就往当前输入框里打字，话会落到另一个群里——看起来「发了」，群里却没有。
    */
-  async ensureThreadOpen(page, who, { strict = false } = {}) {
+  async ensureThreadOpen(page, who, { strict = false, requireTitle = false } = {}) {
     let title = await this.currentChatTitle(page).catch(() => '');
     if (!title) {
       // 刚切换会话时标题可能还没重绘：再给一次机会
@@ -6402,9 +6420,17 @@ export class DouyinBrowser {
      * strict 是给陌生人用的：宁可报没发，也不能把话打进别人的会话里。
      */
     if (!title) {
-      // 读不出标题时放行：点会话那一步已经核过（点不到会直接抛 NO_DM），
-      // 这里再拦就变成「永远发不出去」。日志留一条，方便后面修标题选择器。
       this.lastTitleMiss = { at: Date.now(), who, url: String(page.url?.() ?? '') };
+      /**
+       * requireTitle：连标题都读不出来，就没法确认页面停在哪。
+       * 主人私信走这条——宁可回执写「没发」，也不能像 11-08 那样把私信打进群聊。
+       * 其它调用照旧放行：点会话那一步已经核过（点不到会直接抛 NO_DM），
+       * 这里再拦就变成「永远发不出去」。
+       */
+      if (requireTitle) {
+        this.log?.warn?.('stroll chat title miss', { who, url: String(page.url?.() ?? '') });
+        return false;
+      }
       return true;
     }
     if (this.threadTitleMatches(title, who)) return true;

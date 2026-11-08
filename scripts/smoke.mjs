@@ -442,6 +442,20 @@ check(
 );
 check('其它路径读不出标题仍放行（老行为不变）', (await world.douyin.ensureThreadOpen(titlePage(''), '小月月', {})) === true);
 check('标题对不上（停在群里）也不发', (await world.douyin.ensureThreadOpen(titlePage('测试2'), '小月月', {})) === false);
+
+// 标题读不出来时靠「会话内容有没有换」判断切没切过去（这套页面读不到标题）
+let fpNow = { n: 1, first: '在吗', last: '在吗' };
+const fpPage = {
+  evaluate: async (fn) => (String(fn).includes('msg-item-content') ? fpNow : null),
+  waitForTimeout: async () => {},
+};
+const fpBefore = await world.douyin.threadFingerprint(fpPage);
+check('读得出会话内容指纹', fpBefore?.n === 1 && fpBefore.last === '在吗', JSON.stringify(fpBefore));
+fpNow = { n: 2, first: '在吗', last: '这条是私信' };
+check('内容变了 → 认定切过去了', (await world.douyin.waitThreadChanged(fpPage, fpBefore, 400)) === true);
+fpNow = { n: 1, first: '在吗', last: '在吗' };
+check('内容没变 → 认定没切过去', (await world.douyin.waitThreadChanged(fpPage, fpBefore, 260)) === false);
+check('读不到指纹时不误伤', (await world.douyin.waitThreadChanged(fpPage, null, 100)) === true);
 // 限流和验证别混为一谈：主人看到的说法完全不一样
 const rateErr = world.douyin.riskError({ kind: 'rate', hit: '操作频繁@semi-toast' }, '发私信');
 check('限流说明是限流，不是验证', /限流/.test(rateErr.message) && !/验证/.test(rateErr.message), rateErr.message);

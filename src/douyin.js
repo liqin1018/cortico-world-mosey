@@ -6096,7 +6096,9 @@ export class DouyinBrowser {
     if (dm && !dm.isClosed() && this.dmThread === who) {
       // 先确认页面真的停在主人这个会话上。点不回来就别硬发——宁可走慢路径重开，
       // 也不能把私信打进别人的会话里（GLM 审出来的 #1）。
-      const onThread = await this.ensureThreadOpen(dm, who, { strict, requireTitle }).catch(() => false);
+      // dmPage 是监听器专门停在主人会话上的那一页（群里用的是 groupPages，不共用），
+      // 所以这里不再要求「标题可读」——这套页面读不到标题，强求只会把每条私信都逼到慢兜底。
+      const onThread = await this.ensureThreadOpen(dm, who, { strict }).catch(() => false);
       if (!onThread) {
         this.dmThread = '';
         diag.steps.push('dmPage:verify-fail');
@@ -6165,8 +6167,12 @@ export class DouyinBrowser {
       try {
         // 已经在这个会话里就直接用：省一次整页跳转和点击，回私信快好几秒
         // 用 chatThread 而不是 openThread：后者被 dmPage 的读取共用，会误判
-        if (this.chatThread !== who || !/\/chat/.test(page.url())) {
+        const needSwitch = this.chatThread !== who || !/\/chat/.test(page.url());
+        // 点之前先记一份内容指纹：这套页面读不出标题，靠「内容有没有换」判断切没切过去
+        let before = null;
+        if (needSwitch) {
           if (!/\/chat/.test(page.url())) await this.gotoChat(page);
+          before = await this.threadFingerprint(page);
           let ok = await this.clickThread(page, who);
           diag.steps.push(`click:${ok ? 'ok' : 'miss'}`);
           if (!ok) {
@@ -6188,20 +6194,37 @@ export class DouyinBrowser {
          * 以前点完就把 chatThread 记成 who：只要那一下点空了（限流 toast 盖住列表时很常见），
          * 后面每一条都会跳过点击、直接打进当前开着的会话——2026-11-08 那三条私信进群就是这么来的。
          */
-        if (!(await this.ensureThreadOpen(page, who, { strict, requireTitle }).catch(() => false))) {
-          // 没核实通过就把缓存清掉，别让下一条继续错下去
-          if (this.chatThread === who) this.chatThread = '';
-          if (this.openThread === who) this.openThread = '';
-          const driftTitle = await this.currentChatTitle(page).catch(() => '');
-          this.log?.info?.('stroll thread drift', {
-            who,
-            title: driftTitle,
-            url: String(page.url?.() ?? ''),
-            requireTitle,
-            steps: diag.steps,
-          });
-          // 把读到的标题塞进错误里：即使 logger 没落盘，上层 `stroll dm fast failed` 也能看到
-          throw new DouyinError('THREAD_DRIFT', `页面没切到「${who}」这个会话（当前标题：${driftTitle || '空'}），没发`);
+        const readTitle = async () => await this.currentChatTitle(page).catch(() => '');
+        /**
+         * 核实「页面真的切过去了」：
+         *   标题读得出来 → 按标题比；
+         *   标题读不出来（这套页面就是这样）→ 看会话内容有没有换过。
+         * 都不通过就不发——比把私信打进群聊强。
+         */
+        const verifyThread = async () => {
+          const t = await readTitle();
+          if (t) return this.threadTitleMatches(t, who);
+          return needSwitch ? await this.waitThreadChanged(page, before) : true;
+        };
+        if (!(await verifyThread())) {
+          // 可能是点空了（限流 toast 盖住列表时很常见）：再点一次再核
+          diag.steps.push('retry-click');
+          await this.clickThread(page, who).catch(() => {});
+          await page.waitForTimeout(300);
+          if (!(await verifyThread())) {
+            // 没核实通过就把缓存清掉，别让下一条继续错下去
+            if (this.chatThread === who) this.chatThread = '';
+            if (this.openThread === who) this.openThread = '';
+            const driftTitle = await readTitle();
+            this.log?.info?.('stroll thread drift', {
+              who,
+              title: driftTitle,
+              url: String(page.url?.() ?? ''),
+              needSwitch,
+              steps: diag.steps,
+            });
+            throw new DouyinError('THREAD_DRIFT', `页面没切到「${who}」这个会话（标题：${driftTitle || '空'}），没发`);
+          }
         }
         this.openThread = who;
         this.chatThread = who;
@@ -6397,6 +6420,38 @@ export class DouyinBrowser {
         return '';
       })
       .catch(() => '');
+  }
+
+  /**
+   * 会话内容指纹：切换会话之后这里会变。
+   * 这套页面读不到标题（实测 `currentChatTitle` 一直返回空），所以「有没有真的切过去」
+   * 只能靠内容变没变来判断——这也是 2.1.2 把主人私信逼进 20 秒慢路的原因。
+   */
+  async threadFingerprint(page) {
+    return await page
+      .evaluate(() => {
+        const nodes = Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]'));
+        const txt = (n) => String(n?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 40);
+        return {
+          n: nodes.length,
+          first: nodes.length ? txt(nodes[0]) : '',
+          last: nodes.length ? txt(nodes[nodes.length - 1]) : '',
+        };
+      })
+      .catch(() => null);
+  }
+
+  /** 等内容真的换掉（切会话的动画/请求要一点时间）。读不到指纹时放行，别误伤。 */
+  async waitThreadChanged(page, before, timeout = 1800) {
+    if (!before) return true;
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const now = await this.threadFingerprint(page);
+      if (!now) return true;
+      if (now.n !== before.n || now.last !== before.last || now.first !== before.first) return true;
+      await page.waitForTimeout(120);
+    }
+    return false;
   }
 
   /** 会话标题比对：忽略空白、大小写和同名群的「#2」后缀；认不出标题时算匹配（别误伤）。 */

@@ -6177,7 +6177,7 @@ export class DouyinBrowser {
           if (!ok) {
             diag.chatUrl = String(page.url?.() ?? '');
             diag.chatTitle = await this.currentChatTitle(page).catch(() => '');
-            this.log?.warn?.('stroll dm diag', { ...diag, fail: 'NO_DM' });
+            this.log?.info?.('stroll dm diag', { ...diag, fail: 'NO_DM' });
             throw new DouyinError('NO_DM', '聊天列表和「陌生人消息」里都找不到这个会话，可能被新消息刷下去了');
           }
           // 点完不用干等两秒：下面 waitMsgInput 会一轮一轮等到输入框真的能打字
@@ -6193,7 +6193,7 @@ export class DouyinBrowser {
           if (this.chatThread === who) this.chatThread = '';
           if (this.openThread === who) this.openThread = '';
           const driftTitle = await this.currentChatTitle(page).catch(() => '');
-          this.log?.warn?.('stroll thread drift', {
+          this.log?.info?.('stroll thread drift', {
             who,
             title: driftTitle,
             url: String(page.url?.() ?? ''),
@@ -6208,7 +6208,7 @@ export class DouyinBrowser {
         if (!input) {
           diag.chatUrl = String(page.url?.() ?? '');
           diag.chatTitle = await this.currentChatTitle(page).catch(() => '');
-          this.log?.warn?.('stroll dm diag', { ...diag, fail: 'NO_INPUT' });
+          this.log?.info?.('stroll dm diag', { ...diag, fail: 'NO_INPUT' });
           throw new DouyinError('NO_INPUT', '没找到输入框，抖音可能改版了');
         }
         await this.sendInChat(page, input, text, { mention });
@@ -6444,7 +6444,7 @@ export class DouyinBrowser {
        * 这里再拦就变成「永远发不出去」。
        */
       if (requireTitle) {
-        this.log?.warn?.('stroll chat title miss', { who, url: String(page.url?.() ?? '') });
+        this.log?.info?.('stroll chat title miss', { who, url: String(page.url?.() ?? '') });
         return false;
       }
       return true;

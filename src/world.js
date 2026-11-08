@@ -4407,7 +4407,7 @@ export class StrollWorld {
         .then(() => true)
         .catch((error) => {
           // 诊断用：走兜底就记下原因（NO_DM / NO_INPUT / THREAD_DRIFT…），好定位是哪一步过不去
-          this.log?.warn?.('stroll dm fast failed', {
+          this.log?.info?.('stroll dm fast failed', {
             code: error?.code ?? '',
             error: String(error?.message ?? error ?? '').slice(0, 120),
           });

@@ -160,9 +160,14 @@ export class StrollWorld {
     this.store = new Store(path.join(dataDir, 'stroll'), this.timeZone).load();
     this.store.data.autoSessions ??= {};
     this.policy = new Policy({ store: this.store, cfg, timeZone: this.timeZone });
-    this.bili = new Bilibili({ dataDir, cfg, log, policy: this.policy, store: this.store });
-    this.stickers = new StickerBook({ dataDir, log });
-    this.douyin = new DouyinBrowser({ dataDir, cfg, log, policy: this.policy, stickers: this.stickers });
+    /**
+     * 注意这里必须传 `this.log`，不能传构造参数 `log`：
+     * 宿主没给 logger 时 `log` 是 undefined，子组件拿到的就是 undefined，
+     * 它们所有 `this.log?.info?.()` 全是空操作——抖音那边的日志会整片消失（2026-11-08 排查踩过）。
+     */
+    this.bili = new Bilibili({ dataDir, cfg, log: this.log, policy: this.policy, store: this.store });
+    this.stickers = new StickerBook({ dataDir, log: this.log });
+    this.douyin = new DouyinBrowser({ dataDir, cfg, log: this.log, policy: this.policy, stickers: this.stickers });
     // 扫码成功后顺手记下「现在登的是哪个抖音号」，面板要显示，也要防「给自己发私信」
     this.douyin.onSelf = (self) => this.noteDouyinSelf(self);
     this.timer = null;

@@ -6200,7 +6200,8 @@ export class DouyinBrowser {
             requireTitle,
             steps: diag.steps,
           });
-          throw new DouyinError('THREAD_DRIFT', `页面没切到「${who}」这个会话，没发`);
+          // 把读到的标题塞进错误里：即使 logger 没落盘，上层 `stroll dm fast failed` 也能看到
+          throw new DouyinError('THREAD_DRIFT', `页面没切到「${who}」这个会话（当前标题：${driftTitle || '空'}），没发`);
         }
         this.openThread = who;
         this.chatThread = who;

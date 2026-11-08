@@ -373,6 +373,27 @@ export class StrollWorld {
   }
 
   /**
+   * 一次性清理：2.1.0 之前每次只读请求撞 -509 都会记一条 action，
+   * 实测 300 条上限里 267 条是「风控停手」，真实动作反而被挤掉。
+   * 这里只保留最近 20 条风控记录（够看趋势），把位置还给点赞/评论。
+   */
+  pruneRiskActions() {
+    const done = this.store.data.migrated ?? {};
+    if (done.riskPrune) return;
+    const list = this.store.data.actions ?? [];
+    const kept = list.map((a, i) => (a?.action === 'risk' ? i : -1)).filter((i) => i >= 0);
+    const keepFrom = kept.length > 20 ? kept[kept.length - 20] : -1;
+    if (kept.length > 20) {
+      this.store.data.actions = list.filter((a, i) => a?.action !== 'risk' || i >= keepFrom);
+    }
+    this.store.data.migrated = { ...done, riskPrune: true };
+    this.store.save();
+    if (kept.length > 20) {
+      this.log?.info?.('stroll prune risk actions', { before: list.length, after: this.store.data.actions.length });
+    }
+  }
+
+  /**
    * 一次性迁移：2.0 以前用「每天自己出门 = 0」表示不出去。
    * 2.1 起这件事交给「出门方式」，这里把老配置翻译过去，之后主人改的就不动了：
    * 0 → 不自己出门；正数 → 按次数（和原来完全一样）。
@@ -402,6 +423,7 @@ export class StrollWorld {
     this.migrateStrangerKeys();
     this.migrateStrangerSeenEcho();
     this.migrateOutingMode();
+    this.pruneRiskActions();
     this.refundDmLoopQuota();
     const done = this.store.data.migrated ?? {};
     if (done.dmQuota) return;
@@ -657,6 +679,8 @@ export class StrollWorld {
     this.stopDmWatch();
     if (!this.running) return;
     this.dmLastAt = 0;
+    /** B站私信上一次真的去拉的时间：限流时用它把轮询从 3 秒降到 60 秒。 */
+    this.biliDmAt = 0;
     const live = this.liveConfig() ?? {};
     const warm = this.dmWatchOn(live) && (live.douyin ?? this.cfg.douyin) !== false;
     // 抖音监听要靠浏览器读 DOM：保持后台页面热着，冷启动一次要十几秒，那段时间的消息接不住
@@ -1236,7 +1260,18 @@ export class StrollWorld {
     this.dmBusy = true;
     try {
       const fresh = [];
-      if (useBili) fresh.push(...(await this.newBiliDm().catch(() => [])));
+      /**
+       * B站私信平时按 dmPollSec（3 秒）拉；被 -509 限流时降到 60 秒一次。
+       * 以前限流期间照旧 3 秒一打：每次都被 -509 挡回来，既把「最近」刷满风控记录，
+       * 又不断续期 softBackoff，结果她自己反倒一直出不了门。
+       */
+      const wait = this.policy.rateWait();
+      const pollSec = Math.max(3, Number(live.dmPollSec ?? this.cfg.dmPollSec ?? 3) || 3);
+      const biliGap = (wait.waiting ? 60 : pollSec) * 1000;
+      if (useBili && Date.now() - Number(this.biliDmAt ?? 0) >= biliGap) {
+        this.biliDmAt = Date.now();
+        fresh.push(...(await this.newBiliDm().catch(() => [])));
+      }
       // 抖音已经走事件通道时就不必每 5 秒读一遍 DOM 了；但每 60 秒仍然对一次账，
       // 万一观察器漏了（页面卡住、切走了），最多晚一分钟，而不是一直不响。
       const dyArmed = !!this.douyin.dmArmed?.();
@@ -3538,7 +3573,11 @@ export class StrollWorld {
   history() {
     return {
       ok: true,
-      recent: this.store.lastActions(8),
+      // 给她看的是「做过什么」；风控记录另算，不塞进动作列表
+      recent: this.store
+        .lastActions(24)
+        .filter((x) => x.platform !== 'system')
+        .slice(0, 8),
       drafts: this.store.pendingDrafts().map((d) => ({ id: d.id, preview: this.previewText(d), ageSec: d.ageSec })),
       stats: this.store.data.stats,
       interests: this.store.topInterests(8),
@@ -5869,7 +5908,7 @@ export class StrollWorld {
         return { ok: true, items, sig: items.map((x) => x.id).join(',') };
       }
       if (method === 'usage_detail') return this.usageDetail(String(args[0] ?? ''));
-      if (method === 'timeline') return { ok: true, items: this.timelineItems(args[0]) };
+      if (method === 'timeline') return { ok: true, items: this.timelineItems(args[0]), total: this.store.data.actions.length };
       if (method === 'set_ramp') {
         const on = args[0] !== false && args[0] !== 'false';
         this.persist({ newAccountRamp: on });
@@ -6196,8 +6235,15 @@ export class StrollWorld {
       })),
       // 「先问我」模式下等主人点头的陌生人私信（面板「待你点头」里显示）
       strangerPending: this.strangerPendingList(),
-      recent: this.store.lastActions(10).map((x) => this.describeAction(x)),
-      recentTotal: this.store.data.actions.length,
+      // 面板「最近」只放真动作：风控/系统记录单独算，不跟点赞评论抢位置
+      // （先扫足够多：老数据里风控可能把末尾几十条全占了）
+      recent: this.store
+        .lastActions(300)
+        .filter((x) => x.platform !== 'system')
+        .slice(0, 10)
+        .map((x) => this.describeAction(x)),
+      recentTotal: this.store.data.actions.filter((x) => x.platform !== 'system').length,
+      riskCount: this.store.data.actions.filter((x) => x.action === 'risk').length,
       risk: this.store.data.risk,
       policy: this.policyView(),
       lastOpen: this.lastOpen,

@@ -364,7 +364,7 @@ export class Bilibili {
     }
 
     if ([412, 429].includes(res.status)) {
-      this.policy.noteRisk(String(res.status), 'B站要求冷却');
+      this.policy.noteRisk(String(res.status), 'B站要求冷却', { source: opts.post ? 'write' : 'read' });
       throw new BiliError('RISK', 'B站要求冷却，已自动停手。');
     }
     if (!res.ok) {
@@ -380,7 +380,7 @@ export class Bilibili {
 
     if (data.code !== 0) {
       if ([-412, -352, -509, -799].includes(data.code)) {
-        this.policy.noteRisk(String(data.code), data.message || 'B站风控');
+        this.policy.noteRisk(String(data.code), data.message || 'B站风控', { source: opts.post ? 'write' : 'read' });
         throw new BiliError('RISK', 'B站风控拦截，已停手。');
       }
       if (data.code === -101) {

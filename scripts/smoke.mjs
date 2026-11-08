@@ -222,7 +222,83 @@ check('限流退避结束会自动放行', (() => {
 })());
 world.store.clearRisk();
 
-// light：只有验证码类才停，频率限流继续放行
+// 只读请求撞 -509：不记动作、不加 strikes、不续期退避
+// （B站私信轮询 3 秒一次，以前每次都记一条，300 条记录里 267 条是风控，退避还被它一直续命）
+world.store.clearRisk();
+const readBefore = {
+  actions: world.store.data.actions.length,
+  strikes: Number(world.store.data.risk.strikes ?? 0),
+  hits: Number(world.store.data.rateRead?.n ?? 0),
+};
+const readRisk = world.policy.noteRisk('-509', '请求过于频繁，请稍后再试', { source: 'read' });
+check(
+  '只读限流不写动作、不加 strikes、不续期退避',
+  readRisk.read === true &&
+    world.store.data.actions.length === readBefore.actions &&
+    Number(world.store.data.risk.strikes ?? 0) === readBefore.strikes &&
+    world.policy.rateWait().waiting === false &&
+    Number(world.store.data.rateRead?.n ?? 0) === readBefore.hits + 1,
+  JSON.stringify({ readRisk, rateRead: world.store.data.rateRead }),
+);
+const writeRisk = world.policy.noteRisk('-509', '请求过于频繁', { source: 'write' });
+check(
+  '写动作被挡才记一条并退避',
+  world.store.data.actions.length === readBefore.actions + 1 && writeRisk.soft?.waiting === true,
+  JSON.stringify({ writeRisk, actions: world.store.data.actions.length }),
+);
+
+// 限流期间 B站私信轮询从 3 秒降到 60 秒（不然每 3 秒都撞一次 -509）
+const prevBili = world.cfg.bilibili;
+const prevDy = world.cfg.douyin;
+const prevRunning = world.running;
+const prevNewBiliDm = world.newBiliDm;
+let biliCalls = 0;
+world.newBiliDm = async () => {
+  biliCalls += 1;
+  return [];
+};
+world.cfg.bilibili = true;
+world.cfg.douyin = false;
+world.running = true;
+world.dmBusy = false;
+world.biliDmAt = 0;
+world.store.data.softBackoff = { until: Date.now() + 30 * 60 * 1000, at: Date.now(), n: 3, reason: '测试' };
+await world.watchDms();
+check('限流时 B站私信只拉一次', biliCalls === 1);
+await world.watchDms();
+check('限流期间 60 秒内不重复拉 B站', biliCalls === 1, String(biliCalls));
+world.store.clearRisk();
+world.biliDmAt = Date.now() - 4000;
+await world.watchDms();
+check('退避结束后恢复常规轮询', biliCalls === 2, String(biliCalls));
+world.newBiliDm = prevNewBiliDm;
+world.cfg.bilibili = prevBili;
+world.cfg.douyin = prevDy;
+world.running = prevRunning;
+world.store.clearRisk();
+
+// 旧数据清理：以前积下来的风控记录只留最近 20 条，把位置还给真动作
+const prevActionsRef = world.store.data.actions;
+world.store.data.actions = Array.from({ length: 50 }, (_, i) => ({
+  at: Date.now(),
+  platform: i % 2 ? 'system' : 'douyin',
+  action: i % 2 ? 'risk' : 'like',
+  target: `prune-${i}`,
+}));
+world.store.data.migrated = { ...(world.store.data.migrated ?? {}) };
+delete world.store.data.migrated.riskPrune;
+world.pruneRiskActions();
+const keptActions = world.store.data.actions;
+check(
+  '旧的风控记录只留最近 20 条',
+  keptActions.filter((a) => a.action === 'risk').length === 20 && keptActions.filter((a) => a.action === 'like').length === 25,
+  JSON.stringify({ total: keptActions.length }),
+);
+world.store.data.actions = prevActionsRef;
+
+// 给模型 / 面板的「最近」列表不掺风控记录
+check('给模型的最近动作不含风控记录', world.history().recent.every((x) => x.platform !== 'system'));
+
 cfg.riskGuard = 'light';
 world.store.clearRisk();
 const rateLight = world.policy.noteRisk('-509', '请求过于频繁');

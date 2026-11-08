@@ -20,6 +20,8 @@ function blank() {
     risk: { until: 0, reason: '', strikes: 0, lastCode: '' },
     /** 限流退避（-509/429）：只拦她自己出门，不拦主人点的事。 */
     softBackoff: { until: 0, at: 0, n: 0, reason: '' },
+    /** 只读请求被限流的次数（不算动作、不加 strikes，只用来看看平台压力）。 */
+    rateRead: { n: 0, at: 0, reason: '' },
     lastWriteAt: 0,
     /** 每个平台各自的上次公开动作时间：抖音限流不该连带卡住 B站。 */
     lastWriteByPlat: {},
@@ -53,6 +55,7 @@ export class Store {
       this.data = { ...blank(), ...parsed };
       this.data.risk = { ...blank().risk, ...(parsed.risk ?? {}) };
       this.data.softBackoff = { ...blank().softBackoff, ...(parsed.softBackoff ?? {}) };
+      this.data.rateRead = { ...blank().rateRead, ...(parsed.rateRead ?? {}) };
       this.data.stats = { ...blank().stats, ...(parsed.stats ?? {}) };
       for (const d of this.data.drafts) {
         if (d.status === 'sending') {

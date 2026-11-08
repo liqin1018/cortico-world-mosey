@@ -1344,16 +1344,46 @@ export default {
         async function openTimeline() {
           let data = null;
           try {
-            data = await ctx.invoke('timeline', [60]);
+            data = await ctx.invoke('timeline', [120]);
           } catch {
             // 读不到就退回面板上那几条
           }
-          const items = Array.isArray(data?.items) ? data.items : (lastData?.recent ?? []);
-          openSheet({
-            title: '最近做过什么',
-            hint: `${items.length} 条${Number(lastData?.recentTotal ?? items.length) > items.length ? `（更早的已折叠）` : ''}`,
-            render: (body) => renderDetailList(body, items, '还没出过门', '等她自己出门，或者在上面贴个链接。'),
-          });
+          const all = Array.isArray(data?.items) ? data.items : (lastData?.recent ?? []);
+          const total = Number(data?.total ?? all.length);
+          const isRisk = (x) => x?.action === 'risk' || x?.platform === 'system';
+          const groups = {
+            action: all.filter((x) => !isRisk(x)),
+            risk: all.filter(isRisk),
+          };
+          // 默认落在「动作」：风控记录再多也不该把真正做过的事盖住
+          let active = groups.action.length ? 'action' : groups.risk.length ? 'risk' : 'all';
+          const filters = [
+            { key: 'action', label: '动作', count: groups.action.length },
+            { key: 'risk', label: '风控', count: groups.risk.length },
+            { key: 'all', label: '全部', count: all.length },
+          ];
+          const paint = () => {
+            const items = active === 'all' ? all : groups[active] ?? [];
+            openSheet({
+              title: '最近做过什么',
+              hint: `${items.length} 条${total > all.length ? '（更早的已折叠）' : ''}`,
+              tabs: filters,
+              active,
+              onTab: (key) => {
+                if (key === active) return;
+                active = key;
+                paint();
+              },
+              render: (body) =>
+                renderDetailList(
+                  body,
+                  items,
+                  active === 'risk' ? '没被限流过' : '还没出过门',
+                  active === 'risk' ? '只有平台限流/要验证的时候才会记在这里。' : '等她自己出门，或者在上面贴个链接。',
+                ),
+            });
+          };
+          paint();
         }
 
         async function openComments(urlOverride) {

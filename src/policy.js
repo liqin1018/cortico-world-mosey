@@ -255,11 +255,27 @@ export class Policy {
    * 停掉全部动作只会把主人当场点的事一起埋了——之前评论发不出去、要等一两个小时就是这么来的。
    * 真被验证码/封号挡住时平台自己会报错，她会如实告诉主人。
    * light：只有验证码/封禁这种「再试也没用」的才停 30 分钟。strict：旧的 48h/24h 分档。
+   *
+   * source：
+   *   'write' 写动作被挡（默认）——要退避、要记一笔，面板上能看到；
+   *   'read'  只读请求被限流——**不续期退避、不记 action、不加 strikes**。
+   *           以前读接口（B站私信每 3 秒一次的 inbox）撞 -509 也照记，结果 300 条记录里 267 条是风控，
+   *           退避还被这些只读请求一直续命，她自己反倒永远出不了门。
    */
-  noteRisk(code, message) {
+  noteRisk(code, message, { source = 'write' } = {}) {
     const text = `${code ?? ''} ${message ?? ''}`.toLowerCase();
     const verify = /验证|captcha|verify|异常|封禁|ban|-352|-799/.test(text);
     const rate = /429|-509|请求过于频繁|操作频繁|访问过于频繁|rate/.test(text);
+
+    // 只读请求的限流：只累一个计数（给面板/日志看趋势），不写记录、不动退避。
+    // 但如果同时是验证码/封号（verify），还是照常往下走——那种必须让主人知道。
+    if (rate && !verify && source === 'read') {
+      const prev = this.store.data.rateRead ?? {};
+      this.store.data.rateRead = { n: Number(prev.n ?? 0) + 1, at: Date.now(), reason: String(message ?? code ?? '').slice(0, 120) };
+      // 不 save：这个数秒级会变，跟着下一次正常写盘落盘就行
+      return { until: 0, hours: 0, reason: '', guard: this.guard(), soft: this.rateWait(), read: true };
+    }
+
     const guard = this.guard();
     const before = Number(this.store.data.risk.strikes ?? 0);
     const strikes = rate ? before + 1 : before;

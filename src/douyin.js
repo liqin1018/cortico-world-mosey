@@ -843,20 +843,24 @@ export class DouyinBrowser {
   }
 
   /** 把一次风险命中翻译成人话，顺手记一笔；限流时进入两分钟冷却，别让她连着重试。 */
-  riskError(f, where = '操作') {
+  /**
+   * source='read'：只是读页面时看到风控提示（导航、翻页）——不记动作、不续期退避。
+   * source='write'：点发送/点赞之后被挡，这种才算「她真的被拦住了」。
+   */
+  riskError(f, where = '操作', { source = 'write' } = {}) {
     const why = String(f?.hit || '页面提示').slice(0, 60);
     if (f?.kind === 'rate') {
-      this.rateUntil = Date.now() + 2 * 60 * 1000;
-      this.policy.noteRisk('DOUYIN_RATE', `${where}后限流（${why}）`);
+      if (source !== 'read') this.rateUntil = Date.now() + 2 * 60 * 1000;
+      this.policy.noteRisk('DOUYIN_RATE', `${where}后限流（${why}）`, { source });
       return new DouyinError('RISK', `抖音限流了（${why}），等两分钟再发，别连着重试。`);
     }
-    this.policy.noteRisk('DOUYIN_VERIFY', `${where}后要验证（${why}）`);
+    this.policy.noteRisk('DOUYIN_VERIFY', `${where}后要验证（${why}）`, { source });
     return new DouyinError('RISK', `抖音要验证（${why}），得主人在手机上过一下验证码。`);
   }
 
   async checkRisk(page) {
     const f = await bodyFlags(page);
-    if (f.risk) throw this.riskError(f, '刷抖音');
+    if (f.risk) throw this.riskError(f, '刷抖音', { source: 'read' });
   }
 
   async goto(page, url, waitMs = 4200) {

@@ -6003,8 +6003,6 @@ export class DouyinBrowser {
     // 私信页正停在主人这个会话上：直接读它。零点击、零导航，实测几十毫秒。
     // 这一步不走 serialize 队列——队列里可能正排着一次十几秒的评论，主人的话不该等它。
     const dm = this.dmPage;
-    // 诊断用：只在失败/走兜底时打一行，正常发送零开销
-    const diag = { who, dmThread: this.dmThread, chatThread: this.chatThread, steps: [] };
     if (dm && !dm.isClosed() && this.dmThread === who) {
       /**
        * 先确认这一页还停在主人身上。
@@ -6093,6 +6091,8 @@ export class DouyinBrowser {
     // 私信页正停在这个会话上：不用跳转、不用点会话，直接打字回车。
     // 这是「秒回」的关键一段——省掉整页导航（6-8 秒）和点会话后的固定停顿（2.4 秒）。
     const dm = this.dmPage;
+    // 诊断用：只在失败/走兜底时打一行，正常发送零开销
+    const diag = { who, dmThread: this.dmThread, chatThread: this.chatThread, steps: [] };
     if (dm && !dm.isClosed() && this.dmThread === who) {
       // 先确认页面真的停在主人这个会话上。点不回来就别硬发——宁可走慢路径重开，
       // 也不能把私信打进别人的会话里（GLM 审出来的 #1）。

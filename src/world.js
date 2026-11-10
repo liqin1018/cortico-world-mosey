@@ -1322,7 +1322,8 @@ export class StrollWorld {
     // 只读接口不怕软限流（-509 这类），硬风控（验证码/封禁）期间连读都别读
     const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
     if (paused.paused && !soft) return;
-    if (Date.now() - Number(this.mentionAt ?? 0) < 5 * 60 * 1000) return;
+    // 90 秒一次：以前 5 分钟，主人 @ 完在评论里问「收到没」，她当场答「没收到」，很尴尬
+    if (Date.now() - Number(this.mentionAt ?? 0) < 90 * 1000) return;
     this.mentionAt = Date.now();
     const items = await this.bili.mentions(6).catch(() => []);
     const fresh = items.filter((x) => x?.id && !this.store.seenAt(`atpush:${x.id}`));
@@ -1332,24 +1333,23 @@ export class StrollWorld {
     for (const x of picked) this.store.markSeen(`atpush:${x.id}`);
     this.store.save();
     const lines = picked.map((x, i) => {
-      const quote = x.quote ? `\n   他回的是：${x.quote}` : '';
       const target = x.bvid
         ? `https://www.bilibili.com/video/${x.bvid}`
         : x.dynamicId
           ? `https://t.bilibili.com/${x.dynamicId}`
           : x.url;
-      return (
-        `${i + 1}. ${x.user || '有人'} 在「${x.where || '视频'}」下面 @ 了你：${x.text}${quote}\n` +
-        `   链接：${x.url}\n` +
-        `   回他：stroll_act action=reply target=${target} reply_to=${x.rpid} text=…`
-      );
+      const head = `${i + 1}. ${x.user || '有人'} @ 了你`;
+      const where = `   视频：${x.where || '（没读到标题）'}`;
+      const body = `   评论：${x.text}`;
+      const quote = x.quote ? `\n   他在回的那条：${x.quote}` : '';
+      return `${head}\n${where}\n${body}${quote}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${x.rpid} text=…`;
     });
-    this.log?.info?.('stroll mention push', { n: picked.length });
+    this.log?.info?.('stroll mention push', { n: picked.length, ids: picked.map((x) => x.id) });
     await this.push(
       'stroll.reply',
-      `有人在评论区 @ 你了：\n${lines.join('\n')}\n` +
+      `（B站）有人在评论区 @ 你了：\n${lines.join('\n')}\n` +
         '想回就照上面给的参数回（reply_to 别丢，丢了就变成新开一条评论）；不想回就放着，不用每条都应。',
-      { kind: 'at', n: picked.length },
+      { kind: 'at', platform: 'bilibili', n: picked.length },
       'debounce',
     );
   }

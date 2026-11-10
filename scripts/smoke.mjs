@@ -1208,6 +1208,7 @@ world.bili.request = async () => ({
     {
       id: 7,
       user: { nickname: '阿澈', mid: 9 },
+      at_time: 1794292879,
       item: {
         source_content: '@小月 这个怎么弄',
         uri: 'https://www.bilibili.com/video/BV1GJ411x7h7',
@@ -1223,6 +1224,11 @@ check(
   'mentions 只读 @ 并带上 rpid',
   mappedAt.length === 1 && mappedAt[0].kind === 'at' && mappedAt[0].rpid === '12' && mappedAt[0].bvid === 'BV1GJ411x7h7',
   JSON.stringify(mappedAt[0]),
+);
+check(
+  '@ 通知的时间取 at_time（以前是 0，排序垫底会被 inbox 切掉）',
+  mappedAt[0].at === 1794292879,
+  String(mappedAt[0].at),
 );
 world.bili.request = prevReqM;
 

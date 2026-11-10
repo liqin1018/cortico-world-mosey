@@ -80,7 +80,9 @@ function mapMsgFeedItem(kind, item) {
     text: truncate(content, 140),
     quote: truncate(stripTags(msg.target_reply_content || ''), 80),
     where: truncate(stripTags(msg.title || msg.desc || ''), 60),
-    at: Number(item.reply_time ?? item.time ?? 0),
+    // @ 通知的时间在 at_time 里，评论通知在 reply_time 里；单位都是秒。
+    // 以前只读 reply_time，@ 条目拿到 0 → inbox 排序垫底、被 slice 切掉，等于「收不到 @」。
+    at: Number(item.reply_time ?? item.at_time ?? item.time ?? 0),
     url: commentDeepLink(link, rootRpid, rpid),
     bvid: bvidOf(link),
     dynamicId: parseDynamicId(link),
@@ -1316,7 +1318,8 @@ export class Bilibili {
    * inbox 会把私信也混进来，还带一串私信会话请求；轮询用这个更轻。
    */
   async mentions(limit = 6) {
-    const data = await this.request('/x/msgfeed/at', { platform: 'web', build: 0, mobi_app: 'web' }, { cacheMs: 30000 });
+    // 不走缓存：这是轮询用的，缓存会让刚 @ 的一分钟内看不到
+    const data = await this.request('/x/msgfeed/at', { platform: 'web', build: 0, mobi_app: 'web' }, { cacheMs: 0 });
     return (data.items ?? [])
       .map((item) => mapMsgFeedItem('at', item))
       .filter(Boolean)

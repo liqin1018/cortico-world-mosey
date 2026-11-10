@@ -59,6 +59,38 @@ function parseJson(raw) {
 }
 
 /** 消息里的 uri 是网页地址；type 说明它落在视频、动态还是专栏里。 */
+/**
+ * 把一条 msgfeed（评论/@ 通知）映射成内部结构。inbox 和 @ 轮询共用，
+ * 免得两边字段慢慢长歪。
+ */
+function mapMsgFeedItem(kind, item) {
+  const msg = item?.item ?? {};
+  const content = stripTags(msg.source_content || msg.message || msg.desc || '');
+  if (!content) return null;
+  const link = String(msg.uri ?? '');
+  const rpid = String(msg.source_id ?? '') || String(msg.target_id ?? '') || '0';
+  const rootRpid = String(msg.root_id ?? '') || '0';
+  return {
+    kind,
+    platform: 'bilibili',
+    type: inferMsgType(link, msg.type),
+    id: String(item.id ?? ''),
+    user: stripTags(item.user?.nickname ?? ''),
+    mid: String(item.user?.mid ?? ''),
+    text: truncate(content, 140),
+    quote: truncate(stripTags(msg.target_reply_content || ''), 80),
+    where: truncate(stripTags(msg.title || msg.desc || ''), 60),
+    at: Number(item.reply_time ?? item.time ?? 0),
+    url: commentDeepLink(link, rootRpid, rpid),
+    bvid: bvidOf(link),
+    dynamicId: parseDynamicId(link),
+    cvid: parseCvid(link),
+    rpid,
+    rootRpid,
+    likeState: Number(msg.like_state ?? 0) === 1,
+  };
+}
+
 function inferMsgType(uri, rawType) {
   const link = String(uri ?? '');
   if (/\/video\//.test(link) || /\/list\//.test(link)) return 'video';
@@ -1279,6 +1311,18 @@ export class Bilibili {
     }
   }
 
+  /**
+   * 只读「@我的」：评论区里有人 @ 她。
+   * inbox 会把私信也混进来，还带一串私信会话请求；轮询用这个更轻。
+   */
+  async mentions(limit = 6) {
+    const data = await this.request('/x/msgfeed/at', { platform: 'web', build: 0, mobi_app: 'web' }, { cacheMs: 30000 });
+    return (data.items ?? [])
+      .map((item) => mapMsgFeedItem('at', item))
+      .filter(Boolean)
+      .slice(0, Math.max(1, limit));
+  }
+
   async inbox(limit = 8) {
     const out = [];
     for (const [kind, route] of [
@@ -1288,31 +1332,8 @@ export class Bilibili {
       try {
         const data = await this.request(route, { platform: 'web', build: 0, mobi_app: 'web' }, { cacheMs: 60000 });
         for (const item of data.items ?? []) {
-          const msg = item.item ?? {};
-          const content = stripTags(msg.source_content || msg.message || msg.desc || '');
-          if (!content) continue;
-          const link = String(msg.uri ?? '');
-          const rpid = String(msg.source_id ?? '') || String(msg.target_id ?? '') || '0';
-          const rootRpid = String(msg.root_id ?? '') || '0';
-          out.push({
-            kind,
-            platform: 'bilibili',
-            type: inferMsgType(link, msg.type),
-            id: String(item.id ?? ''),
-            user: stripTags(item.user?.nickname ?? ''),
-            mid: String(item.user?.mid ?? ''),
-            text: truncate(content, 140),
-            quote: truncate(stripTags(msg.target_reply_content || ''), 80),
-            where: truncate(stripTags(msg.title || msg.desc || ''), 60),
-            at: Number(item.reply_time ?? item.time ?? 0),
-            url: commentDeepLink(link, rootRpid, rpid),
-            bvid: bvidOf(link),
-            dynamicId: parseDynamicId(link),
-            cvid: parseCvid(link),
-            rpid,
-            rootRpid,
-            likeState: Number(msg.like_state ?? 0) === 1,
-          });
+          const mapped = mapMsgFeedItem(kind, item);
+          if (mapped) out.push(mapped);
         }
       } catch {
         // 一类读不到不影响另一类

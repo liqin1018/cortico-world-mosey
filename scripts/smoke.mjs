@@ -1201,6 +1201,94 @@ world.bili.open = prevBiliOpen2;
 world.bili.mediaText = prevBiliMedia2;
 world.bili.framesOf = prevBiliFrames;
 
+/* ---------------- 评论区 @ 她：主动叫她 ---------------- */
+const prevReqM = world.bili.request;
+world.bili.request = async () => ({
+  items: [
+    {
+      id: 7,
+      user: { nickname: '阿澈', mid: 9 },
+      item: {
+        source_content: '@小月 这个怎么弄',
+        uri: 'https://www.bilibili.com/video/BV1GJ411x7h7',
+        source_id: '12',
+        title: '搬砖教程',
+        type: 1,
+      },
+    },
+  ],
+});
+const mappedAt = await world.bili.mentions(6);
+check(
+  'mentions 只读 @ 并带上 rpid',
+  mappedAt.length === 1 && mappedAt[0].kind === 'at' && mappedAt[0].rpid === '12' && mappedAt[0].bvid === 'BV1GJ411x7h7',
+  JSON.stringify(mappedAt[0]),
+);
+world.bili.request = prevReqM;
+
+const prevMentionsFn = world.bili.mentions;
+const prevPushM = world.push;
+const prevQuietFn = world.policy.isQuiet;
+const prevRunningM = world.running;
+const prevCfgM = { bilibili: world.cfg.bilibili, mentionWatch: world.cfg.mentionWatch };
+const mPushes = [];
+world.push = async (type, text) => {
+  mPushes.push({ type, text });
+  return true;
+};
+world.running = true;
+world.cfg.bilibili = true;
+world.cfg.mentionWatch = true;
+world.mentionAt = 0;
+const atItem = {
+  id: 'at-1',
+  kind: 'at',
+  user: '阿澈',
+  text: '@小月 这个怎么弄',
+  where: '搬砖教程',
+  url: 'https://www.bilibili.com/video/BV1GJ411x7h7#reply12',
+  bvid: 'BV1GJ411x7h7',
+  rpid: '12',
+};
+world.bili.mentions = async () => [atItem];
+await world.mentionBeat();
+check(
+  '有人 @ 她就叫她，并给出 reply_to',
+  mPushes.length === 1 && /有人在评论区 @ 你了/.test(mPushes[0].text) && /reply_to=12/.test(mPushes[0].text),
+  JSON.stringify(mPushes).slice(0, 200),
+);
+await world.mentionBeat();
+check('同一条 @ 只叫一次', mPushes.length === 1);
+world.mentionAt = 0;
+world.bili.mentions = async () => [atItem, { ...atItem, id: 'at-2' }, { ...atItem, id: 'at-3' }];
+await world.mentionBeat();
+check(
+  '一次最多提两条，不刷屏',
+  mPushes.length === 2 && (mPushes[1].text.match(/stroll_act action=reply/g) ?? []).length === 2,
+  String(mPushes[1]?.text?.length),
+);
+world.mentionAt = 0;
+world.policy.isQuiet = () => true;
+world.bili.mentions = async () => [{ ...atItem, id: 'at-quiet' }];
+await world.mentionBeat();
+check('安静时段不叫她', mPushes.length === 2);
+world.policy.isQuiet = prevQuietFn;
+world.mentionAt = 0;
+world.cfg.mentionWatch = false;
+world.bili.mentions = async () => [{ ...atItem, id: 'at-off' }];
+await world.mentionBeat();
+check('关掉「有人 @ 我就叫我」就不查', mPushes.length === 2);
+world.cfg.mentionWatch = true;
+check(
+  '@ 提醒能在设置里关',
+  !!CONFIG_GROUPS.find((g) => /私信与群/.test(g.schema.title))?.schema.properties?.['worlds.stroll.mentionWatch'],
+);
+world.bili.mentions = prevMentionsFn;
+world.push = prevPushM;
+world.running = prevRunningM;
+world.cfg.bilibili = prevCfgM.bilibili;
+world.cfg.mentionWatch = prevCfgM.mentionWatch;
+
 /* ---------------- 一起看主动说话 / 后台看完说一句 ---------------- */
 check('一起看解说默认值', DEFAULTS.watchTalk === true && DEFAULTS.watchLines === 2 && DEFAULTS.openTalk === false);
 const prevWatch = world.watch;

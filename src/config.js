@@ -107,6 +107,8 @@ export const DEFAULTS = {
 
   /** 私信监听：主人在抖音/B站发来就马上推给她回。 */
   dmWatch: true,
+  /** 有人在评论区 @ 她时，主动叫她一声（B站，5 分钟查一次）。 */
+  mentionWatch: true,
   /**
    * 多久兜底看一次私信（秒）。
    * 抖音现在走页面事件通道（新消息一进 DOM 就回调），轮询只是防掉线的兜底，
@@ -733,6 +735,14 @@ const MESSAGES = {
           '开着时每隔一会儿看一眼你和她的私信，你一发就推给她回，不用等她下次出门。关掉就只能等她主动去查。',
         'x-hot': true,
       },
+      [P + 'mentionWatch']: {
+        type: 'boolean',
+        title: '有人 @ 我就叫我',
+        description:
+          'B站评论区里有人 @ 她时，主动把她叫起来看一眼（5 分钟查一次，安静时段不查）。' +
+          '关掉的话，只有她出门逛、或你让她查消息时才看得到。回复仍是公开评论，按「审批」来。',
+        'x-hot': true,
+      },
       [P + 'dmPollSec']: {
         type: 'integer',
         title: '多久看一次私信',
@@ -889,6 +899,7 @@ export const POLICY_FIELDS = {
   watchSpeakSec: { type: 'int', min: 20, max: 600 },
   watchPollSec: { type: 'int', min: 5, max: 120 },
   dmWatch: { type: 'boolean' },
+  mentionWatch: { type: 'boolean' },
   dmPollSec: { type: 'int', min: 3, max: 300 },
   booksDir: { type: 'string', max: 400 },
   groupWatch: { type: 'boolean' },

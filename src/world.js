@@ -715,6 +715,14 @@ export class StrollWorld {
     this.strangerTimer = setInterval(() => {
       this.strangerTick().catch(() => {});
     }, 300);
+    /**
+     * 「有人在评论区 @ 她」单独一条慢轮询：一分钟醒一次，内部再按 5 分钟节流。
+     * 以前这条完全没轮询——只有出门 brief、或主人让她查 inbox 时才看得到，
+     * 所以表现出来就是「不主动给他链接，她就不会回」。
+     */
+    this.mentionTimer = setInterval(() => {
+      this.mentionBeat().catch(() => {});
+    }, 60 * 1000);
     // 刚启动别抢登录/初始化，等十几秒再开始看
     setTimeout(() => this.dmBeat().catch(() => {}), 8 * 1000);
   }
@@ -1179,6 +1187,8 @@ export class StrollWorld {
     this.dmTimer = null;
     if (this.strangerTimer) clearInterval(this.strangerTimer);
     this.strangerTimer = null;
+    if (this.mentionTimer) clearInterval(this.mentionTimer);
+    this.mentionTimer = null;
     // 万一上一拍还卡在某个页面调用里，标记要清掉，不然重新开监听会一直跳过心跳
     this.dmBeatBusy = false;
     this.strangerBusy = false;
@@ -1295,6 +1305,53 @@ export class StrollWorld {
     } finally {
       this.dmBusy = false;
     }
+  }
+
+  /**
+   * 评论区 @ 她：查一次「@我的」，有新东西就推给她。
+   * 只读接口，失败就当没有（未登录/没开评论通知都会是空的），不打扰她。
+   */
+  async mentionBeat() {
+    if (!this.running) return;
+    if (this.cfg.enabled === false) return;
+    const live = this.liveConfig() ?? {};
+    if ((live.bilibili ?? this.cfg.bilibili) === false) return;
+    if ((live.mentionWatch ?? this.cfg.mentionWatch ?? true) === false) return;
+    if (this.policy.isQuiet()) return;
+    const paused = this.policy.paused();
+    // 只读接口不怕软限流（-509 这类），硬风控（验证码/封禁）期间连读都别读
+    const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
+    if (paused.paused && !soft) return;
+    if (Date.now() - Number(this.mentionAt ?? 0) < 5 * 60 * 1000) return;
+    this.mentionAt = Date.now();
+    const items = await this.bili.mentions(6).catch(() => []);
+    const fresh = items.filter((x) => x?.id && !this.store.seenAt(`atpush:${x.id}`));
+    if (!fresh.length) return;
+    // 一次最多提两条：被人连着 @ 也不该把她（和主人）刷屏
+    const picked = fresh.slice(0, 2);
+    for (const x of picked) this.store.markSeen(`atpush:${x.id}`);
+    this.store.save();
+    const lines = picked.map((x, i) => {
+      const quote = x.quote ? `\n   他回的是：${x.quote}` : '';
+      const target = x.bvid
+        ? `https://www.bilibili.com/video/${x.bvid}`
+        : x.dynamicId
+          ? `https://t.bilibili.com/${x.dynamicId}`
+          : x.url;
+      return (
+        `${i + 1}. ${x.user || '有人'} 在「${x.where || '视频'}」下面 @ 了你：${x.text}${quote}\n` +
+        `   链接：${x.url}\n` +
+        `   回他：stroll_act action=reply target=${target} reply_to=${x.rpid} text=…`
+      );
+    });
+    this.log?.info?.('stroll mention push', { n: picked.length });
+    await this.push(
+      'stroll.reply',
+      `有人在评论区 @ 你了：\n${lines.join('\n')}\n` +
+        '想回就照上面给的参数回（reply_to 别丢，丢了就变成新开一条评论）；不想回就放着，不用每条都应。',
+      { kind: 'at', n: picked.length },
+      'debounce',
+    );
   }
 
   /** 把「主人发私信了」这件事推给她。攒一批一起推，别一条一条地叫。 */

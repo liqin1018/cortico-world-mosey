@@ -3335,6 +3335,27 @@ export class StrollWorld {
     return { ok: true, platform: p, items: items.map(({ _score, ...rest }) => ({ kind: 'video', ...rest })) };
   }
 
+  /**
+   * 字幕这块的人话说明：抽了多少句、跳过多少、想细看怎么读。
+   * 不写清楚的话，她会把「抽样的 12 句」当成整条视频的剧情讲给主人听。
+   */
+  mediaNoteOf(media, at = null) {
+    if (!media?.ok) return '';
+    if (!media.total?.subtitles && !media.total?.danmaku) return '这条没读到字幕也没读到弹幕';
+    if (!media.total?.subtitles) return '这条没有 CC 字幕（弹幕有）';
+    if (at != null) return '';
+    const cov = media.coverage;
+    const notes = [];
+    if (cov?.sampled) {
+      notes.push(
+        `全片 ${cov.total} 句字幕，这里抽了 ${cov.picked} 句（分 ${cov.segments} 段，` +
+          `${clockText(cov.from)}–${clockText(cov.to)}），中间是跳着读的；想知道某一段就再读一次，带上 at=分:秒。`,
+      );
+    }
+    if (cov?.truncated) notes.push('字幕太长，每句已按字数截断。');
+    return notes.join('');
+  }
+
   async readOpen(args) {
     // target 是 act 那边的叫法，她很容易顺手带过来——两个都认，少一次失败
     const raw = String(args.url ?? args.id ?? args.target ?? '').trim();
@@ -3342,6 +3363,12 @@ export class StrollWorld {
     const platform = this.inferPlatform(raw, args.platform);
     const frames = clamp(Number(args.frames ?? this.cfg.framesPerOpen ?? 0), 0, 3);
     const keep = clamp(Number(this.cfg.keepWindowSeconds ?? 90), 0, 600);
+    // at 是「定点读」：想知道第 5 分半发生了什么就带 at=5:30，比把字幕条数拉满省得多
+    const atRaw = args.at ?? args.seek ?? args.time;
+    const at = atRaw === undefined || atRaw === null || String(atRaw).trim() === '' ? null : parseAtSeconds(atRaw);
+    if (atRaw !== undefined && atRaw !== null && String(atRaw).trim() !== '' && at === null) {
+      return JSON.stringify({ ok: false, error: 'at 要写成 330、5:30 或 1:02:03 这种。' });
+    }
 
     if (platform === 'bilibili') {
       const bvid = parseBvid(raw);
@@ -3390,23 +3417,26 @@ export class StrollWorld {
       const dmOpen = clamp(Number(this.cfg.danmakuOpen ?? 30), 0, 60);
       let media = null;
       if (bvid && (subOpen > 0 || dmOpen > 0)) {
-        media = await this.bili.mediaText(bvid, { subtitleLimit: subOpen, danmakuLimit: dmOpen }).catch(() => null);
+        media = await this.bili
+          .mediaText(bvid, {
+            subtitleLimit: subOpen,
+            danmakuLimit: dmOpen,
+            // 定点读：给一整段（前后约半分钟），不是只要当前那一句
+            ...(at != null ? { around: at, aroundSpan: { back: 6, ahead: 36 }, windowSec: 20 } : {}),
+          })
+          .catch(() => null);
       }
       return JSON.stringify({
         notice: CONTENT_NOTICE,
         ok: true,
         ...detail,
+        ...(at != null ? { at: clockText(at), atNote: `读的是 ${clockText(at)} 前后半分钟这一段。` } : {}),
         ...(media?.ok
           ? {
               subtitles: media.subtitles,
               danmaku: media.danmaku,
               mediaTotal: media.total,
-              mediaNote:
-                media.total.subtitles === 0 && media.total.danmaku === 0
-                  ? '这条没读到字幕也没读到弹幕'
-                  : media.total.subtitles === 0
-                    ? '这条没有 CC 字幕（弹幕有）'
-                    : '',
+              mediaNote: this.mediaNoteOf(media, at),
             }
           : {}),
         ...(this.cfg.openTalk === true ? { followUp: '看完用一两句跟主人说说你的反应，别只复述简介。' } : {}),
@@ -3436,6 +3466,7 @@ export class StrollWorld {
         url: result.url,
       });
       result.window = '后台看的，没有开网页。要一起看就在面板点「一起看」。';
+      if (at != null) result.atNote = '抖音没有字幕，at 只对 B站视频有效；抖音想往后看要开「一起看」。';
       if (this.cfg.openTalk === true) result.followUp = '看完用一两句跟主人说说你的反应，别只复述简介。';
       this.store.markSeen(`douyin:open:${result.id}`);
       this.policy.noteRead('douyin', { open: true });
@@ -6332,6 +6363,32 @@ function clockToSeconds(text) {
     .map((x) => Number(x));
   if (!parts.length || parts.some((n) => !Number.isFinite(n))) return 0;
   return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+/**
+ * `read at=` 的解析：认 330 / 5:30 / 1:02:03 三种写法，认不出返回 null。
+ * 和 clockToSeconds 分开是因为这里必须能区分「第 0 秒」和「写错了」。
+ */
+function parseAtSeconds(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  if (!/^\d{1,2}(:\d{1,2}){1,2}$/.test(raw)) return null;
+  const parts = raw.split(':').map((x) => Number(x));
+  if (parts.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  // 分、秒不允许超过 59（小时位不限）
+  if (parts.slice(1).some((n) => n > 59)) return null;
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+/** 秒 → 4:05 / 1:02:03。回执和提示词里都用这个，别让她看到 245 这种原始秒数。 */
+function clockText(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 /** 昵称的占位值不能当人名：页面没渲染完时 h1 会读到「未登录」「抖音」。 */

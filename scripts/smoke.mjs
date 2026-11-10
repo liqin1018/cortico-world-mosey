@@ -1126,6 +1126,69 @@ world.bili.view = oldBiliViewMedia;
 world.bili.request = oldBiliReqMedia;
 world.bili.fetchRaw = oldFetchRawMedia;
 
+/* ---------------- 字幕分段抽样 / 定点读 / 抽帧 ---------------- */
+world.bili.mediaCache.clear();
+world.bili.view = async () => ({ aid: '1', cid: '888', bvid: 'BV1spread', title: '抽样', duration: 640 });
+world.bili.request = async () => ({ subtitle: { subtitles: [] } });
+world.bili.fetchRaw = async () => zlib.deflateRawSync(Buffer.from('<i></i>'));
+const spreadSubs = Array.from({ length: 320 }, (_, i) => ({ from: i * 2, to: i * 2 + 1.5, text: `第${i + 1}句` }));
+world.bili.mediaCache.set('888', { at: Date.now(), subtitles: spreadSubs, danmaku: [] });
+const spread = await world.bili.mediaText('BV1spread', { subtitleLimit: 12 });
+check(
+  '字幕按时间分段抽样，覆盖到结尾',
+  spread.subtitles.length === 12 && spread.coverage.segments === 4 && spread.coverage.to > 600,
+  JSON.stringify(spread.coverage),
+);
+check(
+  '每段是连续台词，不是单句散抽',
+  spread.subtitles[1].from - spread.subtitles[0].from === 2 && spread.subtitles[2].from - spread.subtitles[1].from === 2,
+  JSON.stringify(spread.subtitles.slice(0, 3)),
+);
+const wholeSubs = await world.bili.mediaText('BV1spread', { subtitleLimit: 400 });
+check('句数少于上限时原样返回', wholeSubs.subtitles.length === 320 && wholeSubs.coverage.sampled === false);
+const longSubs = Array.from({ length: 60 }, (_, i) => ({ from: i, to: i + 1, text: '很长的一句字幕'.repeat(6) }));
+world.bili.mediaCache.set('888', { at: Date.now(), subtitles: longSubs, danmaku: [] });
+const capped = await world.bili.mediaText('BV1spread', { subtitleLimit: 60, maxChars: 400 });
+check(
+  '字幕总字数有上限（不会把上下文撑爆）',
+  capped.coverage.truncated === true && capped.coverage.chars <= 1200,
+  JSON.stringify(capped.coverage),
+);
+world.bili.mediaCache.clear();
+world.bili.view = oldBiliViewMedia;
+world.bili.request = oldBiliReqMedia;
+world.bili.fetchRaw = oldFetchRawMedia;
+
+const prevBiliOpen2 = world.bili.open;
+const prevBiliMedia2 = world.bili.mediaText;
+let mediaArg = null;
+world.bili.open = async () => ({
+  kind: 'video',
+  id: 'BV1GJ411x7h7',
+  title: '定点',
+  author: 'UP',
+  url: 'https://www.bilibili.com/video/BV1GJ411x7h7',
+  dur: '10:00',
+});
+world.bili.mediaText = async (id, opts) => {
+  mediaArg = opts;
+  return {
+    ok: true,
+    subtitles: [{ from: 330, to: 332, text: '这一段' }],
+    danmaku: [],
+    total: { subtitles: 320, danmaku: 0 },
+    coverage: { total: 320, picked: 1, segments: 1, sampled: false, chars: 3, truncated: false, from: 330, to: 332 },
+  };
+};
+const atOpen = await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', at: '5:30' });
+const atBody = JSON.parse(typeof atOpen === 'string' ? atOpen : atOpen.text);
+check('at 能解析成秒并传给字幕接口', mediaArg?.around === 330, JSON.stringify(mediaArg));
+check('返回里标明读的是哪一段', atBody.at === '5:30' && /5:30/.test(String(atBody.atNote)), JSON.stringify(atBody.atNote));
+const badAt = JSON.parse(await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', at: 'abc' }));
+check('at 写错会明确报错', badAt.ok === false && /at 要写成/.test(badAt.error), badAt.error);
+world.bili.open = prevBiliOpen2;
+world.bili.mediaText = prevBiliMedia2;
+
 /* ---------------- 一起看主动说话 / 后台看完说一句 ---------------- */
 check('一起看解说默认值', DEFAULTS.watchTalk === true && DEFAULTS.watchLines === 2 && DEFAULTS.openTalk === false);
 const prevWatch = world.watch;

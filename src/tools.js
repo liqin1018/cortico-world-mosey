@@ -26,6 +26,11 @@ export const TOOL_DECLS = [
         text: { type: 'string', description: 'note 用：要记下来的那句摘抄。' },
         tag: { type: 'string', description: 'stickers 用：只看带这个标签的表情包。' },
         frames: { type: 'integer', minimum: 0, maximum: 3, description: '抖音抽几帧；默认 0，最省 token。' },
+        at: {
+          type: ['string', 'integer'],
+          description:
+            'open 用：只看这个时间点附近的一段（330 / 5:30 / 1:02:03）。想知道「后面发生了什么」用它，别把字幕条数拉满。只对 B站视频有效。',
+        },
         watch_action: {
           type: 'string',
           enum: ['start', 'stop', 'status'],

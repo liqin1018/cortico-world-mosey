@@ -544,7 +544,9 @@ const VIEWING = {
       [P + 'subtitleOpen']: {
         type: 'integer',
         title: '后台看：带几句字幕',
-        description: 'stroll action=open 时返回的字幕句数。没有 CC 字幕的视频这里设多少都是空。',
+        description:
+          'open 时返回的字幕句数。按时间分段抽样，从开头一路覆盖到结尾（不是只取开头几句）；' +
+          '想知道某一段可以让她带 at=分:秒 再读。没有 CC 字幕的视频这里设多少都是空。',
         minimum: 0,
         maximum: 60,
         'x-suffix': ' 句',

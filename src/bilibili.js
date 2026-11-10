@@ -619,10 +619,15 @@ export class Bilibili {
   }
 
   /**
-   * 读一条视频的字幕 + 弹幕。`around` 传当前播放秒数时，只取前后几秒的，
-   * 供「一起看」按进度播报；不传就取开头一批。
+   * 读一条视频的字幕 + 弹幕。
+   * - 不传 `around`：字幕**按时间分段抽样**，从开头一路覆盖到结尾（以前只取开头 12 句，
+   *   10 分钟的视频基本只知道前十几秒在讲什么）。
+   * - 传 `around`：只取这个时间点附近的，供「一起看」按进度播报，或 `read at=5:30` 定点读。
    */
-  async mediaText(idOrUrl, { subtitleLimit = 24, danmakuLimit = 40, around = null, windowSec = 15 } = {}) {
+  async mediaText(
+    idOrUrl,
+    { subtitleLimit = 24, danmakuLimit = 40, around = null, windowSec = 15, aroundSpan = null, maxChars = 1500 } = {},
+  ) {
     const v = await this.view(idOrUrl);
     if (!v.cid) {
       return { ok: false, code: 'NO_CID', error: '这条视频拿不到 cid（可能是番剧/直播），读不了字幕和弹幕', subtitles: [], danmaku: [] };
@@ -641,10 +646,27 @@ export class Bilibili {
         if (oldest) this.mediaCache.delete(oldest[0]);
       }
     }
-    const subtitles =
-      around != null
-        ? cache.subtitles.filter((x) => x.to >= Number(around) - 3 && x.from <= Number(around) + 6).slice(0, 3)
-        : cache.subtitles.slice(0, subtitleLimit);
+    let subtitles = [];
+    let segments = 0;
+    let sampled = false;
+    if (around != null) {
+      if (subtitleLimit > 0) {
+        // 一起看只要当前这一句（前后 3/6 秒）；定点读要一整段（默认前后 6/36 秒）
+        const back = Number(aroundSpan?.back ?? 3);
+        const ahead = Number(aroundSpan?.ahead ?? 6);
+        const at = Number(around);
+        subtitles = cache.subtitles.filter((x) => x.to >= at - back && x.from <= at + ahead).slice(0, Math.max(1, subtitleLimit));
+        segments = subtitles.length ? 1 : 0;
+      }
+    } else {
+      const picked = sampleSubtitles(cache.subtitles, subtitleLimit);
+      subtitles = picked.lines;
+      segments = picked.segments;
+      sampled = picked.sampled;
+    }
+    // 条数拉满（60 句）时也不能一口气把上下文撑爆：按总字数匀着截断，保留覆盖，不砍掉后半段
+    const capped = capSubtitleChars(subtitles, maxChars);
+    subtitles = capped.lines;
     const danmaku =
       around != null
         ? cache.danmaku.filter((x) => Math.abs(x.t - Number(around)) <= windowSec).slice(0, 12)
@@ -658,6 +680,17 @@ export class Bilibili {
       subtitles,
       danmaku,
       total: { subtitles: cache.subtitles.length, danmaku: cache.danmaku.length },
+      // 面板/提示词要看得出「这是抽样，不是全片」：total 是原始句数，picked 是这次给了几句
+      coverage: {
+        total: cache.subtitles.length,
+        picked: subtitles.length,
+        segments,
+        sampled,
+        chars: capped.chars,
+        truncated: capped.truncated,
+        from: subtitles.length ? Number(subtitles[0].from) || 0 : 0,
+        to: subtitles.length ? Number(subtitles[subtitles.length - 1].to) || 0 : 0,
+      },
     };
   }
 
@@ -1490,6 +1523,52 @@ export class Bilibili {
   }
 }
 
+
+/**
+ * 字幕分段抽样：把整条字幕按时间切成几段，每段取开头几条**连续**字幕。
+ * 为什么不像弹幕那样单句散抽：字幕是台词，单句抽出来没有上下文；连续 2-3 句才看得懂那段在干嘛。
+ * 为什么按字幕自己的时间轴切而不是视频时长：很多视频的字幕只覆盖一部分，
+ * 按视频时长切会有整段落在没字幕的地方。
+ */
+function sampleSubtitles(list, limit) {
+  if (!list.length || limit <= 0) return { lines: [], segments: 0, sampled: false };
+  if (list.length <= limit) return { lines: list.slice(), segments: 1, sampled: false };
+  const perSeg = limit >= 6 ? 3 : 2;
+  const segs = Math.max(1, Math.min(Math.floor(limit / perSeg), list.length));
+  const from = Number(list[0]?.from ?? 0);
+  const last = list[list.length - 1];
+  const to = Number(last?.to ?? last?.from ?? from);
+  const span = Math.max(0, to - from);
+  const out = [];
+  const seen = new Set();
+  for (let i = 0; i < segs && out.length < limit; i += 1) {
+    // 段首均摊到「开头 → 结尾」之间：最后一段贴着结尾，不然 10 分钟的视频最后一抽只到 7:30
+    const denom = segs > 1 ? segs - 1 : 1;
+    const target = from + (span * i) / denom;
+    let idx = list.findIndex((x) => Number(x.from ?? 0) >= target - 0.001);
+    if (idx < 0) idx = list.length - 1;
+    idx = Math.min(idx, Math.max(0, list.length - perSeg));
+    for (let k = 0; k < perSeg && idx + k < list.length && out.length < limit; k += 1) {
+      const line = list[idx + k];
+      const key = `${line.from}|${line.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(line);
+    }
+  }
+  out.sort((a, b) => a.from - b.from);
+  return { lines: out, segments: segs, sampled: true };
+}
+
+/** 字幕总字数上限：超了就按条数匀着截断，保住「覆盖到结尾」，而不是把后半段整段砍掉。 */
+function capSubtitleChars(list, maxChars) {
+  const cap = Math.max(200, Number(maxChars) || 1500);
+  const count = (arr) => arr.reduce((n, x) => n + [...String(x.text ?? '')].length, 0);
+  if (count(list) <= cap) return { lines: list, chars: count(list), truncated: false };
+  const allowance = Math.max(12, Math.floor(cap / Math.max(1, list.length)));
+  const lines = list.map((x) => ({ ...x, text: cutChars(String(x.text ?? ''), allowance) }));
+  return { lines, chars: count(lines), truncated: true };
+}
 
 /** 弹幕里同名刷屏太多：按时间均匀抽，再按文字去重。 */
 function sampleDanmaku(list, limit) {

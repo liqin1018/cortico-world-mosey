@@ -758,6 +758,8 @@ export class DouyinBrowser {
       });
       this.context = context;
       this.headless = headless !== false;
+      // 上次进程被强杀、cookie 没来得及落盘时，用备份补一次（缺 sessionid 才补）
+      await this.restoreCookies().catch(() => {});
       return context;
     })()
       .catch((error) => {
@@ -1109,6 +1111,60 @@ export class DouyinBrowser {
     return null;
   }
 
+  get cookieFile() {
+    return path.join(this.dataDir, 'stroll', 'douyin-cookies.json');
+  }
+
+  /**
+   * 把当前登录态另存一份到磁盘。
+   * profile 里的 Cookies 由 Chromium 自己管：进程被强杀（reapOrphans 用的是 Stop-Process -Force）、
+   * 或者没来得及 flush 时，最近轮换过的 sessionid 会丢，下次启动就变成「未登录」——
+   * 表现出来就是每隔几个小时要重新扫码。有这份备份就能在启动时补回去。
+   */
+  async saveCookies({ force = false } = {}) {
+    if (!this.context) return 0;
+    const now = Date.now();
+    if (!force && this.cookiesSavedAt && now - this.cookiesSavedAt < 10 * 60 * 1000) return 0;
+    this.cookiesSavedAt = now;
+    const list = await this.context.cookies().catch(() => []);
+    const useful = list.filter((c) => /(^|\.)(douyin|bytedance|amemv|snssdk)\.(com|cn)$/i.test(String(c.domain ?? '')));
+    if (!useful.length) return 0;
+    try {
+      fs.mkdirSync(path.dirname(this.cookieFile), { recursive: true });
+      fs.writeFileSync(this.cookieFile, JSON.stringify({ at: new Date(now).toISOString(), cookies: useful }), { mode: 0o600 });
+    } catch {
+      return 0;
+    }
+    return useful.length;
+  }
+
+  /** 启动时把备份补回 profile；只在缺 sessionid 时补，别覆盖页面刚写进去的新 cookie。 */
+  async restoreCookies() {
+    if (!this.context) return 0;
+    let saved = null;
+    try {
+      saved = JSON.parse(fs.readFileSync(this.cookieFile, 'utf8'));
+    } catch {
+      return 0;
+    }
+    const cookies = Array.isArray(saved?.cookies) ? saved.cookies : [];
+    if (!cookies.length) return 0;
+    const now = Date.now();
+    const live = await this.context.cookies().catch(() => []);
+    const alive = live.some(
+      (c) => (c.name === 'sessionid' || c.name === 'sid_tt') && (!c.expires || c.expires < 0 || c.expires * 1000 > now),
+    );
+    if (alive) return 0;
+    // 过期的丢掉；session cookie（expires<=0）补一个 30 天，免得下次又被当成会话 cookie 丢掉
+    const fixed = cookies
+      .filter((c) => !c.expires || c.expires <= 0 || c.expires * 1000 > now)
+      .map((c) => ({ ...c, expires: c.expires && c.expires > 0 ? c.expires : Math.floor(now / 1000) + 30 * 86400 }));
+    if (!fixed.length) return 0;
+    await this.context.addCookies(fixed).catch(() => {});
+    this.log?.info?.('stroll douyin cookies restored', { n: fixed.length, from: saved.at });
+    return fixed.length;
+  }
+
   async login() {
     return this.serialize(async () => {
       await this.launch({ headless: false, force: true });
@@ -1136,15 +1192,28 @@ export class DouyinBrowser {
     this.loginPoller = setInterval(async () => {
       try {
         if (!this.context) return;
+        /**
+         * 每次都要重新问一次服务端。
+         * sessionAlive 有 5 分钟缓存：扫码之前面板查过一次「未登录」，这个 false 会被缓存住，
+         * 扫完码 isLoggedIn 仍然返回 false，于是白白等到缓存过期才收窗——
+         * 这就是「登录完了那个网页还挂着好久」的真正原因。
+         */
+        this.sessionOkAt = 0;
         if (await this.isLoggedIn()) {
           this.markLoggedIn();
           clearInterval(this.loginPoller);
           this.loginPoller = null;
-          // 顺手记一下「现在登的是哪个号」，面板就能显示昵称、也能发现和主人是同一个号
-          const self = await this.selfProfile().catch(() => null);
-          if (self?.secUid) this.onSelf?.(self);
+          /**
+           * 收窗要快：以前这里先 `selfProfile()`（另开一页读昵称，几秒到十几秒），
+           * 读完才 close，主人在桌面上看着一个登录窗挂在那一动不动。
+           * 昵称/uid 其实 sessionAlive() 已经顺手填好了，不用再跑一趟。
+           */
+          await this.saveCookies({ force: true }).catch(() => {});
           await this.close();
-          this.log?.info?.('stroll: 抖音登录成功，已切回后台');
+          // 收窗后别留着「未登录」的旧缓存，不然面板还要再等 5 分钟才变绿
+          this.sessionOk = true;
+          this.sessionOkAt = Date.now();
+          this.log?.info?.('stroll: 抖音登录成功，已切回后台', { who: this.selfName || '' });
         } else if (Date.now() - started > 5 * 60 * 1000) {
           clearInterval(this.loginPoller);
           this.loginPoller = null;
@@ -1155,7 +1224,7 @@ export class DouyinBrowser {
       } catch {
         // 下一轮再看
       }
-    }, 2500);
+    }, 1200);
   }
 
   /**
@@ -1182,13 +1251,27 @@ export class DouyinBrowser {
       })
       .catch(() => ({ code: -1, name: '', uid: '' }));
     const code = res?.code ?? -1;
-    // 8 = 用户未登录；-1 是没问到，别拿它当结论
-    if (code === -1) return null;
     if (res.name) this.selfName = res.name;
     if (res.uid) this.selfUid = res.uid;
-    this.sessionOk = code === 0;
-    this.sessionOkAt = now;
-    return this.sessionOk;
+    /**
+     * 只有下面三种结论：
+     *   0    → 活着
+     *   8    → 真的未登录（要重新扫码）
+     *   其它 → 不知道（-1 没问到；2154/2483 是风控/需要验证）
+     * 以前把「其它」一律当成掉线，结果风控一来面板就显示未登录，
+     * 主人白扫一次码，过一会儿又好了——「每隔几小时掉线」有一半是这个误报。
+     */
+    if (code === 0) {
+      this.sessionOk = true;
+      this.sessionOkAt = now;
+      return true;
+    }
+    if (code === 8) {
+      this.sessionOk = false;
+      this.sessionOkAt = now;
+      return false;
+    }
+    return null;
   }
 
   /** 她自己这个号的昵称（群里用来区分「谁说的」，拿不到就空串）。 */
@@ -6871,6 +6954,8 @@ export class DouyinBrowser {
     if (this.closeTimer) clearTimeout(this.closeTimer);
     this.closeTimer = null;
     this.holdOpen = false;
+    // 关窗之前先备份登录态：进程被强杀时 Chromium 不一定来得及把 cookie 落盘
+    await this.saveCookies({ force: true }).catch(() => {});
     await this.closeWatch().catch(() => {});
     await this.page?.close().catch(() => {});
     this.page = null;

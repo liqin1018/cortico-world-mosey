@@ -1295,6 +1295,47 @@ world.running = prevRunningM;
 world.cfg.bilibili = prevCfgM.bilibili;
 world.cfg.mentionWatch = prevCfgM.mentionWatch;
 
+/* ---------------- 抖音登录态：误报与备份 ---------------- */
+const prevDyPage = world.douyin.page;
+const pageOf = (code) => ({
+  isClosed: () => false,
+  url: () => 'https://www.douyin.com/jingxuan',
+  evaluate: async () => ({ code, name: '', uid: '' }),
+});
+world.douyin.page = pageOf(0);
+world.douyin.sessionOkAt = 0;
+check('session 活着（code 0）', (await world.douyin.sessionAlive({ force: true })) === true);
+world.douyin.page = pageOf(8);
+world.douyin.sessionOkAt = 0;
+check('code 8 才算真掉线', (await world.douyin.sessionAlive({ force: true })) === false);
+world.douyin.page = pageOf(2154);
+world.douyin.sessionOkAt = 0;
+check('风控码 2154 不当作掉线（以前会误报未登录）', (await world.douyin.sessionAlive({ force: true })) === null);
+world.douyin.page = prevDyPage;
+
+const prevDyCtx = world.douyin.context;
+let dyStore = [];
+world.douyin.context = {
+  cookies: async () => dyStore,
+  addCookies: async (list) => {
+    dyStore = list.slice();
+  },
+};
+world.douyin.cookiesSavedAt = 0;
+dyStore = [{ name: 'sessionid', value: 'x', domain: '.douyin.com', path: '/', expires: -1 }];
+const savedN = await world.douyin.saveCookies({ force: true });
+check('抖音登录态会备份到磁盘', savedN >= 1 && fs.existsSync(world.douyin.cookieFile), String(savedN));
+dyStore = [];
+const restoredN = await world.douyin.restoreCookies();
+check(
+  '缺 sessionid 时用备份补回来（会话 cookie 补成 30 天）',
+  restoredN >= 1 && dyStore.some((c) => c.name === 'sessionid' && c.expires > 0),
+  String(restoredN),
+);
+dyStore = [{ name: 'sessionid', value: 'y', domain: '.douyin.com', path: '/', expires: Math.floor(Date.now() / 1000) + 86400 }];
+check('本地还有 sessionid 就不覆盖', (await world.douyin.restoreCookies()) === 0);
+world.douyin.context = prevDyCtx;
+
 /* ---------------- 一起看主动说话 / 后台看完说一句 ---------------- */
 check('一起看解说默认值', DEFAULTS.watchTalk === true && DEFAULTS.watchLines === 2 && DEFAULTS.openTalk === false);
 const prevWatch = world.watch;

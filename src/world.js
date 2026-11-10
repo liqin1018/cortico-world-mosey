@@ -1239,6 +1239,9 @@ export class StrollWorld {
       const health = await this.douyin.watchHealth?.().catch(() => null);
       if (health) await this.repairWatch(health).catch(() => {});
     }
+    // 每 10 分钟把抖音登录态备份一次（内部自己节流）：
+    // 进程被强杀时 Chromium 不一定来得及把 cookie 落盘，丢了就得重新扫码
+    if (useDy) this.douyin.saveCookies?.().catch(() => {});
     // 群聊：观察器掉了就补挂（30 秒最多试一次）。
     // 群名留空时靠自动识别；每 3 分钟滚动会话列表做一次深度读取，
     // 这样刚被拉进的新群不用等旧名单过期就能被发现。

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createRequire } from 'node:module';
 import { cutChars, formatDuration, humanPause, imageMimeOf, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
+import { loadPlaywright } from './browser.js';
 
 const ORIGIN = 'https://www.douyin.com';
 
@@ -690,36 +690,16 @@ export class DouyinBrowser {
    * 依次尝试：环境变量 → 插件自己的依赖 → Coopanion 扩展目录里已有的 playwright-core。
    * link: 安装时依赖不一定被 hoist 到插件目录，这个兜底能少一堆“浏览器没起来”。
    */
+  /** 复用 src/browser.js 的共享实现（B站抽帧也要用），错误码仍按抖音这边抛。 */
   async loadPlaywright() {
-    if (process.env.STROLL_PLAYWRIGHT) return import(process.env.STROLL_PLAYWRIGHT);
     try {
-      return await import('playwright-core');
+      return await loadPlaywright(this.dataDir);
     } catch {
-      // 继续找宿主目录
+      throw new DouyinError(
+        'BROWSER_DEP',
+        '找不到 playwright-core：在插件目录执行 corepack pnpm install，或在扩展目录重装依赖。',
+      );
     }
-    const require = createRequire(import.meta.url);
-    const extensions = path.join(this.dataDir, '..', '..', '..', 'extensions');
-    const candidates = [extensions, process.cwd()];
-    // pnpm 的依赖在 .pnpm 里，不一定 hoist 到 node_modules 根
-    try {
-      const pnpm = path.join(extensions, 'node_modules', '.pnpm');
-      for (const name of fs.readdirSync(pnpm)) {
-        if (name.startsWith('playwright-core@')) candidates.push(path.join(pnpm, name, 'node_modules'));
-      }
-    } catch {
-      // 没有 .pnpm 就只试普通目录
-    }
-    for (const dir of candidates) {
-      try {
-        return require(require.resolve('playwright-core', { paths: [dir] }));
-      } catch {
-        // 换下一个
-      }
-    }
-    throw new DouyinError(
-      'BROWSER_DEP',
-      '找不到 playwright-core：在插件目录执行 corepack pnpm install，或在扩展目录重装依赖。',
-    );
   }
 
   /**

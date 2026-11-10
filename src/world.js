@@ -3426,7 +3426,9 @@ export class StrollWorld {
           })
           .catch(() => null);
       }
-      return JSON.stringify({
+      // 抽帧：B站用进度条预览图，不用登录、不开播放页；没有就如实说，不硬凑
+      const shots = bvid && frames > 0 ? await this.bili.framesOf(bvid, frames).catch(() => []) : [];
+      const body = JSON.stringify({
         notice: CONTENT_NOTICE,
         ok: true,
         ...detail,
@@ -3439,9 +3441,27 @@ export class StrollWorld {
               mediaNote: this.mediaNoteOf(media, at),
             }
           : {}),
+        ...(frames > 0
+          ? {
+              framesNote: shots.length
+                ? `附了 ${shots.length} 张画面（约 ${shots.map((s) => clockText(s.at)).join(' / ')}），` +
+                  '是 B站进度条的缩略图（160×90），只看得出画面大概在干嘛，看不清字。'
+                : '这条没拿到预览图（有些视频/番剧不提供），所以看不到画面。',
+            }
+          : {}),
         ...(this.cfg.openTalk === true ? { followUp: '看完用一两句跟主人说说你的反应，别只复述简介。' } : {}),
         window: '后台看的，没有开网页。要一起看就在面板点「一起看」。',
       });
+      if (!shots.length) return body;
+      return {
+        text: body,
+        blobs: shots.map((s, i) => ({
+          bytes: s.bytes,
+          mime: 'image/jpeg',
+          name: `bili-${detail.id}-${Math.round(s.at)}s.jpg`,
+          fallbackText: `B站画面 约 ${clockText(s.at)}（第 ${i + 1} 张，缩略图）`,
+        })),
+      };
     }
 
     if (platform === 'douyin') {

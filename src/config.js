@@ -562,7 +562,9 @@ const VIEWING = {
       [P + 'framesPerOpen']: {
         type: 'integer',
         title: '看视频抽几帧',
-        description: '0 最省；1 帧约 500 token。',
+        description:
+          'B站用进度条缩略图（160×90，不用登录、不开播放页，只看得出画面大概在干嘛）；' +
+          '抖音用播放页截图。0 最省；1 帧约 500 token。',
         minimum: 0,
         maximum: 3,
         'x-suffix': ' 帧',

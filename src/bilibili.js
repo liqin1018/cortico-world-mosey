@@ -15,6 +15,7 @@ import {
   truncate,
   uuid,
 } from './util.js';
+import { launchHeadless } from './browser.js';
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -723,6 +724,119 @@ export class Bilibili {
       out2.push(line);
     }
     return out2;
+  }
+
+  /**
+   * B站抽帧：走播放器的「进度条预览图」接口（videoshot）。
+   * 不用登录、不用开播放页：一次接口给一张 10×10 的精灵图 + 每格的秒数，
+   * 按时间挑最近的一格裁出来。分辨率只有 160×90，够看「画面大概在干嘛」，
+   * 看不清字和细节——要更清楚只能开播放页截图，那样要登录态还慢，先不做。
+   */
+  async framesOf(idOrUrl, n = 1) {
+    const v = await this.view(idOrUrl);
+    if (!v.cid) throw new BiliError('NO_CID', '这条视频拿不到 cid，取不了画面');
+    const sheet = await this.storyboard(v.aid, v.cid);
+    if (!sheet) throw new BiliError('NO_FRAME', '这条视频没有进度条预览图');
+    const count = Math.min(3, Math.max(1, Math.round(Number(n) || 1)));
+    const out = [];
+    for (let i = 0; i < count; i += 1) {
+      // 均匀取：1 帧取中间，2 帧取 1/3、2/3，3 帧取 1/4、2/4、3/4
+      const ratio = (i + 1) / (count + 1);
+      const slot = Math.min(sheet.index.length - 1, Math.round(ratio * (sheet.index.length - 1)));
+      const cell = sheet.cellAt(sheet.index[slot] ?? 0);
+      const bytes = await this.cropSprite(cell).catch(() => null);
+      if (bytes) out.push({ at: cell.at, bytes });
+    }
+    return out;
+  }
+
+  /** 预览图索引（按 cid 缓存 10 分钟）。index 里的值就是每一帧的时间（秒）。 */
+  async storyboard(aid, cid) {
+    const key = `sb:${cid}`;
+    const hit = this.mediaCache.get(key);
+    if (hit?.sheet && Date.now() - hit.at < 10 * 60 * 1000) return hit.sheet;
+    const data = await this.request('/x/player/videoshot', { aid, cid, index: 1 }, { cacheMs: 0 }).catch(() => null);
+    const images = (data?.image ?? []).map((u) => (String(u).startsWith('//') ? `https:${String(u)}` : String(u)));
+    const index = (data?.index ?? []).map((x) => Number(x) || 0);
+    if (!images.length || !index.length) return null;
+    const cols = Math.max(1, Number(data.img_x_len) || 10);
+    const w = Math.max(1, Number(data.img_x_size) || 160);
+    const h = Math.max(1, Number(data.img_y_size) || 90);
+    const per = cols * Math.max(1, Number(data.img_y_len) || 10);
+    const sheet = {
+      images,
+      cols,
+      w,
+      h,
+      index,
+      /** 第 sec 秒那一帧：落在第几张图、哪一格。长视频会有多张图，index 是跨图连着的。 */
+      cellAt: (sec) => {
+        let best = 0;
+        for (let i = 1; i < index.length; i += 1) {
+          if (Math.abs(index[i] - sec) < Math.abs(index[best] - sec)) best = i;
+        }
+        const page = Math.floor(best / per);
+        const local = best % per;
+        return {
+          at: index[best] ?? sec,
+          url: images[page] ?? images[0],
+          x: (local % cols) * w,
+          y: Math.floor(local / cols) * h,
+          w,
+          h,
+        };
+      },
+    };
+    this.mediaCache.set(key, { at: Date.now(), sheet });
+    return sheet;
+  }
+
+  /**
+   * 裁一格。没有图片库，就借无头浏览器：把精灵图铺上去，截视口那么大一块。
+   * 浏览器懒启动、闲置 3 分钟自己关，不常驻。
+   */
+  async cropSprite(cell) {
+    const page = await this.spritePage();
+    const raw = await this.fetchRaw(cell.url, { binary: true });
+    if (!raw?.length) return null;
+    const b64 = Buffer.from(raw).toString('base64');
+    await page.setViewportSize({ width: cell.w, height: cell.h });
+    await page.setContent(
+      `<style>html,body{margin:0;padding:0;background:#000;overflow:hidden}` +
+        `img{position:absolute;left:${-cell.x}px;top:${-cell.y}px}</style>` +
+        `<img src="data:image/jpeg;base64,${b64}">`,
+      { waitUntil: 'load' },
+    );
+    return await page.screenshot({ type: 'jpeg', quality: 62, clip: { x: 0, y: 0, width: cell.w, height: cell.h } });
+  }
+
+  async spritePage() {
+    if (this._spritePage && !this._spritePage.isClosed()) {
+      clearTimeout(this._spriteIdle);
+      this._spriteIdle = this.spriteIdleTimer();
+      return this._spritePage;
+    }
+    const browser = await launchHeadless(this.dataDir);
+    const page = await browser.newPage({ viewport: { width: 160, height: 90 }, locale: 'zh-CN' });
+    this._spriteBrowser = browser;
+    this._spritePage = page;
+    this._spriteIdle = this.spriteIdleTimer();
+    return page;
+  }
+
+  spriteIdleTimer() {
+    const timer = setTimeout(() => this.closeSprite(), 3 * 60 * 1000);
+    timer.unref?.();
+    return timer;
+  }
+
+  async closeSprite() {
+    clearTimeout(this._spriteIdle);
+    this._spriteIdle = null;
+    const browser = this._spriteBrowser;
+    this._spriteBrowser = null;
+    this._spritePage = null;
+    await browser?.close().catch(() => {});
   }
 
   /** 弹幕：comment.bilibili.com/{cid}.xml 是 raw-deflate 的 XML，解压后按 <d p="..."> 读。 */

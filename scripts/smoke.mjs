@@ -1161,6 +1161,7 @@ world.bili.fetchRaw = oldFetchRawMedia;
 
 const prevBiliOpen2 = world.bili.open;
 const prevBiliMedia2 = world.bili.mediaText;
+const prevBiliFrames = world.bili.framesOf;
 let mediaArg = null;
 world.bili.open = async () => ({
   kind: 'video',
@@ -1180,14 +1181,25 @@ world.bili.mediaText = async (id, opts) => {
     coverage: { total: 320, picked: 1, segments: 1, sampled: false, chars: 3, truncated: false, from: 330, to: 332 },
   };
 };
-const atOpen = await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', at: '5:30' });
+world.bili.framesOf = async () => [{ at: 120, bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) }];
+const atOpen = await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', at: '5:30', frames: 1 });
 const atBody = JSON.parse(typeof atOpen === 'string' ? atOpen : atOpen.text);
 check('at 能解析成秒并传给字幕接口', mediaArg?.around === 330, JSON.stringify(mediaArg));
 check('返回里标明读的是哪一段', atBody.at === '5:30' && /5:30/.test(String(atBody.atNote)), JSON.stringify(atBody.atNote));
+check(
+  'B站抽帧作为附件返回',
+  !!atOpen?.blobs?.length && atOpen.blobs[0].mime === 'image/jpeg',
+  JSON.stringify(atOpen?.blobs?.[0]?.name),
+);
 const badAt = JSON.parse(await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', at: 'abc' }));
 check('at 写错会明确报错', badAt.ok === false && /at 要写成/.test(badAt.error), badAt.error);
+world.bili.framesOf = async () => [];
+const noFrame = await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', frames: 1 });
+const noFrameBody = JSON.parse(typeof noFrame === 'string' ? noFrame : noFrame.text);
+check('没有预览图时如实说明', /没拿到预览图/.test(String(noFrameBody.framesNote)), String(noFrameBody.framesNote));
 world.bili.open = prevBiliOpen2;
 world.bili.mediaText = prevBiliMedia2;
+world.bili.framesOf = prevBiliFrames;
 
 /* ---------------- 一起看主动说话 / 后台看完说一句 ---------------- */
 check('一起看解说默认值', DEFAULTS.watchTalk === true && DEFAULTS.watchLines === 2 && DEFAULTS.openTalk === false);

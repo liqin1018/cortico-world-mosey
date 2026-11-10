@@ -25,7 +25,13 @@ export const TOOL_DECLS = [
         chars: { type: 'integer', minimum: 200, maximum: 2000, description: 'read 一次读多少字，默认 900。' },
         text: { type: 'string', description: 'note 用：要记下来的那句摘抄。' },
         tag: { type: 'string', description: 'stickers 用：只看带这个标签的表情包。' },
-        frames: { type: 'integer', minimum: 0, maximum: 3, description: '抖音抽几帧；默认 0，最省 token。' },
+        frames: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 3,
+          description:
+            'open 用：抽几帧画面。B站用进度条缩略图（160×90，不用登录），抖音用播放页截图。默认 0，最省 token。',
+        },
         at: {
           type: ['string', 'integer'],
           description:

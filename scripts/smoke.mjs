@@ -1387,22 +1387,7 @@ check(
     shareCalls.length === 0,
 );
 
-const prevCard = world.douyin.shareCardTo;
-world.cfg.shareStyle = 'card';
-world.douyin.shareCardTo = async () => ({ ok: true, via: 'card', panel: '[data-e2e="video-player-share"]' });
-world.douyin.open = async () => {
-  throw new Error('卡片成功时不该再走截图');
-};
-shareCalls.length = 0;
-const cardShot = await world.shareDouyinLink('阿柚', '快看 https://www.douyin.com/video/7692378744715259129');
-check(
-  '「真分享卡」成功时不再截图',
-  cardShot?.via === 'card' && shareCalls.length === 1 && shareCalls[0][0] === 'text',
-  JSON.stringify(shareCalls).slice(0, 120),
-);
-
-// 卡片失败 → 自动退回「画面 + 标题」
-world.douyin.shareCardTo = async () => ({ ok: false, step: 'no-panel' });
+world.cfg.shareStyle = 'image';
 world.douyin.open = async () => ({
   id: '7692378744715259129',
   title: '上海街拍｜香香鱼',
@@ -1414,12 +1399,11 @@ world.douyin.ownerChat = async () => ({ page: {}, input: {}, via: 'chat' });
 shareCalls.length = 0;
 const fellBack = await world.shareDouyinLink('阿柚', '看 https://www.douyin.com/video/7692378744715259129');
 check(
-  '卡片失败自动退回「画面 + 标题」',
+  '默认「画面 + 标题」先发图',
   fellBack?.via === 'share' && shareCalls[0]?.[0] === 'img',
   JSON.stringify(shareCalls).slice(0, 120),
 );
 world.cfg.shareStyle = 'image';
-world.douyin.shareCardTo = prevCard;
 
 // 核实不到主人会话时：不发图（宁可少一张，也不能打进群里）
 world.douyin.ownerChat = async () => null;

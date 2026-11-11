@@ -42,8 +42,7 @@ export const STROLL = {
     }
     if (kind === 'stroll-share-style') {
       return [
-        { value: 'image', label: zh ? '画面 + 标题（稳，默认）' : 'Frame + title (stable)' },
-        { value: 'card', label: zh ? '真分享卡（实验，可能失效）' : 'Real share card (experimental)' },
+        { value: 'image', label: zh ? '画面 + 标题（推荐）' : 'Frame + title (recommended)' },
         { value: 'text', label: zh ? '只发链接' : 'Plain link' },
       ];
     }

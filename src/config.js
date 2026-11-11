@@ -760,9 +760,9 @@ const MESSAGES = {
         title: '分享视频怎么发',
         description:
           '她给主人发抖音视频时的样子。' +
-          '「画面 + 标题」：先发一张视频画面，再发标题和链接（稳，默认）。' +
-          '「真分享卡」：模拟抖音的分享面板发卡片（实验性，抖音改版就可能失效，失效时自动退回「画面 + 标题」）。' +
-          '「只发链接」：就是一段纯文字链接。',
+          '「画面 + 标题」：先发一张视频画面，再发标题和链接（推荐）。' +
+          '「只发链接」：就是一段纯文字链接。' +
+          '注：抖音网页版没有「分享到私信」的入口（实测那个按钮是隐藏占位），所以发不了原生分享卡。',
         'x-options': 'stroll-share-style',
         'x-hot': true,
       },
@@ -913,7 +913,7 @@ export const POLICY_FIELDS = {
   watchPollSec: { type: 'int', min: 5, max: 120 },
   dmWatch: { type: 'boolean' },
   mentionWatch: { type: 'boolean' },
-  shareStyle: { type: 'enum', values: ['card', 'image', 'text'] },
+  shareStyle: { type: 'enum', values: ['image', 'text'] },
   dmPollSec: { type: 'int', min: 3, max: 300 },
   booksDir: { type: 'string', max: 400 },
   groupWatch: { type: 'boolean' },

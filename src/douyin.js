@@ -1253,7 +1253,9 @@ export class DouyinBrowser {
          * 这就是「登录完了那个网页还挂着好久」的真正原因。
          */
         this.sessionOkAt = 0;
-        if (await this.isLoggedIn()) {
+        // 刚打开的前两秒不判定：页面还在跳转，抢着查只会拿到「不知道」
+        if (Date.now() - started < 2500) return;
+        if (await this.isLoggedIn({ strict: true })) {
           this.markLoggedIn();
           clearInterval(this.loginPoller);
           this.loginPoller = null;
@@ -1262,12 +1264,16 @@ export class DouyinBrowser {
            * 读完才 close，主人在桌面上看着一个登录窗挂在那一动不动。
            * 昵称/uid 其实 sessionAlive() 已经顺手填好了，不用再跑一趟。
            */
+          // 让页面把登录后的 cookie 落地，再备份一次（扫码刚通过时立刻读可能还是旧的）
+          await this.page?.waitForTimeout?.(800).catch(() => {});
+          await this.saveCookies({ force: true }).catch(() => {});
+          await this.page?.waitForTimeout?.(200).catch(() => {});
           await this.saveCookies({ force: true }).catch(() => {});
           await this.close();
           // 收窗后别留着「未登录」的旧缓存，不然面板还要再等 5 分钟才变绿
           this.sessionOk = true;
           this.sessionOkAt = Date.now();
-          this.log?.info?.('stroll: 抖音登录成功，已切回后台', { who: this.selfName || '' });
+          this.log?.info?.('stroll: 抖音登录成功，已切回后台', { who: this.selfName || '', uid: this.selfUid || '' });
         } else if (Date.now() - started > 5 * 60 * 1000) {
           clearInterval(this.loginPoller);
           this.loginPoller = null;
@@ -1335,7 +1341,14 @@ export class DouyinBrowser {
     return this.selfName || '';
   }
 
-  async isLoggedIn() {
+  /**
+   * strict=true：只认服务端**明确**说在线（sessionAlive === true）。
+   *
+   * 扫码轮询必须用 strict：页面还在跳转时 fetch 会失败，sessionAlive 返回 null（「不知道」），
+   * 而宽松模式把 null 当成了已登录 → 窗口刚打开就自己关掉，主人根本没扫到。
+   * 2026-11-11 那一串「登录成功 { who: '' }」就是这么来的（昵称空 = 服务端其实没认）。
+   */
+  async isLoggedIn({ strict = false } = {}) {
     if (!this.context) return !!this.savedLogin();
     const cookies = await this.context.cookies(ORIGIN).catch(() => []);
     const ok = cookies.some((c) => c.name === 'sessionid' || c.name === 'sid_tt');
@@ -1343,7 +1356,8 @@ export class DouyinBrowser {
     // cookie 在不代表服务端还认：被踢之后必须让主人重新扫码，而不是装作已登录
     const alive = await this.sessionAlive().catch(() => null);
     if (alive === false) return false;
-    this.markLoggedIn();
+    if (strict && alive !== true) return false;
+    if (alive === true) this.markLoggedIn();
     return ok;
   }
 

@@ -4421,6 +4421,11 @@ export class DouyinBrowser {
     }
     const f = await bodyFlags(page);
     if (f.risk) throw this.riskError(f, '发私信');
+    /**
+     * 登录态失效时，抖音照样会把输入框清空（还弹个登录提示），
+     * 只看「输入框空了」就会误报「发出去了」。这里必须先拦住。
+     */
+    if (f.login) throw new DouyinError('LOGIN_REQUIRED', '抖音登录态失效了，这条私信没发出去');
     // 记一笔自己刚发出去的话：群里用来兜底区分「我发的」和「别人发的」
     this.noteSent(text);
     return true;
@@ -6458,7 +6463,18 @@ export class DouyinBrowser {
         }
         await this.sendInChat(page, input, text, { mention });
         this.lastAction = `dm ${who}`;
-        return { ok: true, sent: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
+        /**
+         * 发完再回读一眼：能读到会话内容、但里面没有刚发的这句 → 大概率被审核/限流吞了，
+         * 别直接报成功（2026-11-11 17:57 那条就是这样：她说发了，主人在抖音里根本没看到）。
+         * 读不到任何消息节点时按「未知」处理，不误报失败。
+         */
+        const stamp = cutChars(String(text ?? '').trim(), 12);
+        const echo = await this.waitThreadHasText(page, stamp, 2200).catch(() => ({ seen: true, readable: false }));
+        if (echo.readable && !echo.seen) {
+          this.log?.info?.('stroll dm unconfirmed', { who, stamp, url: String(page.url?.() ?? '') });
+          return { ok: true, sent: true, confirmed: false, what: '私信', mentioned: mention ? !!this.lastMention : null };
+        }
+        return { ok: true, sent: true, confirmed: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
       } finally {
         this.scheduleClose(60);
       }
@@ -6648,6 +6664,26 @@ export class DouyinBrowser {
    * 这套页面读不到标题（实测 `currentChatTitle` 一直返回空），所以「有没有真的切过去」
    * 只能靠内容变没变来判断——这也是 2.1.2 把主人私信逼进 20 秒慢路的原因。
    */
+  /** 会话里能不能读到这段文字（用于确认消息真的发出去了）。 */
+  async waitThreadHasText(page, stamp, timeout = 2000) {
+    if (!stamp) return { seen: true, readable: false };
+    const deadline = Date.now() + timeout;
+    let readable = false;
+    while (Date.now() < deadline) {
+      const texts = await page
+        .evaluate(() =>
+          Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]'))
+            .slice(-8)
+            .map((n) => String(n.innerText ?? '').replace(/\s+/g, ' ').trim()),
+        )
+        .catch(() => []);
+      if (texts.length) readable = true;
+      if (texts.some((t) => t.includes(stamp))) return { seen: true, readable };
+      await page.waitForTimeout(300).catch(() => {});
+    }
+    return { seen: false, readable };
+  }
+
   async threadFingerprint(page) {
     return await page
       .evaluate(() => {

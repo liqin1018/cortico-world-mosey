@@ -1402,6 +1402,20 @@ check(
   JSON.stringify(shareCalls).slice(0, 120),
 );
 
+/* 点过分享但没确认：不补发画面，只补一句话（否则主人会收到两份） */
+world.douyin.shareCardTo = async () => ({ ok: false, step: 'no-confirm' });
+world.cfg.shareStyle = 'card';
+world.douyin.open = async () => {
+  throw new Error('no-confirm 时不该再截图');
+};
+shareCalls.length = 0;
+const unconfirmed = await world.shareDouyinLink('阿柚', '看 https://www.douyin.com/video/7692378744715259129');
+check(
+  '点了分享但没确认：不再补发画面 + 标题',
+  unconfirmed?.via === 'card-unconfirmed' && shareCalls.every((c) => c[0] !== 'img'),
+  JSON.stringify(shareCalls).slice(0, 120),
+);
+
 world.douyin.shareCardTo = async () => ({ ok: false, step: 'no-panel' });
 world.cfg.shareStyle = 'card';
 world.douyin.open = async () => ({

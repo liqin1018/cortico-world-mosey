@@ -6670,60 +6670,153 @@ export class DouyinBrowser {
   /**
    * 走抖音网页自己的「分享 → 分享给朋友」发一张原生卡片。
    *
-   * 关键点（2026-11-11 实测，别再踩）：
+   * 三条实测结论（2026-11-11，别再踩）：
    *   1. 必须用 `/?modal_id=<id>` 这种「视频浮层」打开。直接开 /video/<id> 是宽版详情页，
-   *      竖排动作列不渲染（`video-player-share` 是 0×0），点了没反应——之前判断「网页版没有分享」
-   *      就是栽在这里。
-   *   2. 浮层页里 `[data-e2e="video-player-share"]` 是可见的（约 58×78），先 hover 再点。
-   *   3. 面板出来后在好友行里点它自己的「分享」按钮，卡片就直接发过去了；
-   *      发完按钮变成「捎句话」，可以拿这个当成功信号。
+   *      竖排动作列不渲染（`video-player-share` 恒为 0×0），点了没反应。
+   *   2. **无头模式渲染不出浮层**（等 40 秒也没有那个按钮）。所以后台运行时另开一个
+   *      「离屏有头窗口」来做，窗口在屏幕外，用户看不见，但渲染和点击都正常。
+   *   3. 首次进浮层会弹「滚轮/键盘上下键…我知道了」引导，它盖住页面，不关掉就点不动——
+   *      之前 no-trigger 有一半是它干的。
    */
   async shareCardTo(name, url) {
     const who = String(name ?? '').trim();
     const id = String(url ?? '').match(/(\d{8,})/)?.[1] ?? '';
     if (!who || !id) return { ok: false, step: 'args' };
-    const ctx = this.context;
-    if (!ctx) return { ok: false, step: 'no-context' };
-    let page = null;
-    try {
-      page = await ctx.newPage();
-      page.setDefaultTimeout(8000);
-      await page
-        .goto(`https://www.douyin.com/?modal_id=${id}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
-        .catch(() => {});
-      // 首次进浮层会有「滚轮/键盘上下键…我知道了」引导，盖住按钮
-      const guide = page.getByText('我知道了', { exact: true }).first();
-      if (await guide.count().catch(() => 0)) {
-        await guide.click({ timeout: 2000 }).catch(() => {});
-        await page.waitForTimeout(400);
+    // 主上下文本来就有头（一起看/扫码登录时）：直接开一页，省一次浏览器启动
+    if (this.context && this.headless !== true) {
+      let page = null;
+      try {
+        page = await this.context.newPage();
+        return await this.shareOnPage(page, who, id);
+      } catch (error) {
+        return { ok: false, step: 'error', reason: String(error?.message ?? error).slice(0, 80) };
+      } finally {
+        await page?.close().catch(() => {});
       }
-      const box = await this.waitShareTrigger(page, 15000);
-      if (!box) return { ok: false, step: 'no-trigger' };
-      const cx = box.x + box.width / 2;
-      const cy = box.y + box.height / 2;
-      await page.mouse.move(cx, cy, { steps: 10 }).catch(() => {});
-      await page.waitForTimeout(600);
-      await page.mouse.click(cx, cy).catch(() => {});
-      if (!(await this.waitSharePanel(page, 6000))) return { ok: false, step: 'no-panel' };
-      const clicked = await this.shareRowClick(page, who);
-      if (!clicked.ok) return { ok: false, step: clicked.step };
-      if (!(await this.waitShareDone(page, who, 5000))) return { ok: false, step: 'no-confirm' };
-      this.log?.info?.('stroll share card ok', { who, id });
-      return { ok: true, via: 'card', id };
+    }
+    return await this.shareInTempWindow(who, id);
+  }
+
+  /**
+   * 后台（无头）时用的离屏有头窗口：独立资料目录 + 从当前上下文/备份注入登录态，做完就关。
+   * 用独立目录是为了不跟主 profile 抢锁，也不会把主人正在用的页面带跑。
+   */
+  async shareInTempWindow(who, id) {
+    const mod = await this.loadPlaywright();
+    const chromium = mod.chromium ?? mod.default?.chromium;
+    const dir = path.join(this.dataDir, 'stroll', 'share-profile');
+    let ctx = null;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      ctx = await chromium.launchPersistentContext(dir, {
+        headless: false,
+        channel: this.channel ?? 'msedge',
+        viewport: { width: 1400, height: 900 },
+        locale: 'zh-CN',
+        timezoneId: 'Asia/Shanghai',
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          '--autoplay-policy=no-user-gesture-required',
+          // 挪到屏幕外：看得见就打扰人了，但必须真渲染，所以不能 headless
+          '--window-position=-2400,-2400',
+          '--window-size=1420,940',
+          '--disable-features=CalculateNativeWinOcclusion',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+        ],
+        ignoreDefaultArgs: ['--enable-automation'],
+      });
+      const cookies = await this.shareCookies();
+      if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
+      const page = await ctx.newPage();
+      const result = await this.shareOnPage(page, who, id);
+      this.log?.info?.('stroll share temp window', { ok: result.ok, step: result.step ?? '' });
+      return result;
     } catch (error) {
-      return { ok: false, step: 'error', reason: String(error?.message ?? error).slice(0, 80) };
+      return { ok: false, step: 'temp-browser', reason: String(error?.message ?? error).slice(0, 80) };
     } finally {
-      await page?.close().catch(() => {});
+      await ctx?.close().catch(() => {});
     }
   }
 
-  /** 等竖排动作列里的分享按钮出现（浮层页首屏要 3-8 秒，元素一开始是 0×0）。 */
-  async waitShareTrigger(page, timeout = 12000) {
+  /** 分享窗口要用的 cookie：优先当前上下文的实时值，没有再用落盘备份。 */
+  async shareCookies() {
+    const pick = (list) =>
+      (Array.isArray(list) ? list : [])
+        .filter((c) => /(^|\.)(douyin|bytedance|amemv|snssdk)\.(com|cn)$/i.test(String(c?.domain ?? '')))
+        .map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path ?? '/',
+          expires: c.expires && c.expires > 0 ? c.expires : undefined,
+          httpOnly: !!c.httpOnly,
+          secure: !!c.secure,
+          sameSite: c.sameSite ?? 'Lax',
+        }));
+    const live = this.context ? await this.context.cookies().catch(() => []) : [];
+    const fromLive = pick(live);
+    if (fromLive.length) return fromLive;
+    try {
+      const saved = JSON.parse(fs.readFileSync(this.cookieFile, 'utf8'));
+      return pick(saved?.cookies ?? []);
+    } catch {
+      return [];
+    }
+  }
+
+  /** 在一个页面上把整套分享流程走完。 */
+  async shareOnPage(page, who, id) {
+    page.setDefaultTimeout(8000);
+    await page
+      .goto(`https://www.douyin.com/?modal_id=${id}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      .catch(() => {});
+    const box = await this.waitShareTrigger(page, 20000);
+    if (!box) return { ok: false, step: 'no-trigger' };
+    await page.bringToFront().catch(() => {});
+    let opened = false;
+    for (let i = 0; i < 2 && !opened; i += 1) {
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      await page.mouse.move(cx, cy, { steps: 12 }).catch(() => {});
+      await page.waitForTimeout(600);
+      await page.mouse.click(cx, cy).catch(() => {});
+      opened = await this.waitSharePanel(page, 5000);
+    }
+    if (!opened) return { ok: false, step: 'no-panel' };
+    const clicked = await this.shareRowClick(page, who);
+    if (!clicked.ok) return { ok: false, step: clicked.step };
+    if (!(await this.waitShareDone(page, who, 5000))) return { ok: false, step: 'no-confirm' };
+    this.log?.info?.('stroll share card ok', { who, id });
+    return { ok: true, via: 'card', id };
+  }
+
+  /**
+   * 等竖排里那个分享按钮变得可点。顺便把「我知道了」引导关掉——它盖在页面上，
+   * 不关的话点哪都没反应。
+   */
+  async waitShareTrigger(page, timeout = 20000) {
     const deadline = Date.now() + timeout;
-    const loc = page.locator('[data-e2e="video-player-share"]').first();
     while (Date.now() < deadline) {
-      const box = await loc.boundingBox().catch(() => null);
-      if (box && box.width > 10 && box.height > 10) return box;
+      const guide = page.getByText('我知道了', { exact: true }).first();
+      if (await guide.count().catch(() => 0)) {
+        await guide.click({ timeout: 1200 }).catch(() => {});
+        await page.waitForTimeout(500);
+      }
+      const box = await page
+        .evaluate(() => {
+          const boxes = Array.from(document.querySelectorAll('[data-e2e="video-player-share"]'))
+            .map((el) => {
+              const r = el.getBoundingClientRect();
+              return { x: r.left, y: r.top, width: r.width, height: r.height };
+            })
+            .filter((b) => b.width > 10 && b.height > 30 && b.x > 0 && b.y > 0 && b.y < window.innerHeight);
+          // 信息流里可能有多条视频的按钮，取最靠上的那条（当前播放的）
+          boxes.sort((a, b) => a.y - b.y);
+          return boxes[0] ?? null;
+        })
+        .catch(() => null);
+      if (box) return box;
       await page.waitForTimeout(400).catch(() => {});
     }
     return null;

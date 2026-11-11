@@ -4534,6 +4534,17 @@ export class StrollWorld {
         this.log?.info?.('stroll share card sent', { url: m[0], via: card.via ?? '' });
         return { ok: true, sent: true, via: 'card' };
       }
+      /**
+       * 已经点过「分享」但没等到确认：卡片很可能已经发出去了。
+       * 这时**绝不能**再补一条「画面 + 标题」——主人在 12:37 收到两份就是这么来的。
+       * 只把想说的话补上。
+       */
+      if (card?.step === 'no-confirm') {
+        const said = String(text).replace(m[0], '').trim();
+        if (said) await this.douyin.replyDm(name, said.slice(0, 300), { strict: true, requireTitle: true }).catch(() => {});
+        this.log?.info?.('stroll share card unconfirmed', { url: m[0] });
+        return { ok: true, sent: true, via: 'card-unconfirmed' };
+      }
       this.log?.info?.('stroll share card fallback', { url: m[0], step: card?.step ?? 'unknown' });
     }
     const info = await this.douyin.open(m[0], { frames: 1, keep: 120 }).catch(() => null);

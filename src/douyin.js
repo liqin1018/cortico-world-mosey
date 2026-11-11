@@ -6667,6 +6667,140 @@ export class DouyinBrowser {
     return { page, input, via: 'chat' };
   }
 
+  /**
+   * 走抖音网页自己的「分享 → 分享给朋友」发一张原生卡片。
+   *
+   * 关键点（2026-11-11 实测，别再踩）：
+   *   1. 必须用 `/?modal_id=<id>` 这种「视频浮层」打开。直接开 /video/<id> 是宽版详情页，
+   *      竖排动作列不渲染（`video-player-share` 是 0×0），点了没反应——之前判断「网页版没有分享」
+   *      就是栽在这里。
+   *   2. 浮层页里 `[data-e2e="video-player-share"]` 是可见的（约 58×78），先 hover 再点。
+   *   3. 面板出来后在好友行里点它自己的「分享」按钮，卡片就直接发过去了；
+   *      发完按钮变成「捎句话」，可以拿这个当成功信号。
+   */
+  async shareCardTo(name, url) {
+    const who = String(name ?? '').trim();
+    const id = String(url ?? '').match(/(\d{8,})/)?.[1] ?? '';
+    if (!who || !id) return { ok: false, step: 'args' };
+    const ctx = this.context;
+    if (!ctx) return { ok: false, step: 'no-context' };
+    let page = null;
+    try {
+      page = await ctx.newPage();
+      page.setDefaultTimeout(8000);
+      await page
+        .goto(`https://www.douyin.com/?modal_id=${id}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+        .catch(() => {});
+      // 首次进浮层会有「滚轮/键盘上下键…我知道了」引导，盖住按钮
+      const guide = page.getByText('我知道了', { exact: true }).first();
+      if (await guide.count().catch(() => 0)) {
+        await guide.click({ timeout: 2000 }).catch(() => {});
+        await page.waitForTimeout(400);
+      }
+      const box = await this.waitShareTrigger(page, 15000);
+      if (!box) return { ok: false, step: 'no-trigger' };
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      await page.mouse.move(cx, cy, { steps: 10 }).catch(() => {});
+      await page.waitForTimeout(600);
+      await page.mouse.click(cx, cy).catch(() => {});
+      if (!(await this.waitSharePanel(page, 6000))) return { ok: false, step: 'no-panel' };
+      const clicked = await this.shareRowClick(page, who);
+      if (!clicked.ok) return { ok: false, step: clicked.step };
+      if (!(await this.waitShareDone(page, who, 5000))) return { ok: false, step: 'no-confirm' };
+      this.log?.info?.('stroll share card ok', { who, id });
+      return { ok: true, via: 'card', id };
+    } catch (error) {
+      return { ok: false, step: 'error', reason: String(error?.message ?? error).slice(0, 80) };
+    } finally {
+      await page?.close().catch(() => {});
+    }
+  }
+
+  /** 等竖排动作列里的分享按钮出现（浮层页首屏要 3-8 秒，元素一开始是 0×0）。 */
+  async waitShareTrigger(page, timeout = 12000) {
+    const deadline = Date.now() + timeout;
+    const loc = page.locator('[data-e2e="video-player-share"]').first();
+    while (Date.now() < deadline) {
+      const box = await loc.boundingBox().catch(() => null);
+      if (box && box.width > 10 && box.height > 10) return box;
+      await page.waitForTimeout(400).catch(() => {});
+    }
+    return null;
+  }
+
+  /** 分享面板有没有弹出来（「分享给朋友」是它的标题）。 */
+  async waitSharePanel(page, timeout = 6000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const ok = await page
+        .evaluate(() => String(document.body?.innerText ?? '').includes('分享给朋友'))
+        .catch(() => false);
+      if (ok) return true;
+      await page.waitForTimeout(300).catch(() => {});
+    }
+    return false;
+  }
+
+  /**
+   * 在「分享给朋友」列表里找到昵称正好是 who 的那一行，点它自己那个「分享」按钮。
+   * 只认名字完全一致的行（去掉「在线/分享/捎句话」这些状态词），差一个字都不点——
+   * 点错就是把视频发给别人。
+   */
+  async shareRowClick(page, who) {
+    return await page
+      .evaluate((name) => {
+        const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+        const bare = (t) =>
+          t
+            .split(' ')
+            .filter((x) => x && !/^(在线|分享|捎句话|已分享)$/.test(x))
+            .join(' ');
+        const rows = [];
+        document.querySelectorAll('div').forEach((el) => {
+          const t = clean(el.innerText);
+          if (!t || !/(分享|捎句话|已分享)$/.test(t)) return;
+          const r = el.getBoundingClientRect();
+          if (r.width < 240 || r.width > 440 || r.height < 36 || r.height > 100) return;
+          if (bare(t) !== name) return;
+          rows.push(el);
+        });
+        if (!rows.length) return { ok: false, step: 'no-row' };
+        const row = rows[rows.length - 1];
+        const btn = Array.from(row.querySelectorAll('div,span,button'))
+          .filter((b) => clean(b.innerText) === '分享')
+          .pop();
+        if (!btn) return { ok: false, step: 'no-btn' };
+        const r = btn.getBoundingClientRect();
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        return { ok: true, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      }, who)
+      .catch((error) => ({ ok: false, step: 'eval', reason: String(error?.message ?? '').slice(0, 60) }));
+  }
+
+  /** 发成功的信号：那一行变成「捎句话」，或者出现「分享成功」。 */
+  async waitShareDone(page, who, timeout = 5000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const done = await page
+        .evaluate((name) => {
+          const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+          const t = clean(document.body?.innerText ?? '');
+          if (/分享成功|已分享/.test(t)) return true;
+          return Array.from(document.querySelectorAll('div')).some((el) => {
+            const s = clean(el.innerText);
+            if (!s || s.length > 40) return false;
+            if (!/捎句话/.test(s)) return false;
+            return s.startsWith(name);
+          });
+        }, who)
+        .catch(() => false);
+      if (done) return true;
+      await page.waitForTimeout(400).catch(() => {});
+    }
+    return false;
+  }
+
   /** 发一张表情到某个会话（群名 / 昵称 / 留空 = 当前会话）。 */
   async sendStickerTo(who, { file = '', src = '', label = '' } = {}) {
     const t = await this.chatPageOf(who);

@@ -110,7 +110,7 @@ export const DEFAULTS = {
   /** 有人在评论区 @ 她时，主动叫她一声（B站，5 分钟查一次）。 */
   mentionWatch: true,
   /** 分享抖音视频的方式：image=画面+标题（稳，默认）；card=走分享面板（实验）；text=只发链接。 */
-  shareStyle: 'image',
+  shareStyle: 'card',
   /**
    * 多久兜底看一次私信（秒）。
    * 抖音现在走页面事件通道（新消息一进 DOM 就回调），轮询只是防掉线的兜底，
@@ -760,9 +760,9 @@ const MESSAGES = {
         title: '分享视频怎么发',
         description:
           '她给主人发抖音视频时的样子。' +
-          '「画面 + 标题」：先发一张视频画面，再发标题和链接（推荐）。' +
-          '「只发链接」：就是一段纯文字链接。' +
-          '注：抖音网页版没有「分享到私信」的入口（实测那个按钮是隐藏占位），所以发不了原生分享卡。',
+          '「画面 + 标题」：先发一张视频画面，再发标题和链接（稳，默认）。' +
+          '「真分享卡」：走抖音自己的「分享给朋友」，发原生视频卡片（会多花 5-10 秒；抖音改版时可能失效，失效会自动退回「画面 + 标题」）。' +
+          '「只发链接」：就是一段纯文字链接。',
         'x-options': 'stroll-share-style',
         'x-hot': true,
       },
@@ -913,7 +913,7 @@ export const POLICY_FIELDS = {
   watchPollSec: { type: 'int', min: 5, max: 120 },
   dmWatch: { type: 'boolean' },
   mentionWatch: { type: 'boolean' },
-  shareStyle: { type: 'enum', values: ['image', 'text'] },
+  shareStyle: { type: 'enum', values: ['card', 'image', 'text'] },
   dmPollSec: { type: 'int', min: 3, max: 300 },
   booksDir: { type: 'string', max: 400 },
   groupWatch: { type: 'boolean' },

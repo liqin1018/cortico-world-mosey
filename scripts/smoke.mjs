@@ -1378,7 +1378,7 @@ check(
   (await world.shareDouyinLink('阿柚', 'https://www.douyin.com/video/7691294812246912246')) === null,
 );
 /* ---------------- 分享方式三档（2.6.0） ---------------- */
-check('分享方式默认是「画面 + 标题」', DEFAULTS.shareStyle === 'image');
+check('分享方式默认是「真分享卡」', DEFAULTS.shareStyle === 'card');
 world.cfg.shareStyle = 'text';
 shareCalls.length = 0;
 check(
@@ -1386,6 +1386,40 @@ check(
   (await world.shareDouyinLink('阿柚', '看 https://www.douyin.com/video/7692378744715259129')) === null &&
     shareCalls.length === 0,
 );
+
+/* 真分享卡：成功就不再截图；失败自动退回「画面 + 标题」 */
+const prevCardFn = world.douyin.shareCardTo;
+world.cfg.shareStyle = 'card';
+world.douyin.shareCardTo = async () => ({ ok: true, via: 'card', id: '7692378744715259129' });
+world.douyin.open = async () => {
+  throw new Error('卡片成功时不该再走截图');
+};
+shareCalls.length = 0;
+const cardOk = await world.shareDouyinLink('阿柚', '快看 https://www.douyin.com/video/7692378744715259129');
+check(
+  '真分享卡成功：不发截图，只补一句想说的话',
+  cardOk?.via === 'card' && shareCalls.length === 1 && shareCalls[0][0] === 'text',
+  JSON.stringify(shareCalls).slice(0, 120),
+);
+
+world.douyin.shareCardTo = async () => ({ ok: false, step: 'no-panel' });
+world.cfg.shareStyle = 'card';
+world.douyin.open = async () => ({
+  id: '7692378744715259129',
+  title: '上海街拍｜香香鱼',
+  author: '姬豪',
+  dur: '1:59',
+  frames: [{ at: 60, bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) }],
+});
+shareCalls.length = 0;
+const cardFail = await world.shareDouyinLink('阿柚', '看 https://www.douyin.com/video/7692378744715259129');
+check(
+  '卡片失败自动退回「画面 + 标题」',
+  cardFail?.via === 'share' && shareCalls[0]?.[0] === 'img',
+  JSON.stringify(shareCalls).slice(0, 120),
+);
+world.douyin.shareCardTo = prevCardFn;
+world.cfg.shareStyle = 'image';
 
 world.cfg.shareStyle = 'image';
 world.douyin.open = async () => ({

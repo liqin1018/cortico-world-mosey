@@ -4522,6 +4522,20 @@ export class StrollWorld {
     if (!m) return null;
     const style = String(this.cfg.shareStyle ?? 'image');
     if (style === 'text') return null;
+    if (style === 'card') {
+      /**
+       * 真卡片：用 `?modal_id=` 打开视频浮层 → 点竖排里的分享 → 在「分享给朋友」里点主人那一行。
+       * 这条路依赖抖音的界面，任何一步不通就落回「画面 + 标题」，不丢消息。
+       */
+      const card = await this.douyin.shareCardTo(name, m[0]).catch(() => ({ ok: false, step: 'throw' }));
+      if (card?.ok) {
+        const said = String(text).replace(m[0], '').trim();
+        if (said) await this.douyin.replyDm(name, said.slice(0, 300), { strict: true, requireTitle: true }).catch(() => {});
+        this.log?.info?.('stroll share card sent', { url: m[0], via: card.via ?? '' });
+        return { ok: true, sent: true, via: 'card' };
+      }
+      this.log?.info?.('stroll share card fallback', { url: m[0], step: card?.step ?? 'unknown' });
+    }
     const info = await this.douyin.open(m[0], { frames: 1, keep: 120 }).catch(() => null);
     if (!info?.frames?.length) return null;
     try {

@@ -751,7 +751,7 @@ export class DouyinBrowser {
    * 默认后台（headless）。只有扫码登录和「一起看」才开窗。
    * 模式变了就重开一个上下文，免得把 headless 进程当有头用。
    */
-  async launch({ headless = this.cfg.background !== false, force = false } = {}) {
+  async launch({ headless = this.cfg.background !== false, force = false, offscreen = false } = {}) {
     if (this.context && !force && this.headless === headless) return this.context;
     if (this.context && (force || this.headless !== headless)) await this.close();
     if (this.launching) return this.launching;
@@ -767,6 +767,15 @@ export class DouyinBrowser {
           '--disable-blink-features=AutomationControlled',
           '--autoplay-policy=no-user-gesture-required',
           '--window-size=1460,940',
+          // 分享要真渲染，但又不想弹到用户眼前：窗口挪到屏幕外
+          ...(offscreen
+            ? [
+                '--window-position=-2400,-2400',
+                '--disable-features=CalculateNativeWinOcclusion',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+              ]
+            : []),
         ],
       };
       let context;
@@ -6798,95 +6807,35 @@ export class DouyinBrowser {
    * 三条实测结论（2026-11-11，别再踩）：
    *   1. 必须用 `/?modal_id=<id>` 这种「视频浮层」打开。直接开 /video/<id> 是宽版详情页，
    *      竖排动作列不渲染（`video-player-share` 恒为 0×0），点了没反应。
-   *   2. **无头模式渲染不出浮层**（等 40 秒也没有那个按钮）。所以后台运行时另开一个
-   *      「离屏有头窗口」来做，窗口在屏幕外，用户看不见，但渲染和点击都正常。
-   *   3. 首次进浮层会弹「滚轮/键盘上下键…我知道了」引导，它盖住页面，不关掉就点不动——
-   *      之前 no-trigger 有一半是它干的。
+   *   2. **无头模式渲染不出浮层**（等 40 秒也没有那个按钮）。所以后台运行时要把主浏览器
+   *      临时切成「有头离屏」——但**不能另开浏览器注入同一份 cookie**：同一个 sessionid
+   *      出现在两个浏览器里，抖音会判异常并把旧会话踢掉（2026-11-11 反复掉登录就是这么来的）。
+   *   3. 首次进浮层会弹「滚轮/键盘上下键…我知道了」引导，它盖住页面，不关掉就点不动。
    */
   async shareCardTo(name, url) {
     const who = String(name ?? '').trim();
     const id = String(url ?? '').match(/(\d{8,})/)?.[1] ?? '';
     if (!who || !id) return { ok: false, step: 'args' };
-    // 主上下文本来就有头（一起看/扫码登录时）：直接开一页，省一次浏览器启动
-    if (this.context && this.headless !== true) {
-      let page = null;
-      try {
-        page = await this.context.newPage();
-        return await this.shareOnPage(page, who, id);
-      } catch (error) {
-        return { ok: false, step: 'error', reason: String(error?.message ?? error).slice(0, 80) };
-      } finally {
-        await page?.close().catch(() => {});
+
+    const wasHeadless = this.headless === true;
+    let page = null;
+    try {
+      if (wasHeadless) {
+        // 同一个 profile、同一个会话：关掉无头 → 有头离屏 → 分享 → 再切回无头
+        await this.close();
+        await this.launch({ headless: false, force: true, offscreen: true });
       }
-    }
-    return await this.shareInTempWindow(who, id);
-  }
-
-  /**
-   * 后台（无头）时用的离屏有头窗口：独立资料目录 + 从当前上下文/备份注入登录态，做完就关。
-   * 用独立目录是为了不跟主 profile 抢锁，也不会把主人正在用的页面带跑。
-   */
-  async shareInTempWindow(who, id) {
-    const mod = await this.loadPlaywright();
-    const chromium = mod.chromium ?? mod.default?.chromium;
-    const dir = path.join(this.dataDir, 'stroll', 'share-profile');
-    let ctx = null;
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-      ctx = await chromium.launchPersistentContext(dir, {
-        headless: false,
-        channel: this.channel ?? 'msedge',
-        viewport: { width: 1400, height: 900 },
-        locale: 'zh-CN',
-        timezoneId: 'Asia/Shanghai',
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--autoplay-policy=no-user-gesture-required',
-          // 挪到屏幕外：看得见就打扰人了，但必须真渲染，所以不能 headless
-          '--window-position=-2400,-2400',
-          '--window-size=1420,940',
-          '--disable-features=CalculateNativeWinOcclusion',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding',
-        ],
-        ignoreDefaultArgs: ['--enable-automation'],
-      });
-      const cookies = await this.shareCookies();
-      if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
-      const page = await ctx.newPage();
-      const result = await this.shareOnPage(page, who, id);
-      this.log?.info?.('stroll share temp window', { ok: result.ok, step: result.step ?? '' });
-      return result;
+      const ctx = this.context ?? (await this.launch({ headless: false }));
+      page = await ctx.newPage();
+      return await this.shareOnPage(page, who, id);
     } catch (error) {
-      return { ok: false, step: 'temp-browser', reason: String(error?.message ?? error).slice(0, 80) };
+      return { ok: false, step: 'error', reason: String(error?.message ?? error).slice(0, 80) };
     } finally {
-      await ctx?.close().catch(() => {});
-    }
-  }
-
-  /** 分享窗口要用的 cookie：优先当前上下文的实时值，没有再用落盘备份。 */
-  async shareCookies() {
-    const pick = (list) =>
-      (Array.isArray(list) ? list : [])
-        .filter((c) => /(^|\.)(douyin|bytedance|amemv|snssdk)\.(com|cn)$/i.test(String(c?.domain ?? '')))
-        .map((c) => ({
-          name: c.name,
-          value: c.value,
-          domain: c.domain,
-          path: c.path ?? '/',
-          expires: c.expires && c.expires > 0 ? c.expires : undefined,
-          httpOnly: !!c.httpOnly,
-          secure: !!c.secure,
-          sameSite: c.sameSite ?? 'Lax',
-        }));
-    const live = this.context ? await this.context.cookies().catch(() => []) : [];
-    const fromLive = pick(live);
-    if (fromLive.length) return fromLive;
-    try {
-      const saved = JSON.parse(fs.readFileSync(this.cookieFile, 'utf8'));
-      return pick(saved?.cookies ?? []);
-    } catch {
-      return [];
+      await page?.close().catch(() => {});
+      if (wasHeadless) {
+        await this.close().catch(() => {});
+        await this.launch({ headless: true, force: true }).catch(() => {});
+      }
     }
   }
 

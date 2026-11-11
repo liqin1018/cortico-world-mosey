@@ -1393,6 +1393,44 @@ dyStore = [{ name: 'sessionid', value: 'y', domain: '.douyin.com', path: '/', ex
 check('本地还有 sessionid 就不覆盖', (await world.douyin.restoreCookies()) === 0);
 world.douyin.context = prevDyCtx;
 
+/* 后台分享卡片：必须是「同一个浏览器切有头」，不能再开第二个浏览器（会踢登录） */
+const cardSeq = [];
+const cardPrevClose = world.douyin.close;
+const cardPrevLaunch = world.douyin.launch;
+const prevShareOnPage = world.douyin.shareOnPage;
+const cardPrevHeadless = world.douyin.headless;
+const cardPrevCtx = world.douyin.context;
+world.douyin.close = async () => {
+  cardSeq.push('close');
+  world.douyin.context = null;
+};
+world.douyin.launch = async (opts = {}) => {
+  cardSeq.push(opts.headless === true ? 'launch:headless' : `launch:headed${opts.offscreen ? ':offscreen' : ''}`);
+  world.douyin.headless = opts.headless === true;
+  world.douyin.context = { newPage: async () => ({ close: async () => {} }) };
+  return world.douyin.context;
+};
+world.douyin.shareOnPage = async () => ({ ok: true, via: 'card' });
+world.douyin.headless = true;
+world.douyin.context = { newPage: async () => ({ close: async () => {} }) };
+const cardResult = await world.douyin.shareCardTo('阿柚', 'https://www.douyin.com/video/7692378744715259129');
+check(
+  '后台分享：关掉无头 → 有头离屏 → 做完切回无头（不新开会话）',
+  cardResult.ok && cardSeq.join('>') === 'close>launch:headed:offscreen>close>launch:headless',
+  cardSeq.join('>'),
+);
+world.douyin.close = cardPrevClose;
+world.douyin.launch = cardPrevLaunch;
+world.douyin.shareOnPage = prevShareOnPage;
+world.douyin.headless = cardPrevHeadless;
+world.douyin.context = cardPrevCtx;
+
+/* 登录失效只提醒一次 */
+world.loginWarnAt = 0;
+const hint1 = world.loginWarnHint();
+const hint2 = world.loginWarnHint();
+check('登录失效：第一次让她去扫码，第二次叫她别重复', /第一次/.test(hint1) && /不要再重复/.test(hint2), `${hint1} | ${hint2}`);
+
 /* ---------------- 私信里贴抖音链接：自动变成「画面 + 标题 + 链接」 ---------------- */
 const prevDyOpen = world.douyin.open;
 const prevDyOwnerChat = world.douyin.ownerChat;
@@ -1729,13 +1767,13 @@ world.watch = null;
 world.watchScrollState = null;
 
 // 陪看浏览器要带抖音登录态（主浏览器没起来时至少还有 B站 的）
-const prevCtx2 = world.douyin.context;
+const prevCtxShare = world.douyin.context;
 const prevCookieHeader2 = world.bili.cookieHeader;
 world.douyin.context = null;
 world.bili.cookieHeader = () => 'SESSDATA=abc; bili_jct=def';
 const wc1 = await world.watchCookies();
 check('陪看 cookie 带 B站 登录态', wc1.some((c) => c.name === 'SESSDATA') && wc1.length >= 2, JSON.stringify(wc1).slice(0, 120));
-world.douyin.context = prevCtx2;
+world.douyin.context = prevCtxShare;
 world.bili.cookieHeader = prevCookieHeader2;
 
 const dmComments = await world.watchComments({ platform: 'douyin', comments: ['甲：好看', '乙：哈哈'] });

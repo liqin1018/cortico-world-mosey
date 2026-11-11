@@ -5825,11 +5825,38 @@ export class StrollWorld {
       return receipt;
     } catch (error) {
       const code = error?.code ?? 'ERROR';
+      /**
+       * 登录失效只让第一次带「去扫码」的说法，之后明确告诉她别再重复。
+       * 2026-11-11 那次掉线，她连着三条消息都在说「登录失效」，主人只会更烦。
+       */
+      if (code === 'LOGIN_REQUIRED') {
+        return {
+          ok: false,
+          code,
+          action,
+          platform,
+          target,
+          error: `${error?.message ?? String(error)}${this.loginWarnHint()}`,
+        };
+      }
       if (code === 'RISK') {
         await this.push('stroll.risk', `平台风控：${error.message}。已经停手，不要重试。`, { code, action, platform }, 'flush');
       }
       return { ok: false, code, action, platform, target, error: error?.message ?? String(error) };
     }
+  }
+
+  /**
+   * 登录失效的提醒节奏：6 小时内只让第一次说「去面板扫码」，之后都提示别再重复。
+   * 返回值直接拼在错误文案后面，模型会照这个口径说话。
+   */
+  loginWarnHint() {
+    const now = Date.now();
+    const first = !this.loginWarnAt || now - this.loginWarnAt > 6 * 60 * 60 * 1000;
+    this.loginWarnAt = now;
+    return first
+      ? '（第一次：跟主人说一次「去面板点登录/验证扫码」就够了，别反复提）'
+      : '（已经提醒过主人了：不要再重复说登录失效，也不要一直重试；先做别的，等他扫完）';
   }
 
   capAction(action) {

@@ -1389,8 +1389,15 @@ check(
   restoredN >= 1 && dyStore.some((c) => c.name === 'sessionid' && c.expires > 0),
   String(restoredN),
 );
-dyStore = [{ name: 'sessionid', value: 'y', domain: '.douyin.com', path: '/', expires: Math.floor(Date.now() / 1000) + 86400 }];
-check('本地还有 sessionid 就不覆盖', (await world.douyin.restoreCookies()) === 0);
+// 备份里是 'x'：本地也是 'x' 才跳过；本地是别的（旧会话）就以备份为准覆盖
+dyStore = [{ name: 'sessionid', value: 'x', domain: '.douyin.com', path: '/', expires: Math.floor(Date.now() / 1000) + 86400 }];
+check('本地 sessionid 和备份一致就不动', (await world.douyin.restoreCookies()) === 0);
+dyStore = [{ name: 'sessionid', value: '旧的失效会话', domain: '.douyin.com', path: '/', expires: Math.floor(Date.now() / 1000) + 86400 }];
+check(
+  '本地是旧 sessionid 就用备份覆盖（不然一直停在登录页）',
+  (await world.douyin.restoreCookies()) >= 1 && dyStore.some((c) => c.name === 'sessionid' && c.value === 'x'),
+  JSON.stringify(dyStore.find((c) => c.name === 'sessionid') ?? {}),
+);
 world.douyin.context = prevDyCtx;
 
 /* 后台分享卡片：必须是「同一个浏览器切有头」，不能再开第二个浏览器（会踢登录） */

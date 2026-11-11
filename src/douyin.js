@@ -813,7 +813,7 @@ export class DouyinBrowser {
       this.context = context;
       this.headless = headless !== false;
       // 上次进程被强杀、cookie 没来得及落盘时，用备份补一次（缺 sessionid 才补）
-      await this.restoreCookies().catch(() => {});
+      await this.restoreCookies({ force: true }).catch(() => {});
       return context;
     })()
       .catch((error) => {
@@ -1193,7 +1193,7 @@ export class DouyinBrowser {
   }
 
   /** 启动时把备份补回 profile；只在缺 sessionid 时补，别覆盖页面刚写进去的新 cookie。 */
-  async restoreCookies() {
+  async restoreCookies({ force = false } = {}) {
     if (!this.context) return 0;
     let saved = null;
     try {
@@ -1205,10 +1205,20 @@ export class DouyinBrowser {
     if (!cookies.length) return 0;
     const now = Date.now();
     const live = await this.context.cookies().catch(() => []);
-    const alive = live.some(
-      (c) => (c.name === 'sessionid' || c.name === 'sid_tt') && (!c.expires || c.expires < 0 || c.expires * 1000 > now),
-    );
-    if (alive) return 0;
+    const sid = (list) => {
+      const hit = list.find((c) => c.name === 'sessionid' && c.value) || list.find((c) => c.name === 'sid_tt' && c.value);
+      return hit ? String(hit.value) : '';
+    };
+    const liveSid = sid(live);
+    const savedSid = sid(cookies);
+    if (!savedSid) return 0;
+    /**
+     * 以前只要「本地还有 sessionid」就跳过恢复——但扫码登录写进去的新会话，
+     * 关窗时不一定落了盘；下次无头启动会拿着**旧的、服务端已失效的** sessionid，
+     * 于是页面一直停在登录页（2026-11-11 17:51 那次就是这样）。
+     * 现在改成比 value：不一致就以备份为准覆盖。
+     */
+    if (!force && liveSid && liveSid === savedSid) return 0;
     // 过期的丢掉；session cookie（expires<=0）补一个 30 天，免得下次又被当成会话 cookie 丢掉
     const fixed = cookies
       .filter((c) => !c.expires || c.expires <= 0 || c.expires * 1000 > now)

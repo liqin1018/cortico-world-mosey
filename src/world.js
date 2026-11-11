@@ -4520,6 +4520,19 @@ export class StrollWorld {
     const raw = String(text ?? '');
     const m = raw.match(/https?:\/\/(?:www\.)?(?:douyin\.com\/(?:video|note)\/\d+|v\.douyin\.com\/[\w-]+)/i);
     if (!m) return null;
+    const style = String(this.cfg.shareStyle ?? 'image');
+    if (style === 'text') return null;
+    if (style === 'card') {
+      // 实验：走抖音自己的分享面板发真卡片；任何一步不通就落回「画面 + 标题」
+      const card = await this.douyin.shareCardTo(name, m[0]).catch(() => ({ ok: false, step: 'throw' }));
+      if (card?.ok) {
+        const said = String(text).replace(m[0], '').trim();
+        if (said) await this.douyin.replyDm(name, said.slice(0, 300), { strict: true, requireTitle: true }).catch(() => {});
+        this.log?.info?.('stroll share card sent', { url: m[0], via: card.panel ?? '' });
+        return { ok: true, sent: true, via: 'card' };
+      }
+      this.log?.info?.('stroll share card fallback', { url: m[0], step: card?.step ?? 'unknown' });
+    }
     const info = await this.douyin.open(m[0], { frames: 1, keep: 120 }).catch(() => null);
     if (!info?.frames?.length) return null;
     try {

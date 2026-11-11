@@ -6667,6 +6667,101 @@ export class DouyinBrowser {
     return { page, input, via: 'chat' };
   }
 
+  /**
+   * 实验：走抖音自己的「分享 → 私信 → 选人 → 发送」，发一张真卡片。
+   * 这条路依赖视频页的分享面板，能不能成完全看抖音当天的 DOM，所以每一步都留日志，
+   * 任何一步不通就返回 { ok:false, step } 让上层回退到「画面 + 标题」。
+   * 用单独一个页，别把主人正在看的私信页/群页带跑。
+   */
+  async shareCardTo(name, url) {
+    const who = String(name ?? '').trim();
+    const link = String(url ?? '').trim();
+    if (!who || !link) return { ok: false, step: 'args' };
+    const ctx = this.context;
+    if (!ctx) return { ok: false, step: 'no-context' };
+    let page = null;
+    try {
+      page = await ctx.newPage();
+      page.setDefaultTimeout(6000);
+      await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(3000);
+      if (/验证|captcha/i.test(await page.title().catch(() => ''))) return { ok: false, step: 'captcha' };
+
+      // 1) 打开分享面板：三种定位方式依次试
+      const opened = await this.openSharePanel(page);
+      if (!opened.ok) return opened;
+
+      // 2) 面板里点「私信」
+      const dmEntry = page.getByText('私信', { exact: true }).first();
+      if (!(await dmEntry.count().catch(() => 0))) return { ok: false, step: 'no-dm-entry' };
+      await dmEntry.click({ timeout: 4000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+
+      // 3) 在好友列表里选人
+      const person = page.getByText(who, { exact: false }).first();
+      if (!(await person.count().catch(() => 0))) return { ok: false, step: 'no-person' };
+      await person.click({ timeout: 4000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+
+      // 4) 发送：优先点「发送」，没有再按回车
+      const sendBtn = page.getByText('发送', { exact: true }).first();
+      if (await sendBtn.count().catch(() => 0)) {
+        await sendBtn.click({ timeout: 4000 }).catch(() => {});
+      } else {
+        await page.keyboard.press('Enter').catch(() => {});
+      }
+      await page.waitForTimeout(1200);
+      return { ok: true, via: 'card', panel: opened.via };
+    } catch (error) {
+      return { ok: false, step: 'error', reason: String(error?.message ?? error).slice(0, 80) };
+    } finally {
+      await page?.close().catch(() => {});
+    }
+  }
+
+  /** 点开视频页的分享面板。返回 { ok, via } 或 { ok:false, step }。 */
+  async openSharePanel(page) {
+    // (a) 抖音自己的 data-e2e（最稳，但名字会变）
+    for (const sel of ['[data-e2e="video-player-share"]', '[data-e2e="share-btn"]', '[data-e2e="detail-share"]']) {
+      const el = page.locator(sel).first();
+      if (await el.count().catch(() => 0)) {
+        await el.click({ timeout: 4000 }).catch(() => {});
+        if (await this.sharePanelVisible(page)) return { ok: true, via: sel };
+      }
+    }
+    // (b) 文字/无障碍名里带「分享」的按钮
+    for (const q of [page.getByRole('button', { name: /分享/ }), page.getByText('分享', { exact: true })]) {
+      const n = await q.count().catch(() => 0);
+      for (let i = 0; i < Math.min(n, 4); i += 1) {
+        const el = q.nth(i);
+        const box = await el.boundingBox().catch(() => null);
+        if (!box || box.y > 700) continue; // 评论区里的「分享」不要
+        await el.click({ timeout: 3000 }).catch(() => {});
+        if (await this.sharePanelVisible(page)) return { ok: true, via: `text#${i}` };
+      }
+    }
+    // (c) 用点赞按钮的位置推算：分享通常在统计行右侧两三格
+    const digg = page.locator('[data-e2e="video-player-digg"]').first();
+    const box = await digg.boundingBox().catch(() => null);
+    if (box) {
+      for (const dx of [220, 260, 300]) {
+        await page.mouse.click(box.x + box.width + dx, box.y + box.height / 2).catch(() => {});
+        await page.waitForTimeout(700);
+        if (await this.sharePanelVisible(page)) return { ok: true, via: `offset+${dx}` };
+      }
+    }
+    return { ok: false, step: 'no-panel' };
+  }
+
+  async sharePanelVisible(page) {
+    await page.waitForTimeout(900);
+    for (const word of ['私信', '复制链接', '分享到']) {
+      const n = await page.getByText(word, { exact: false }).count().catch(() => 0);
+      if (n > 0) return true;
+    }
+    return false;
+  }
+
   /** 发一张表情到某个会话（群名 / 昵称 / 留空 = 当前会话）。 */
   async sendStickerTo(who, { file = '', src = '', label = '' } = {}) {
     const t = await this.chatPageOf(who);

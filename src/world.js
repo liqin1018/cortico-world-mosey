@@ -3031,7 +3031,15 @@ export class StrollWorld {
           }
           if (decl.name === 'stroll_act') {
             const r = await this.toolAct(a);
-            this.log?.info?.('stroll tool', { name: 'stroll_act', action: a.action ?? '', ms: Date.now() - t0 });
+            // 把结果也记一行：失败时只看 ms 完全不知道为什么没成
+            this.log?.info?.('stroll tool', {
+              name: 'stroll_act',
+              action: a.action ?? '',
+              platform: a.platform ?? '',
+              ms: Date.now() - t0,
+              ok: typeof r === 'string' ? true : r?.ok !== false,
+              err: typeof r === 'string' ? '' : String(r?.error ?? r?.code ?? '').slice(0, 100),
+            });
             return r;
           }
           const r = await this.toolPolicy(a);

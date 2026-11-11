@@ -3234,6 +3234,22 @@ export class DouyinBrowser {
         { awemeId: id, text, replyId: rootReplyTo || replyTo, replyToReplyId: replyTo },
       )
       .catch(() => null);
+    /**
+     * 留一份「上次评论接口到底返回了什么」。
+     * 抖音回复失败时上层只会看到 null，没有这个就只能猜；2026-11-11 楼中楼发了两次都没成，
+     * 日志里一个字都没有，就是缺这个。
+     */
+    this.lastCommentApi = {
+      at: Date.now(),
+      mode: replyTo ? 'reply' : 'comment',
+      awemeId: String(id),
+      replyId: String(rootReplyTo || replyTo || ''),
+      replyToReplyId: String(replyTo || ''),
+      http: r?.http ?? 0,
+      code: r?.code ?? -1,
+      msg: String(r?.msg ?? '').slice(0, 100),
+      cid: r?.cid ?? '',
+    };
     if (!r) return null;
     // status_code 8 既可能是「未登录」也可能是参数不对（实测 aweme_id 无效时也是 8），
     // 只有明确说未登录才升级成登录问题，其余一律当作「这条路走不通」，退回点评论框。
@@ -3412,7 +3428,11 @@ export class DouyinBrowser {
         if (f.login) {
           throw new DouyinError('LOGIN_REQUIRED', '抖音登录态失效了，去面板重新扫码再回复');
         }
-        throw new DouyinError('REPLY_FAILED', '抖音回复接口没给回执，没敢改成新评论；过一会儿再试。');
+        const d = this.lastCommentApi ?? {};
+        throw new DouyinError(
+          'REPLY_FAILED',
+          `抖音回复接口没给回执（http ${d.http ?? 0} / code ${d.code ?? -1}${d.msg ? ` / ${d.msg}` : ''}），没敢改成新评论；过一会儿再试。`,
+        );
       }
 
       // ---- 稳路径：真的去点评论框（带 @ 时只能走这条） ----

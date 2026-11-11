@@ -3,7 +3,7 @@ import zlib from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_GROUPS, DEFAULTS } from '../src/config.js';
-import { secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
+import { mapAtNotice, secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
 import { approvalFor } from '../src/policy.js';
 import { StickerBook, extOfBuffer } from '../src/stickers.js';
 import { cutChars, dayKey, imageMimeOf, looksBrokenPath, stripAtName, stripAtPlaceholder } from '../src/util.js';
@@ -52,6 +52,63 @@ check('env prompt vars', Object.keys(world.envPromptVars()).length >= 6);
 check('webUi panels', world.webUi().panels?.[0]?.id === 'stroll');
 check('webUi invoke', typeof world.webUi().invoke === 'function');
 check('policy caps', world.policy.snapshot().caps.like > 0);
+
+// 抖音评论区的 @：评论 id 只在 schema_url 的 cid/reply_id 上
+const atNotice = mapAtNotice({
+  type: 45,
+  nid_str: '9001',
+  aweme_id: '7300000000000000001',
+  create_time: 1794376000,
+  at: {
+    user_info: { nickname: '某人', sec_uid: 'MS4wABC' },
+    sub_type: 2,
+    aweme: { aweme_id: '7300000000000000001', desc: '测试视频' },
+    content: '@大肥鱼 你怎么看',
+    schema_url: 'https://www.douyin.com/video/7300000000000000001?cid=987654321&reply_id=111111111',
+  },
+});
+check(
+  '抖音 @ 通知映射',
+  atNotice?.cid === '987654321' && atNotice?.rootCid === '111111111' && atNotice?.canReply === true,
+  JSON.stringify(atNotice),
+);
+
+// 抖音楼中楼：reply_id=根评论，reply_to_reply_id=目标评论
+const replySeen = [];
+const fakeReplyPage = {
+  isClosed: () => false,
+  url: () => 'https://www.douyin.com/video/7300000000000000001',
+  evaluate: async (fn, args) => {
+    replySeen.push(args);
+    return { cid: '999', status: 1, extra: [] };
+  },
+};
+await world.douyin.commentViaApi(fakeReplyPage, '7300000000000000001', '回复内容', {
+  replyTo: '987654321',
+  rootReplyTo: '111111111',
+});
+check(
+  '抖音楼中楼回复参数',
+  replySeen[0]?.replyId === '111111111' && replySeen[0]?.replyToReplyId === '987654321',
+  JSON.stringify(replySeen[0]),
+);
+
+const replyPlan = await world.buildPlan(
+  'reply',
+  {
+    platform: 'douyin',
+    target: '7300000000000000001',
+    text: '这条我看到了',
+    reply_to: '987654321',
+    root_reply_to: '111111111',
+  },
+  { byOwner: true },
+);
+check(
+  '抖音回复计划带 cid',
+  replyPlan.ok === true && replyPlan.replyTo === '987654321' && replyPlan.rootReplyTo === '111111111',
+  JSON.stringify(replyPlan),
+);
 // 私信主人必须跳过审批：不然「主人一发消息就能回」永远是草稿
 check('dm 不排队审批', approvalFor({ ...cfg, approval: 'confirm', allowDm: true }, 'dm') === 'auto');
 check('dry_run 仍然拦 dm', approvalFor({ ...cfg, approval: 'dry_run', allowDm: true }, 'dm') === 'draft');

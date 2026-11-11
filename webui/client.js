@@ -1473,7 +1473,7 @@ export default {
             send.disabled = true;
             hint.textContent = '发送中…';
             try {
-              const result = await ctx.invoke('reply_comment', [url, c.rpid, text]);
+              const result = await ctx.invoke('reply_comment', [url, c.rpid, text, c.rootRpid]);
               if (result?.ok === false) throw new Error(result.error || '没发出去');
               input.value = '';
               hint.textContent = '';

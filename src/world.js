@@ -1318,7 +1318,9 @@ export class StrollWorld {
     if (!this.running) return;
     if (this.cfg.enabled === false) return;
     const live = this.liveConfig() ?? {};
-    if ((live.bilibili ?? this.cfg.bilibili) === false) return;
+    const biliOn = (live.bilibili ?? this.cfg.bilibili) !== false;
+    const douyinOn = (live.douyin ?? this.cfg.douyin) !== false;
+    if (!biliOn && !douyinOn) return;
     if ((live.mentionWatch ?? this.cfg.mentionWatch ?? true) === false) return;
     if (this.policy.isQuiet()) return;
     const paused = this.policy.paused();
@@ -1328,14 +1330,34 @@ export class StrollWorld {
     // 90 秒一次：以前 5 分钟，主人 @ 完在评论里问「收到没」，她当场答「没收到」，很尴尬
     if (Date.now() - Number(this.mentionAt ?? 0) < 90 * 1000) return;
     this.mentionAt = Date.now();
-    const items = await this.bili.mentions(6).catch(() => []);
-    const fresh = items.filter((x) => x?.id && !this.store.seenAt(`atpush:${x.id}`));
+    const [biliItems, douyinItems] = await Promise.all([
+      biliOn ? this.bili.mentions(6).catch(() => []) : [],
+      douyinOn ? this.douyin.noticeMentions(6).catch(() => []) : [],
+    ]);
+    const items = [
+      ...biliItems.map((x) => ({ ...x, platform: 'bilibili' })),
+      ...douyinItems,
+    ];
+    const stamp = (x) => x.platform === 'bilibili' ? Number(x.at ?? 0) * 1000 : Number(x.at ?? 0);
+    const fresh = items
+      .filter((x) => x?.id && !this.store.seenAt(`atpush:${x.platform}:${x.id}`))
+      .sort((a, b) => stamp(b) - stamp(a));
     if (!fresh.length) return;
     // 一次最多提两条：被人连着 @ 也不该把她（和主人）刷屏
     const picked = fresh.slice(0, 2);
-    for (const x of picked) this.store.markSeen(`atpush:${x.id}`);
+    for (const x of picked) this.store.markSeen(`atpush:${x.platform}:${x.id}`);
     this.store.save();
     const lines = picked.map((x, i) => {
+      if (x.platform === 'douyin') {
+        const target = x.url || x.awemeId;
+        const head = `${i + 1}. ${x.user || '有人'} 在抖音评论里 @ 了你`;
+        const where = `   视频：${x.where || '（没读到标题）'}`;
+        const body = `   评论：${x.text}`;
+        const reply = x.canReply
+          ? `   回他：stroll_act action=reply platform=douyin target=${target} reply_to=${x.cid}${x.rootCid && x.rootCid !== x.cid ? ` root_reply_to=${x.rootCid}` : ''} text=…`
+          : `   回他：stroll_act action=comment platform=douyin target=${target} text=…`;
+        return `${head}\n${where}\n${body}\n   链接：${x.url}\n${reply}`;
+      }
       const target = x.bvid
         ? `https://www.bilibili.com/video/${x.bvid}`
         : x.dynamicId
@@ -1347,12 +1369,16 @@ export class StrollWorld {
       const quote = x.quote ? `\n   他在回的那条：${x.quote}` : '';
       return `${head}\n${where}\n${body}${quote}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${x.rpid} text=…`;
     });
-    this.log?.info?.('stroll mention push', { n: picked.length, ids: picked.map((x) => x.id) });
+    const platforms = [...new Set(picked.map((x) => x.platform))];
+    const label = platforms.length === 1
+      ? (platforms[0] === 'douyin' ? '抖音' : 'B站')
+      : 'B站/抖音';
+    this.log?.info?.('stroll mention push', { n: picked.length, ids: picked.map((x) => x.id), platforms });
     await this.push(
       'stroll.reply',
-      `（B站）有人在评论区 @ 你了：\n${lines.join('\n')}\n` +
+      `（${label}）有人在评论区 @ 你了：\n${lines.join('\n')}\n` +
         '想回就照上面给的参数回（reply_to 别丢，丢了就变成新开一条评论）；不想回就放着，不用每条都应。',
-      { kind: 'at', platform: 'bilibili', n: picked.length },
+      { kind: 'at', platform: platforms.join(','), n: picked.length },
       'debounce',
     );
   }
@@ -5066,9 +5092,35 @@ export class StrollWorld {
    * 面板「看评论」弹层里，直接回某一条。
    * url 可以是视频 / 动态 / 专栏；rpid 是弹层里那条评论。
    */
-  async replyComment(url, rpid, text) {
+  async replyComment(url, rpid, text, rootRpid = '') {
     const raw = String(url ?? '').trim();
     if (!raw) return { ok: false, error: '没有可回复的链接。' };
+    if (this.inferPlatform(raw) === 'douyin') {
+      const target = await this.douyin.idOf(raw);
+      if (!target) return { ok: false, error: '这个链接里没有抖音视频。' };
+      const replyTo = String(rpid ?? '').trim();
+      const rootReplyTo = String(rootRpid ?? '').trim() || replyTo;
+      if (!/^\d{6,}$/.test(replyTo)) return { ok: false, error: '没指定要回哪一条抖音评论。' };
+      const dedupeKey = `douyin:reply:${target}:c${replyTo}`;
+      const check = this.policy.check('reply', 'douyin', target, {
+        userInitiated: true,
+        quotaAction: 'comment',
+        dedupeKey,
+      });
+      if (!check.ok) return { ok: false, code: check.code, error: check.message };
+      return await this.executePlan(
+        {
+          action: 'reply',
+          platform: 'douyin',
+          target,
+          text,
+          replyTo,
+          rootReplyTo: /^\d{6,}$/.test(rootReplyTo) ? rootReplyTo : replyTo,
+          dedupeKey,
+        },
+        'operator',
+      );
+    }
     const bvid = parseBvid(raw);
     const dynId = bvid ? null : parseDynamicId(raw);
     const cvid = bvid || dynId ? null : parseCvid(raw);
@@ -5240,12 +5292,37 @@ export class StrollWorld {
 
       let target;
       if (platform === 'douyin') {
-        if (action === 'reply') return { ok: false, error: '抖音楼中楼回复暂未开放；先发一条评论。' };
         target = await this.douyin.idOf(targetRaw);
         if (!target) return { ok: false, error: '给个抖音视频链接/ID。' };
-        const check = this.policy.check(action, platform, target, { quotaAction: 'comment', userInitiated: asked });
+        let replyTo = '';
+        let rootReplyTo = '';
+        let dedupeKey = '';
+        if (action === 'reply') {
+          replyTo = String(args.reply_to ?? '').trim().replace(/^#/, '');
+          rootReplyTo = String(args.root_reply_to ?? '').trim().replace(/^#/, '') || replyTo;
+          if (!/^\d{6,}$/.test(replyTo)) {
+            return { ok: false, error: '回复要给 reply_to（抖音评论 cid，数字）。' };
+          }
+          if (!/^\d{6,}$/.test(rootReplyTo)) rootReplyTo = replyTo;
+          dedupeKey = `douyin:reply:${target}:c${replyTo}`;
+        }
+        const check = this.policy.check(action, platform, target, {
+          quotaAction: 'comment',
+          dedupeKey,
+          userInitiated: asked,
+        });
         if (!check.ok) return check;
-        return { ok: true, action, platform, target, text, mentionOwner };
+        return {
+          ok: true,
+          action,
+          platform,
+          target,
+          text,
+          mentionOwner: action === 'reply' ? false : mentionOwner,
+          replyTo,
+          rootReplyTo,
+          dedupeKey,
+        };
       }
 
       let kind = 'video';
@@ -5536,6 +5613,9 @@ export class StrollWorld {
       mention: String(plan.mention ?? ''),
       root: plan.root ?? '',
       parent: plan.parent ?? '',
+      // 抖音楼中楼：reply_to 是要回的那条，root_reply_to 是它所在的根评论
+      replyTo: plan.replyTo ?? '',
+      rootReplyTo: plan.rootReplyTo ?? '',
     });
   }
 
@@ -5604,6 +5684,8 @@ export class StrollWorld {
       mention: draft.mention ?? '',
       root: draft.root,
       parent: draft.parent,
+      replyTo: draft.replyTo ?? '',
+      rootReplyTo: draft.rootReplyTo ?? '',
     };
     const receipt = await this.executePlan(plan, source);
     const draftState =
@@ -5650,6 +5732,9 @@ export class StrollWorld {
           : await this.douyin.comment(target, text, {
               // 抖音 @ 人要用昵称（sec_uid 不行）；没存昵称就现读一次
               mention: plan.mentionOwner ? await this.douyinOwnerName() : '',
+              // 楼中楼：replyTo 是目标评论，rootReplyTo 是根评论
+              replyTo: plan.replyTo ?? '',
+              rootReplyTo: plan.rootReplyTo ?? '',
             });
       } else if (action === 'post') {
         result = await this.bili.post({ text, mentionOwner: plan.mentionOwner });
@@ -5766,6 +5851,7 @@ export class StrollWorld {
       if (result?.kind === 'opus') bits.push('动态');
       if (result?.kind === 'article') bits.push('专栏');
       if (result.rpid) bits.push(`rpid ${result.rpid}`);
+      if (result.cid) bits.push(`cid ${result.cid}`);
       if (result.confirmed === false) bits.push('没拿到发布回执，可能没发出去');
       if (result.mentioned === true) bits.push('@ 已生效');
       if (result.mentioned === false) bits.push('@ 没生效');
@@ -6001,7 +6087,9 @@ export class StrollWorld {
         if (only !== 'douyin' && this.cfg.bilibili) items = await this.bili.inbox(limit);
         if (only !== 'bilibili' && this.cfg.douyin) {
           const dy = await this.douyinInbox();
-          items = items.concat(dy);
+          // 抖音评论区的 @ 和私信一起进「谁找你」，面板的 @我 分类才有东西
+          const dyAt = await this.douyin.noticeMentions(5).catch(() => []);
+          items = items.concat(dyAt, dy);
         }
         items = items.sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0)).slice(0, limit);
         // 抖音那边的 at 是「刚读到」的时间，不覆盖更早的评论
@@ -6087,9 +6175,10 @@ export class StrollWorld {
         const url = String(args[0] ?? '').trim();
         const rpid = String(args[1] ?? '').trim();
         const text = clampText(String(args[2] ?? ''), Number(this.cfg.commentMaxChars ?? 120));
+        const rootRpid = String(args[3] ?? '').trim();
         if (!rpid) return { ok: false, error: '没指定要回哪一条评论。' };
         if (!text) return { ok: false, error: '回复要有正文。' };
-        return await this.replyComment(url, rpid, text);
+        return await this.replyComment(url, rpid, text, rootRpid);
       }
       if (method === 'save_toview') {
         const url = String(args[0] ?? this.lastOpen?.url ?? '').trim();

@@ -22,6 +22,51 @@ export class DouyinError extends Error {
   }
 }
 
+/**
+ * 「@我的」通知 → 内部 at 条目。
+ * 抖音把评论里的 @ 放在 notice type=45 的 at 里；评论 id 只出现在 schema_url
+ * 的 cid/reply_id 参数上，不是独立字段。发作品时提到她的 sub_type=1，没有评论可回。
+ */
+export function mapAtNotice(item) {
+  if (!item || Number(item.type) !== 45) return null;
+  const at = item.at ?? {};
+  const aweme = at.aweme ?? {};
+  const user = at.user_info ?? {};
+  const awemeId = String(
+    item.aweme_id && String(item.aweme_id) !== '0' ? item.aweme_id : aweme.aweme_id ?? '',
+  );
+  if (!awemeId) return null;
+  const schema = String(at.schema_url ?? '');
+  const cid = schema.match(/[?&]cid=(\d+)/)?.[1] ?? String(at.cid ?? at.comment_id ?? '');
+  const rootCid = schema.match(/[?&]reply_id=(\d+)/)?.[1] ?? (String(at.reply_id ?? '') || cid);
+  const note = Number(aweme.aweme_type ?? item.aweme_type ?? 0) === 68;
+  const content = String(at.content ?? at.label_text ?? '').trim();
+  const title = String(aweme.desc ?? aweme.item_title ?? aweme.title ?? '').trim();
+  const nickname = String(user.nickname ?? '').trim();
+  return {
+    kind: 'at',
+    platform: 'douyin',
+    type: note ? 'note' : 'video',
+    id: String(item.nid_str ?? item.nid ?? `${awemeId}:${cid || ''}`),
+    user: nickname,
+    secUid: String(user.sec_uid ?? ''),
+    mid: String(user.uid ?? ''),
+    text: truncate(content || title || '（在评论里 @ 了你）', 140),
+    quote: '',
+    where: truncate(title || `视频 ${awemeId}`, 60),
+    at: Number(item.create_time ?? 0) * 1000,
+    url: `${ORIGIN}/${note ? 'note' : 'video'}/${awemeId}`,
+    awemeId,
+    cid,
+    // 面板沿用 B站 的字段名，抖音用同一个 cid 作为 rpid
+    rpid: cid,
+    rootCid: rootCid || cid,
+    rootRpid: rootCid || cid,
+    subType: Number(at.sub_type ?? 0),
+    canReply: !!cid,
+  };
+}
+
 const feedScript = (limit) => String.raw`(() => {
   const limit = ${limit};
   const out = [];
@@ -3133,18 +3178,18 @@ export class DouyinBrowser {
    * 纯文本「@昵称」——看起来提到了、其实没通知人，还不如慢一点稳。
    * 返回 null 表示「这条路走不通」，调用方退回点评论框。
    */
-  async commentViaApi(page, id, text) {
+  async commentViaApi(page, id, text, { replyTo = '', rootReplyTo = '' } = {}) {
     if (!page || page.isClosed()) return null;
     if (!/douyin\.com/.test(page.url())) return null;
     const r = await page
       .evaluate(
-        async ({ awemeId, text }) => {
+        async ({ awemeId, text, replyId, replyToReplyId }) => {
           const body = new URLSearchParams({
             aweme_id: String(awemeId),
             text,
             text_extra: '[]',
-            reply_id: '0',
-            reply_to_reply_id: '0',
+            reply_id: String(replyId || '0'),
+            reply_to_reply_id: String(replyToReplyId || '0'),
             is_following: '0',
             aweme_type: '0',
             channel_id: '0',
@@ -3186,7 +3231,7 @@ export class DouyinBrowser {
             extra: Array.isArray(data?.comment?.text_extra) ? data.comment.text_extra : [],
           };
         },
-        { awemeId: id, text },
+        { awemeId: id, text, replyId: rootReplyTo || replyTo, replyToReplyId: replyTo },
       )
       .catch(() => null);
     if (!r) return null;
@@ -3300,7 +3345,7 @@ export class DouyinBrowser {
     return h ? h.asElement() : null;
   }
 
-  async comment(idOrUrl, text, { mention = '' } = {}) {
+  async comment(idOrUrl, text, { mention = '', replyTo = '', rootReplyTo = '' } = {}) {
     return this.serialize(async () => {
       const id = await this.idOf(idOrUrl);
       if (!id) throw new DouyinError('BAD_ID', '不是有效的抖音视频');
@@ -3317,7 +3362,7 @@ export class DouyinBrowser {
       // 前提是页面得停在这条视频上：实测从抖音首页调会被 403 挡回来，从 /video/ 页调才通。
       if (!mention) {
         await this.ensureVideo(page, id, { note: /\/note\//.test(String(idOrUrl)), quick: true });
-        const fast = await this.commentViaApi(page, id, text).catch((e) => {
+        const fast = await this.commentViaApi(page, id, text, { replyTo, rootReplyTo }).catch((e) => {
           if (e?.code === 'LOGIN_REQUIRED') throw e;
           return null;
         });
@@ -3358,6 +3403,16 @@ export class DouyinBrowser {
             url: `https://www.douyin.com/video/${id}`,
           };
         }
+      }
+
+      // 回复接口没给回执时不能退回点评论框：那条路只会发成一条新的顶层评论，
+      // 对方收不到回复，看起来还像发送成功。宁可报失败，让上层稍后重试。
+      if (replyTo) {
+        const f = await bodyFlags(page).catch(() => ({}));
+        if (f.login) {
+          throw new DouyinError('LOGIN_REQUIRED', '抖音登录态失效了，去面板重新扫码再回复');
+        }
+        throw new DouyinError('REPLY_FAILED', '抖音回复接口没给回执，没敢改成新评论；过一会儿再试。');
       }
 
       // ---- 稳路径：真的去点评论框（带 @ 时只能走这条） ----
@@ -3616,6 +3671,56 @@ export class DouyinBrowser {
         { id: String(awemeId), pages },
       )
       .catch(() => null);
+  }
+
+  /**
+   * 评论区里 @ 她：读抖音的「@我的」通知（notice_group=6）。
+   *
+   * 不点通知页：页面里的接口要页面上下文带的 cookie 和签名，直接 fetch 更稳，
+   * 也不会把她的消息标成已读（is_mark_read=0），主人自己打开抖音时红点还在。
+   */
+  async noticeMentions(limit = 6) {
+    const page = await this.getPage();
+    if (!(await this.isLoggedIn().catch(() => false))) return [];
+    if (!/douyin\.com/.test(page.url())) {
+      await this.goto(page, `${ORIGIN}/user/message`, 2500).catch(() => null);
+    }
+    const list = await page
+      .evaluate(
+        async ({ count }) => {
+          const q = new URLSearchParams({
+            device_platform: 'webapp',
+            aid: '6383',
+            channel: 'channel_pc_web',
+            is_new_notice: '1',
+            is_mark_read: '0',
+            notice_group: '6',
+            count: String(count),
+            min_time: '0',
+            max_time: '0',
+            update_version_code: '170400',
+            pc_client_type: '1',
+            pc_libra_divert: 'Windows',
+            support_h265: '1',
+            support_dash: '1',
+            cpu_core_num: '20',
+            version_code: '170400',
+            version_name: '17.4.0',
+            cookie_enabled: 'true',
+            platform: 'PC',
+          });
+          const r = await fetch(`https://www.douyin.com/aweme/v1/web/notice/?${q}`, {
+            credentials: 'include',
+          });
+          if (!r.ok) return [];
+          const d = await r.json().catch(() => null);
+          if (Number(d?.status_code ?? -1) !== 0) return [];
+          return Array.isArray(d?.notice_list_v2) ? d.notice_list_v2 : [];
+        },
+        { count: Math.max(1, Math.min(20, limit)) },
+      )
+      .catch(() => []);
+    return list.map(mapAtNotice).filter(Boolean).slice(0, Math.max(1, limit));
   }
 
   /**

@@ -1225,7 +1225,9 @@ export class StrollWorld {
     // 连不上时按 20s→40s→…→10min 退避，别在没登录的时候一直刷抖音。
     if (useDy && !this.douyin.dmArmed?.()) {
       const fails = Math.min(5, Number(this.dmArmFails ?? 0));
-      const gap = Math.min(10 * 60 * 1000, 20000 * 2 ** fails);
+      // 封顶从 10 分钟改成 60 秒：退避太久会出现「人已经重新登录了，她还在睡」——
+      // 表现就是主人在私信里等半分钟没人应（2026-11-11 反馈「延迟比以前大很多」）。
+      const gap = Math.min(60 * 1000, 20000 * 2 ** fails);
       if (Date.now() - Number(this.dmArmAt ?? 0) > gap) {
         this.dmArmAt = Date.now();
         this.armDmPush().catch(() => {});
@@ -1299,7 +1301,10 @@ export class StrollWorld {
       // 抖音已经走事件通道时就不必每 5 秒读一遍 DOM 了；但每 60 秒仍然对一次账，
       // 万一观察器漏了（页面卡住、切走了），最多晚一分钟，而不是一直不响。
       const dyArmed = !!this.douyin.dmArmed?.();
-      const sweep = !dyArmed || Date.now() - Number(this.dmSweepAt ?? 0) > 60 * 1000;
+      // 观察器没挂上时（掉线/页面被带跑）兜底扫描从 60 秒缩到 15 秒：
+      // 这段正是「主人发了消息她半天不回」的高发窗口。
+      const sweepGap = dyArmed ? 60 * 1000 : 15 * 1000;
+      const sweep = !dyArmed || Date.now() - Number(this.dmSweepAt ?? 0) > sweepGap;
       if (useDy && sweep) {
         this.dmSweepAt = Date.now();
         fresh.push(...(await this.newDouyinDm().catch(() => [])));
@@ -5819,6 +5824,15 @@ export class StrollWorld {
       };
       // 群里的这句已经回掉了：上下文清掉，别让她下一条（可能是私信主人）被当成回群
       if (plan.group) this.lastGroupPoke = null;
+      /**
+       * 抖音动作成功了 = 页面和登录态都是好的，说明之前「挂不上监听」的原因已经消失。
+       * 立刻清掉退避并重挂，不然要等到下一次退避窗口才恢复（最多 60 秒没人应）。
+       */
+      if (this.running && platform === 'douyin') {
+        this.dmArmFails = 0;
+        this.dmArmAt = 0;
+        if (!this.douyin.dmArmed?.()) setTimeout(() => this.armDmPush().catch(() => {}), 800);
+      }
       if (source === 'operator') {
         await this.push('stroll.sent', `${this.receiptText(action, platform, result, plan)}`, { action, platform, target }, 'flush');
       }

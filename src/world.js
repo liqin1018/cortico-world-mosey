@@ -4510,9 +4510,44 @@ export class StrollWorld {
   }
 
   /** 抖音私信：有会话就直接在聊天页回（比去主页点「私信」快十几秒），没有才回退到主页。 */
+  /**
+   * 正文里带抖音视频链接时，改发「画面 + 标题 + 链接」。
+   * 抖音私信里的纯 URL 就是一段文字，不会自动变卡片；我们又点不开分享面板（实测拿不到
+   * 播放器那块的 DOM，页面还挂着验证 iframe），所以用首帧截图 + 标题凑一个「像分享」的效果。
+   * 失败就返回 null，上层照旧发纯文字。
+   */
+  async shareDouyinLink(name, text) {
+    const raw = String(text ?? '');
+    const m = raw.match(/https?:\/\/(?:www\.)?(?:douyin\.com\/(?:video|note)\/\d+|v\.douyin\.com\/[\w-]+)/i);
+    if (!m) return null;
+    const info = await this.douyin.open(m[0], { frames: 1, keep: 120 }).catch(() => null);
+    if (!info?.frames?.length) return null;
+    try {
+      const dir = path.join(this.dataDir, 'media');
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `share-${info.id}.jpg`);
+      fs.writeFileSync(file, info.frames[0].bytes);
+      const shot = await this.douyin
+        .sendStickerTo(name, { file, label: '视频画面' })
+        .catch((error) => ({ ok: false, error: error?.message ?? '' }));
+      if (!shot?.ok) return null;
+      const title = cutChars(String(info.title ?? '').trim(), 40);
+      const meta = [title ? `《${title}》` : '', info.author, info.dur].filter(Boolean).join(' · ');
+      const body = `${raw.replace(m[0], '').trim()}\n${meta}\n${m[0]}`.trim().slice(0, 300);
+      await this.douyin.replyDm(name, body, { strict: true, requireTitle: true }).catch(() => {});
+      this.log?.info?.('stroll share card', { id: info.id, to: name, title });
+      return { ok: true, sent: true, via: 'share', title, file };
+    } catch {
+      return null;
+    }
+  }
+
   async douyinDmFast(secUid, text) {
     const name = this.douyinOwner().name || (await this.douyinOwnerName().catch(() => ''));
     if (name) {
+      // 正文里有抖音视频链接：先试着发成「画面 + 标题 + 链接」
+      const shared = await this.shareDouyinLink(name, text).catch(() => null);
+      if (shared) return shared;
       /**
        * 主人私信也要求「先核实会话再发」：
        * strict + requireTitle —— 标题读不出来就当作没切过去，走下面按 secUid 的慢路径。

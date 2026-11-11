@@ -1336,6 +1336,49 @@ dyStore = [{ name: 'sessionid', value: 'y', domain: '.douyin.com', path: '/', ex
 check('本地还有 sessionid 就不覆盖', (await world.douyin.restoreCookies()) === 0);
 world.douyin.context = prevDyCtx;
 
+/* ---------------- 私信里贴抖音链接：自动变成「画面 + 标题 + 链接」 ---------------- */
+const prevDyOpen = world.douyin.open;
+const prevDySticker = world.douyin.sendStickerTo;
+const prevDyReply = world.douyin.replyDm;
+const shareCalls = [];
+world.douyin.open = async () => ({
+  id: '7692378744715259129',
+  title: '上海街拍｜香香鱼',
+  author: '姬豪',
+  dur: '1:59',
+  frames: [{ at: 60, bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) }],
+});
+world.douyin.sendStickerTo = async (who, payload) => {
+  shareCalls.push(['img', who, payload.file]);
+  return { ok: true };
+};
+world.douyin.replyDm = async (who, body) => {
+  shareCalls.push(['text', who, body]);
+  return { ok: true };
+};
+const shared = await world.shareDouyinLink('阿柚', '这个好看 https://www.douyin.com/video/7692378744715259129');
+check(
+  '贴抖音链接会先发画面再发标题和链接',
+  shared?.via === 'share' &&
+    shareCalls[0]?.[0] === 'img' &&
+    shareCalls[1]?.[0] === 'text' &&
+    /《上海街拍｜香香鱼》/.test(shareCalls[1][2]) &&
+    /douyin\.com\/video/.test(shareCalls[1][2]),
+  JSON.stringify(shareCalls).slice(0, 200),
+);
+check('画面落盘了（能复用/排查）', !!shared?.file && fs.existsSync(shared.file));
+check('没有链接就不走分享路径', (await world.shareDouyinLink('阿柚', '在吗')) === null);
+world.douyin.open = async () => {
+  throw new Error('拿不到视频');
+};
+check(
+  '拿不到视频时回退纯文字',
+  (await world.shareDouyinLink('阿柚', 'https://www.douyin.com/video/7691294812246912246')) === null,
+);
+world.douyin.open = prevDyOpen;
+world.douyin.sendStickerTo = prevDySticker;
+world.douyin.replyDm = prevDyReply;
+
 /* ---------------- 一起看主动说话 / 后台看完说一句 ---------------- */
 check('一起看解说默认值', DEFAULTS.watchTalk === true && DEFAULTS.watchLines === 2 && DEFAULTS.openTalk === false);
 const prevWatch = world.watch;
@@ -2258,7 +2301,7 @@ const stPlan2 = await world.buildPlan('dm', { platform: 'douyin', target: '从�
 check('没给她发过消息的人发不出去', stPlan2.ok === false, JSON.stringify(stPlan2));
 
 // 发送路线：陌生人必须走「按昵称回会话」，绝不能掉进「私信主人」
-const prevDyReply = world.douyin.replyDm;
+const prevDyReplyCard = world.douyin.replyDm;
 const prevDmFast = world.douyinDmFast;
 const stSent = [];
 world.douyin.replyDm = async (who, text) => {
@@ -2361,7 +2404,7 @@ const bPlan2 = await world.buildPlan('dm', { platform: 'bilibili', target: '999'
 check('B站没聊过的 uid 还是不许发', bPlan2.ok === false, JSON.stringify(bPlan2));
 world.bili.dmSessions = prevDmSessions;
 
-world.douyin.replyDm = prevDyReply;
+world.douyin.replyDm = prevDyReplyCard;
 world.douyinDmFast = prevDmFast;
 
 /* ---------------- 私信 / 群聊 额度（B站抖音共用私信池） ---------------- */

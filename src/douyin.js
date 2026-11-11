@@ -6618,7 +6618,13 @@ export class DouyinBrowser {
       if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录');
       const opened = await (async () => {
         if (!/\/chat/.test(page.url())) await this.gotoChat(page);
-        if (name && this.openThread !== name) {
+        if (name) {
+          /**
+           * 以前这里写的是 `if (name && this.openThread !== name)`：openThread 是个全局缓存，
+           * 在群里回完一句它就被写成群名/人名，下一次给主人发图时如果恰好「等于」就跳过点击，
+           * 于是图片直接打进当时开着的那个会话（2026-11-11 分享视频发到群聊就是这么来的）。
+           * 点击只要 200ms，别为省这点时间赌对。
+           */
           let ok = await this.clickThread(page, name);
           // 陌生人会话不在主列表里
           if (!ok) ok = await this.clickStrangerThread(page, name).catch(() => false);
@@ -6632,6 +6638,33 @@ export class DouyinBrowser {
       })();
       return opened;
     });
+  }
+
+  /**
+   * 只给「主人私信」用的发送页：必须是核实过的那一页。
+   * 宁可不发、回退成纯文字，也绝不把图打到当时开着的群/别人会话里。
+   */
+  async ownerChat(name) {
+    const who = String(name ?? '').trim();
+    if (!who) return null;
+    // 1) 监听器专门停在主人会话上的那一页（最稳）
+    if (this.dmPage && !this.dmPage.isClosed() && this.dmThread === who) {
+      const input = await this.waitMsgInput(this.dmPage, 2000).catch(() => null);
+      if (input) return { page: this.dmPage, input, via: 'dm-page' };
+    }
+    // 2) 主页面：点会话 + 用「会话内容有没有换」核实（这套页面读不到标题）
+    const page = await this.getPage().catch(() => null);
+    if (!page) return null;
+    if (!/\/chat/.test(page.url())) await this.gotoChat(page).catch(() => {});
+    const before = await this.threadFingerprint(page).catch(() => null);
+    const clicked = await this.clickThread(page, who).catch(() => false);
+    if (!clicked) return null;
+    await page.waitForTimeout(250);
+    if (before && !(await this.waitThreadChanged(page, before, 1800).catch(() => false))) return null;
+    const input = await this.waitMsgInput(page, 3000).catch(() => null);
+    if (!input) return null;
+    this.openThread = who;
+    return { page, input, via: 'chat' };
   }
 
   /** 发一张表情到某个会话（群名 / 昵称 / 留空 = 当前会话）。 */

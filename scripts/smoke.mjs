@@ -1338,7 +1338,8 @@ world.douyin.context = prevDyCtx;
 
 /* ---------------- 私信里贴抖音链接：自动变成「画面 + 标题 + 链接」 ---------------- */
 const prevDyOpen = world.douyin.open;
-const prevDySticker = world.douyin.sendStickerTo;
+const prevDyOwnerChat = world.douyin.ownerChat;
+const prevDySendImg = world.douyin.sendStickerInChat;
 const prevDyReply = world.douyin.replyDm;
 const shareCalls = [];
 world.douyin.open = async () => ({
@@ -1348,8 +1349,9 @@ world.douyin.open = async () => ({
   dur: '1:59',
   frames: [{ at: 60, bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) }],
 });
-world.douyin.sendStickerTo = async (who, payload) => {
-  shareCalls.push(['img', who, payload.file]);
+world.douyin.ownerChat = async () => ({ page: {}, input: {}, via: 'chat' });
+world.douyin.sendStickerInChat = async (page, input, payload) => {
+  shareCalls.push(['img', payload.file]);
   return { ok: true };
 };
 world.douyin.replyDm = async (who, body) => {
@@ -1375,8 +1377,18 @@ check(
   '拿不到视频时回退纯文字',
   (await world.shareDouyinLink('阿柚', 'https://www.douyin.com/video/7691294812246912246')) === null,
 );
+// 核实不到主人会话时：不发图（宁可少一张，也不能打进群里）
+world.douyin.ownerChat = async () => null;
+shareCalls.length = 0;
+check(
+  '核实不到主人会话就不发图（防止发进群聊）',
+  (await world.shareDouyinLink('阿柚', '看这个 https://www.douyin.com/video/7692378744715259129')) === null &&
+    shareCalls.length === 0,
+  JSON.stringify(shareCalls),
+);
 world.douyin.open = prevDyOpen;
-world.douyin.sendStickerTo = prevDySticker;
+world.douyin.ownerChat = prevDyOwnerChat;
+world.douyin.sendStickerInChat = prevDySendImg;
 world.douyin.replyDm = prevDyReply;
 
 /* ---------------- 一起看主动说话 / 后台看完说一句 ---------------- */

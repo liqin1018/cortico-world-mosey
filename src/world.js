@@ -4527,8 +4527,19 @@ export class StrollWorld {
       fs.mkdirSync(dir, { recursive: true });
       const file = path.join(dir, `share-${info.id}.jpg`);
       fs.writeFileSync(file, info.frames[0].bytes);
+      /**
+       * 只往「核实过的主人会话」发。
+       * 以前走 sendStickerTo → chatPageOf，那里面有个全局 openThread 缓存，
+       * 在群里回完一句之后它的值可能正好对得上，于是跳过点击、图直接打进群里
+       * （2026-11-11 分享视频发到群聊就是这么来的）。没核实到就不发图，让上层退回纯文字。
+       */
+      const chat = await this.douyin.ownerChat(name).catch(() => null);
+      if (!chat) {
+        this.log?.info?.('stroll share card skip image', { reason: 'owner chat not verified' });
+        return null;
+      }
       const shot = await this.douyin
-        .sendStickerTo(name, { file, label: '视频画面' })
+        .sendStickerInChat(chat.page, chat.input, { file, name: '视频画面' })
         .catch((error) => ({ ok: false, error: error?.message ?? '' }));
       if (!shot?.ok) return null;
       const title = cutChars(String(info.title ?? '').trim(), 40);

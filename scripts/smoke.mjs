@@ -3,7 +3,7 @@ import zlib from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_GROUPS, DEFAULTS } from '../src/config.js';
-import { mapAtNotice, secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
+import { secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
 import { approvalFor } from '../src/policy.js';
 import { StickerBook, extOfBuffer } from '../src/stickers.js';
 import { cutChars, dayKey, imageMimeOf, looksBrokenPath, stripAtName, stripAtPlaceholder } from '../src/util.js';
@@ -52,63 +52,6 @@ check('env prompt vars', Object.keys(world.envPromptVars()).length >= 6);
 check('webUi panels', world.webUi().panels?.[0]?.id === 'stroll');
 check('webUi invoke', typeof world.webUi().invoke === 'function');
 check('policy caps', world.policy.snapshot().caps.like > 0);
-
-// 抖音评论区的 @：评论 id 只在 schema_url 的 cid/reply_id 上
-const atNotice = mapAtNotice({
-  type: 45,
-  nid_str: '9001',
-  aweme_id: '7300000000000000001',
-  create_time: 1794376000,
-  at: {
-    user_info: { nickname: '某人', sec_uid: 'MS4wABC' },
-    sub_type: 2,
-    aweme: { aweme_id: '7300000000000000001', desc: '测试视频' },
-    content: '@大肥鱼 你怎么看',
-    schema_url: 'https://www.douyin.com/video/7300000000000000001?cid=987654321&reply_id=111111111',
-  },
-});
-check(
-  '抖音 @ 通知映射',
-  atNotice?.cid === '987654321' && atNotice?.rootCid === '111111111' && atNotice?.canReply === true,
-  JSON.stringify(atNotice),
-);
-
-// 抖音楼中楼：reply_id=根评论，reply_to_reply_id=目标评论
-const replySeen = [];
-const fakeReplyPage = {
-  isClosed: () => false,
-  url: () => 'https://www.douyin.com/video/7300000000000000001',
-  evaluate: async (fn, args) => {
-    replySeen.push(args);
-    return { cid: '999', status: 1, extra: [] };
-  },
-};
-await world.douyin.commentViaApi(fakeReplyPage, '7300000000000000001', '回复内容', {
-  replyTo: '987654321',
-  rootReplyTo: '111111111',
-});
-check(
-  '抖音楼中楼回复参数',
-  replySeen[0]?.replyId === '111111111' && replySeen[0]?.replyToReplyId === '987654321',
-  JSON.stringify(replySeen[0]),
-);
-
-const replyPlan = await world.buildPlan(
-  'reply',
-  {
-    platform: 'douyin',
-    target: '7300000000000000001',
-    text: '这条我看到了',
-    reply_to: '987654321',
-    root_reply_to: '111111111',
-  },
-  { byOwner: true },
-);
-check(
-  '抖音回复计划带 cid',
-  replyPlan.ok === true && replyPlan.replyTo === '987654321' && replyPlan.rootReplyTo === '111111111',
-  JSON.stringify(replyPlan),
-);
 // 私信主人必须跳过审批：不然「主人一发消息就能回」永远是草稿
 check('dm 不排队审批', approvalFor({ ...cfg, approval: 'confirm', allowDm: true }, 'dm') === 'auto');
 check('dry_run 仍然拦 dm', approvalFor({ ...cfg, approval: 'dry_run', allowDm: true }, 'dm') === 'draft');
@@ -1389,54 +1332,9 @@ check(
   restoredN >= 1 && dyStore.some((c) => c.name === 'sessionid' && c.expires > 0),
   String(restoredN),
 );
-// 备份里是 'x'：本地也是 'x' 才跳过；本地是别的（旧会话）就以备份为准覆盖
-dyStore = [{ name: 'sessionid', value: 'x', domain: '.douyin.com', path: '/', expires: Math.floor(Date.now() / 1000) + 86400 }];
-check('本地 sessionid 和备份一致就不动', (await world.douyin.restoreCookies()) === 0);
-dyStore = [{ name: 'sessionid', value: '旧的失效会话', domain: '.douyin.com', path: '/', expires: Math.floor(Date.now() / 1000) + 86400 }];
-check(
-  '本地是旧 sessionid 就用备份覆盖（不然一直停在登录页）',
-  (await world.douyin.restoreCookies()) >= 1 && dyStore.some((c) => c.name === 'sessionid' && c.value === 'x'),
-  JSON.stringify(dyStore.find((c) => c.name === 'sessionid') ?? {}),
-);
+dyStore = [{ name: 'sessionid', value: 'y', domain: '.douyin.com', path: '/', expires: Math.floor(Date.now() / 1000) + 86400 }];
+check('本地还有 sessionid 就不覆盖', (await world.douyin.restoreCookies()) === 0);
 world.douyin.context = prevDyCtx;
-
-/* 后台分享卡片：必须是「同一个浏览器切有头」，不能再开第二个浏览器（会踢登录） */
-const cardSeq = [];
-const cardPrevClose = world.douyin.close;
-const cardPrevLaunch = world.douyin.launch;
-const prevShareOnPage = world.douyin.shareOnPage;
-const cardPrevHeadless = world.douyin.headless;
-const cardPrevCtx = world.douyin.context;
-world.douyin.close = async () => {
-  cardSeq.push('close');
-  world.douyin.context = null;
-};
-world.douyin.launch = async (opts = {}) => {
-  cardSeq.push(opts.headless === true ? 'launch:headless' : `launch:headed${opts.offscreen ? ':offscreen' : ''}`);
-  world.douyin.headless = opts.headless === true;
-  world.douyin.context = { newPage: async () => ({ close: async () => {} }) };
-  return world.douyin.context;
-};
-world.douyin.shareOnPage = async () => ({ ok: true, via: 'card' });
-world.douyin.headless = true;
-world.douyin.context = { newPage: async () => ({ close: async () => {} }) };
-const cardResult = await world.douyin.shareCardTo('阿柚', 'https://www.douyin.com/video/7692378744715259129');
-check(
-  '后台分享：关掉无头 → 有头离屏 → 做完切回无头（不新开会话）',
-  cardResult.ok && cardSeq.join('>') === 'close>launch:headed:offscreen>close>launch:headless',
-  cardSeq.join('>'),
-);
-world.douyin.close = cardPrevClose;
-world.douyin.launch = cardPrevLaunch;
-world.douyin.shareOnPage = prevShareOnPage;
-world.douyin.headless = cardPrevHeadless;
-world.douyin.context = cardPrevCtx;
-
-/* 登录失效只提醒一次 */
-world.loginWarnAt = 0;
-const hint1 = world.loginWarnHint();
-const hint2 = world.loginWarnHint();
-check('登录失效：第一次让她去扫码，第二次叫她别重复', /第一次/.test(hint1) && /不要再重复/.test(hint2), `${hint1} | ${hint2}`);
 
 /* ---------------- 私信里贴抖音链接：自动变成「画面 + 标题 + 链接」 ---------------- */
 const prevDyOpen = world.douyin.open;
@@ -1774,13 +1672,13 @@ world.watch = null;
 world.watchScrollState = null;
 
 // 陪看浏览器要带抖音登录态（主浏览器没起来时至少还有 B站 的）
-const prevCtxShare = world.douyin.context;
+const prevCtx2 = world.douyin.context;
 const prevCookieHeader2 = world.bili.cookieHeader;
 world.douyin.context = null;
 world.bili.cookieHeader = () => 'SESSDATA=abc; bili_jct=def';
 const wc1 = await world.watchCookies();
 check('陪看 cookie 带 B站 登录态', wc1.some((c) => c.name === 'SESSDATA') && wc1.length >= 2, JSON.stringify(wc1).slice(0, 120));
-world.douyin.context = prevCtxShare;
+world.douyin.context = prevCtx2;
 world.bili.cookieHeader = prevCookieHeader2;
 
 const dmComments = await world.watchComments({ platform: 'douyin', comments: ['甲：好看', '乙：哈哈'] });

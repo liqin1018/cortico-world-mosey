@@ -22,51 +22,6 @@ export class DouyinError extends Error {
   }
 }
 
-/**
- * 「@我的」通知 → 内部 at 条目。
- * 抖音把评论里的 @ 放在 notice type=45 的 at 里；评论 id 只出现在 schema_url
- * 的 cid/reply_id 参数上，不是独立字段。发作品时提到她的 sub_type=1，没有评论可回。
- */
-export function mapAtNotice(item) {
-  if (!item || Number(item.type) !== 45) return null;
-  const at = item.at ?? {};
-  const aweme = at.aweme ?? {};
-  const user = at.user_info ?? {};
-  const awemeId = String(
-    item.aweme_id && String(item.aweme_id) !== '0' ? item.aweme_id : aweme.aweme_id ?? '',
-  );
-  if (!awemeId) return null;
-  const schema = String(at.schema_url ?? '');
-  const cid = schema.match(/[?&]cid=(\d+)/)?.[1] ?? String(at.cid ?? at.comment_id ?? '');
-  const rootCid = schema.match(/[?&]reply_id=(\d+)/)?.[1] ?? (String(at.reply_id ?? '') || cid);
-  const note = Number(aweme.aweme_type ?? item.aweme_type ?? 0) === 68;
-  const content = String(at.content ?? at.label_text ?? '').trim();
-  const title = String(aweme.desc ?? aweme.item_title ?? aweme.title ?? '').trim();
-  const nickname = String(user.nickname ?? '').trim();
-  return {
-    kind: 'at',
-    platform: 'douyin',
-    type: note ? 'note' : 'video',
-    id: String(item.nid_str ?? item.nid ?? `${awemeId}:${cid || ''}`),
-    user: nickname,
-    secUid: String(user.sec_uid ?? ''),
-    mid: String(user.uid ?? ''),
-    text: truncate(content || title || '（在评论里 @ 了你）', 140),
-    quote: '',
-    where: truncate(title || `视频 ${awemeId}`, 60),
-    at: Number(item.create_time ?? 0) * 1000,
-    url: `${ORIGIN}/${note ? 'note' : 'video'}/${awemeId}`,
-    awemeId,
-    cid,
-    // 面板沿用 B站 的字段名，抖音用同一个 cid 作为 rpid
-    rpid: cid,
-    rootCid: rootCid || cid,
-    rootRpid: rootCid || cid,
-    subType: Number(at.sub_type ?? 0),
-    canReply: !!cid,
-  };
-}
-
 const feedScript = (limit) => String.raw`(() => {
   const limit = ${limit};
   const out = [];
@@ -751,7 +706,7 @@ export class DouyinBrowser {
    * 默认后台（headless）。只有扫码登录和「一起看」才开窗。
    * 模式变了就重开一个上下文，免得把 headless 进程当有头用。
    */
-  async launch({ headless = this.cfg.background !== false, force = false, offscreen = false } = {}) {
+  async launch({ headless = this.cfg.background !== false, force = false } = {}) {
     if (this.context && !force && this.headless === headless) return this.context;
     if (this.context && (force || this.headless !== headless)) await this.close();
     if (this.launching) return this.launching;
@@ -767,15 +722,6 @@ export class DouyinBrowser {
           '--disable-blink-features=AutomationControlled',
           '--autoplay-policy=no-user-gesture-required',
           '--window-size=1460,940',
-          // 分享要真渲染，但又不想弹到用户眼前：窗口挪到屏幕外
-          ...(offscreen
-            ? [
-                '--window-position=-2400,-2400',
-                '--disable-features=CalculateNativeWinOcclusion',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-              ]
-            : []),
         ],
       };
       let context;
@@ -813,7 +759,7 @@ export class DouyinBrowser {
       this.context = context;
       this.headless = headless !== false;
       // 上次进程被强杀、cookie 没来得及落盘时，用备份补一次（缺 sessionid 才补）
-      await this.restoreCookies({ force: true }).catch(() => {});
+      await this.restoreCookies().catch(() => {});
       return context;
     })()
       .catch((error) => {
@@ -1193,7 +1139,7 @@ export class DouyinBrowser {
   }
 
   /** 启动时把备份补回 profile；只在缺 sessionid 时补，别覆盖页面刚写进去的新 cookie。 */
-  async restoreCookies({ force = false } = {}) {
+  async restoreCookies() {
     if (!this.context) return 0;
     let saved = null;
     try {
@@ -1205,20 +1151,10 @@ export class DouyinBrowser {
     if (!cookies.length) return 0;
     const now = Date.now();
     const live = await this.context.cookies().catch(() => []);
-    const sid = (list) => {
-      const hit = list.find((c) => c.name === 'sessionid' && c.value) || list.find((c) => c.name === 'sid_tt' && c.value);
-      return hit ? String(hit.value) : '';
-    };
-    const liveSid = sid(live);
-    const savedSid = sid(cookies);
-    if (!savedSid) return 0;
-    /**
-     * 以前只要「本地还有 sessionid」就跳过恢复——但扫码登录写进去的新会话，
-     * 关窗时不一定落了盘；下次无头启动会拿着**旧的、服务端已失效的** sessionid，
-     * 于是页面一直停在登录页（2026-11-11 17:51 那次就是这样）。
-     * 现在改成比 value：不一致就以备份为准覆盖。
-     */
-    if (!force && liveSid && liveSid === savedSid) return 0;
+    const alive = live.some(
+      (c) => (c.name === 'sessionid' || c.name === 'sid_tt') && (!c.expires || c.expires < 0 || c.expires * 1000 > now),
+    );
+    if (alive) return 0;
     // 过期的丢掉；session cookie（expires<=0）补一个 30 天，免得下次又被当成会话 cookie 丢掉
     const fixed = cookies
       .filter((c) => !c.expires || c.expires <= 0 || c.expires * 1000 > now)
@@ -1263,9 +1199,7 @@ export class DouyinBrowser {
          * 这就是「登录完了那个网页还挂着好久」的真正原因。
          */
         this.sessionOkAt = 0;
-        // 刚打开的前两秒不判定：页面还在跳转，抢着查只会拿到「不知道」
-        if (Date.now() - started < 2500) return;
-        if (await this.isLoggedIn({ strict: true })) {
+        if (await this.isLoggedIn()) {
           this.markLoggedIn();
           clearInterval(this.loginPoller);
           this.loginPoller = null;
@@ -1274,16 +1208,12 @@ export class DouyinBrowser {
            * 读完才 close，主人在桌面上看着一个登录窗挂在那一动不动。
            * 昵称/uid 其实 sessionAlive() 已经顺手填好了，不用再跑一趟。
            */
-          // 让页面把登录后的 cookie 落地，再备份一次（扫码刚通过时立刻读可能还是旧的）
-          await this.page?.waitForTimeout?.(800).catch(() => {});
-          await this.saveCookies({ force: true }).catch(() => {});
-          await this.page?.waitForTimeout?.(200).catch(() => {});
           await this.saveCookies({ force: true }).catch(() => {});
           await this.close();
           // 收窗后别留着「未登录」的旧缓存，不然面板还要再等 5 分钟才变绿
           this.sessionOk = true;
           this.sessionOkAt = Date.now();
-          this.log?.info?.('stroll: 抖音登录成功，已切回后台', { who: this.selfName || '', uid: this.selfUid || '' });
+          this.log?.info?.('stroll: 抖音登录成功，已切回后台', { who: this.selfName || '' });
         } else if (Date.now() - started > 5 * 60 * 1000) {
           clearInterval(this.loginPoller);
           this.loginPoller = null;
@@ -1351,14 +1281,7 @@ export class DouyinBrowser {
     return this.selfName || '';
   }
 
-  /**
-   * strict=true：只认服务端**明确**说在线（sessionAlive === true）。
-   *
-   * 扫码轮询必须用 strict：页面还在跳转时 fetch 会失败，sessionAlive 返回 null（「不知道」），
-   * 而宽松模式把 null 当成了已登录 → 窗口刚打开就自己关掉，主人根本没扫到。
-   * 2026-11-11 那一串「登录成功 { who: '' }」就是这么来的（昵称空 = 服务端其实没认）。
-   */
-  async isLoggedIn({ strict = false } = {}) {
+  async isLoggedIn() {
     if (!this.context) return !!this.savedLogin();
     const cookies = await this.context.cookies(ORIGIN).catch(() => []);
     const ok = cookies.some((c) => c.name === 'sessionid' || c.name === 'sid_tt');
@@ -1366,8 +1289,7 @@ export class DouyinBrowser {
     // cookie 在不代表服务端还认：被踢之后必须让主人重新扫码，而不是装作已登录
     const alive = await this.sessionAlive().catch(() => null);
     if (alive === false) return false;
-    if (strict && alive !== true) return false;
-    if (alive === true) this.markLoggedIn();
+    this.markLoggedIn();
     return ok;
   }
 
@@ -3211,18 +3133,18 @@ export class DouyinBrowser {
    * 纯文本「@昵称」——看起来提到了、其实没通知人，还不如慢一点稳。
    * 返回 null 表示「这条路走不通」，调用方退回点评论框。
    */
-  async commentViaApi(page, id, text, { replyTo = '', rootReplyTo = '' } = {}) {
+  async commentViaApi(page, id, text) {
     if (!page || page.isClosed()) return null;
     if (!/douyin\.com/.test(page.url())) return null;
     const r = await page
       .evaluate(
-        async ({ awemeId, text, replyId, replyToReplyId }) => {
+        async ({ awemeId, text }) => {
           const body = new URLSearchParams({
             aweme_id: String(awemeId),
             text,
             text_extra: '[]',
-            reply_id: String(replyId || '0'),
-            reply_to_reply_id: String(replyToReplyId || '0'),
+            reply_id: '0',
+            reply_to_reply_id: '0',
             is_following: '0',
             aweme_type: '0',
             channel_id: '0',
@@ -3264,25 +3186,9 @@ export class DouyinBrowser {
             extra: Array.isArray(data?.comment?.text_extra) ? data.comment.text_extra : [],
           };
         },
-        { awemeId: id, text, replyId: rootReplyTo || replyTo, replyToReplyId: replyTo },
+        { awemeId: id, text },
       )
       .catch(() => null);
-    /**
-     * 留一份「上次评论接口到底返回了什么」。
-     * 抖音回复失败时上层只会看到 null，没有这个就只能猜；2026-11-11 楼中楼发了两次都没成，
-     * 日志里一个字都没有，就是缺这个。
-     */
-    this.lastCommentApi = {
-      at: Date.now(),
-      mode: replyTo ? 'reply' : 'comment',
-      awemeId: String(id),
-      replyId: String(rootReplyTo || replyTo || ''),
-      replyToReplyId: String(replyTo || ''),
-      http: r?.http ?? 0,
-      code: r?.code ?? -1,
-      msg: String(r?.msg ?? '').slice(0, 100),
-      cid: r?.cid ?? '',
-    };
     if (!r) return null;
     // status_code 8 既可能是「未登录」也可能是参数不对（实测 aweme_id 无效时也是 8），
     // 只有明确说未登录才升级成登录问题，其余一律当作「这条路走不通」，退回点评论框。
@@ -3394,7 +3300,7 @@ export class DouyinBrowser {
     return h ? h.asElement() : null;
   }
 
-  async comment(idOrUrl, text, { mention = '', replyTo = '', rootReplyTo = '' } = {}) {
+  async comment(idOrUrl, text, { mention = '' } = {}) {
     return this.serialize(async () => {
       const id = await this.idOf(idOrUrl);
       if (!id) throw new DouyinError('BAD_ID', '不是有效的抖音视频');
@@ -3411,7 +3317,7 @@ export class DouyinBrowser {
       // 前提是页面得停在这条视频上：实测从抖音首页调会被 403 挡回来，从 /video/ 页调才通。
       if (!mention) {
         await this.ensureVideo(page, id, { note: /\/note\//.test(String(idOrUrl)), quick: true });
-        const fast = await this.commentViaApi(page, id, text, { replyTo, rootReplyTo }).catch((e) => {
+        const fast = await this.commentViaApi(page, id, text).catch((e) => {
           if (e?.code === 'LOGIN_REQUIRED') throw e;
           return null;
         });
@@ -3452,20 +3358,6 @@ export class DouyinBrowser {
             url: `https://www.douyin.com/video/${id}`,
           };
         }
-      }
-
-      // 回复接口没给回执时不能退回点评论框：那条路只会发成一条新的顶层评论，
-      // 对方收不到回复，看起来还像发送成功。宁可报失败，让上层稍后重试。
-      if (replyTo) {
-        const f = await bodyFlags(page).catch(() => ({}));
-        if (f.login) {
-          throw new DouyinError('LOGIN_REQUIRED', '抖音登录态失效了，去面板重新扫码再回复');
-        }
-        const d = this.lastCommentApi ?? {};
-        throw new DouyinError(
-          'REPLY_FAILED',
-          `抖音回复接口没给回执（http ${d.http ?? 0} / code ${d.code ?? -1}${d.msg ? ` / ${d.msg}` : ''}），没敢改成新评论；过一会儿再试。`,
-        );
       }
 
       // ---- 稳路径：真的去点评论框（带 @ 时只能走这条） ----
@@ -3724,56 +3616,6 @@ export class DouyinBrowser {
         { id: String(awemeId), pages },
       )
       .catch(() => null);
-  }
-
-  /**
-   * 评论区里 @ 她：读抖音的「@我的」通知（notice_group=6）。
-   *
-   * 不点通知页：页面里的接口要页面上下文带的 cookie 和签名，直接 fetch 更稳，
-   * 也不会把她的消息标成已读（is_mark_read=0），主人自己打开抖音时红点还在。
-   */
-  async noticeMentions(limit = 6) {
-    const page = await this.getPage();
-    if (!(await this.isLoggedIn().catch(() => false))) return [];
-    if (!/douyin\.com/.test(page.url())) {
-      await this.goto(page, `${ORIGIN}/user/message`, 2500).catch(() => null);
-    }
-    const list = await page
-      .evaluate(
-        async ({ count }) => {
-          const q = new URLSearchParams({
-            device_platform: 'webapp',
-            aid: '6383',
-            channel: 'channel_pc_web',
-            is_new_notice: '1',
-            is_mark_read: '0',
-            notice_group: '6',
-            count: String(count),
-            min_time: '0',
-            max_time: '0',
-            update_version_code: '170400',
-            pc_client_type: '1',
-            pc_libra_divert: 'Windows',
-            support_h265: '1',
-            support_dash: '1',
-            cpu_core_num: '20',
-            version_code: '170400',
-            version_name: '17.4.0',
-            cookie_enabled: 'true',
-            platform: 'PC',
-          });
-          const r = await fetch(`https://www.douyin.com/aweme/v1/web/notice/?${q}`, {
-            credentials: 'include',
-          });
-          if (!r.ok) return [];
-          const d = await r.json().catch(() => null);
-          if (Number(d?.status_code ?? -1) !== 0) return [];
-          return Array.isArray(d?.notice_list_v2) ? d.notice_list_v2 : [];
-        },
-        { count: Math.max(1, Math.min(20, limit)) },
-      )
-      .catch(() => []);
-    return list.map(mapAtNotice).filter(Boolean).slice(0, Math.max(1, limit));
   }
 
   /**
@@ -4421,11 +4263,6 @@ export class DouyinBrowser {
     }
     const f = await bodyFlags(page);
     if (f.risk) throw this.riskError(f, '发私信');
-    /**
-     * 登录态失效时，抖音照样会把输入框清空（还弹个登录提示），
-     * 只看「输入框空了」就会误报「发出去了」。这里必须先拦住。
-     */
-    if (f.login) throw new DouyinError('LOGIN_REQUIRED', '抖音登录态失效了，这条私信没发出去');
     // 记一笔自己刚发出去的话：群里用来兜底区分「我发的」和「别人发的」
     this.noteSent(text);
     return true;
@@ -6463,18 +6300,7 @@ export class DouyinBrowser {
         }
         await this.sendInChat(page, input, text, { mention });
         this.lastAction = `dm ${who}`;
-        /**
-         * 发完再回读一眼：能读到会话内容、但里面没有刚发的这句 → 大概率被审核/限流吞了，
-         * 别直接报成功（2026-11-11 17:57 那条就是这样：她说发了，主人在抖音里根本没看到）。
-         * 读不到任何消息节点时按「未知」处理，不误报失败。
-         */
-        const stamp = cutChars(String(text ?? '').trim(), 12);
-        const echo = await this.waitThreadHasText(page, stamp, 2200).catch(() => ({ seen: true, readable: false }));
-        if (echo.readable && !echo.seen) {
-          this.log?.info?.('stroll dm unconfirmed', { who, stamp, url: String(page.url?.() ?? '') });
-          return { ok: true, sent: true, confirmed: false, what: '私信', mentioned: mention ? !!this.lastMention : null };
-        }
-        return { ok: true, sent: true, confirmed: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
+        return { ok: true, sent: true, mentioned: mention ? !!this.lastMention : null, mentionDebug: this.lastMention ? '' : this.lastMentionDump || '' };
       } finally {
         this.scheduleClose(60);
       }
@@ -6664,26 +6490,6 @@ export class DouyinBrowser {
    * 这套页面读不到标题（实测 `currentChatTitle` 一直返回空），所以「有没有真的切过去」
    * 只能靠内容变没变来判断——这也是 2.1.2 把主人私信逼进 20 秒慢路的原因。
    */
-  /** 会话里能不能读到这段文字（用于确认消息真的发出去了）。 */
-  async waitThreadHasText(page, stamp, timeout = 2000) {
-    if (!stamp) return { seen: true, readable: false };
-    const deadline = Date.now() + timeout;
-    let readable = false;
-    while (Date.now() < deadline) {
-      const texts = await page
-        .evaluate(() =>
-          Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]'))
-            .slice(-8)
-            .map((n) => String(n.innerText ?? '').replace(/\s+/g, ' ').trim()),
-        )
-        .catch(() => []);
-      if (texts.length) readable = true;
-      if (texts.some((t) => t.includes(stamp))) return { seen: true, readable };
-      await page.waitForTimeout(300).catch(() => {});
-    }
-    return { seen: false, readable };
-  }
-
   async threadFingerprint(page) {
     return await page
       .evaluate(() => {
@@ -6867,35 +6673,95 @@ export class DouyinBrowser {
    * 三条实测结论（2026-11-11，别再踩）：
    *   1. 必须用 `/?modal_id=<id>` 这种「视频浮层」打开。直接开 /video/<id> 是宽版详情页，
    *      竖排动作列不渲染（`video-player-share` 恒为 0×0），点了没反应。
-   *   2. **无头模式渲染不出浮层**（等 40 秒也没有那个按钮）。所以后台运行时要把主浏览器
-   *      临时切成「有头离屏」——但**不能另开浏览器注入同一份 cookie**：同一个 sessionid
-   *      出现在两个浏览器里，抖音会判异常并把旧会话踢掉（2026-11-11 反复掉登录就是这么来的）。
-   *   3. 首次进浮层会弹「滚轮/键盘上下键…我知道了」引导，它盖住页面，不关掉就点不动。
+   *   2. **无头模式渲染不出浮层**（等 40 秒也没有那个按钮）。所以后台运行时另开一个
+   *      「离屏有头窗口」来做，窗口在屏幕外，用户看不见，但渲染和点击都正常。
+   *   3. 首次进浮层会弹「滚轮/键盘上下键…我知道了」引导，它盖住页面，不关掉就点不动——
+   *      之前 no-trigger 有一半是它干的。
    */
   async shareCardTo(name, url) {
     const who = String(name ?? '').trim();
     const id = String(url ?? '').match(/(\d{8,})/)?.[1] ?? '';
     if (!who || !id) return { ok: false, step: 'args' };
+    // 主上下文本来就有头（一起看/扫码登录时）：直接开一页，省一次浏览器启动
+    if (this.context && this.headless !== true) {
+      let page = null;
+      try {
+        page = await this.context.newPage();
+        return await this.shareOnPage(page, who, id);
+      } catch (error) {
+        return { ok: false, step: 'error', reason: String(error?.message ?? error).slice(0, 80) };
+      } finally {
+        await page?.close().catch(() => {});
+      }
+    }
+    return await this.shareInTempWindow(who, id);
+  }
 
-    const wasHeadless = this.headless === true;
-    let page = null;
+  /**
+   * 后台（无头）时用的离屏有头窗口：独立资料目录 + 从当前上下文/备份注入登录态，做完就关。
+   * 用独立目录是为了不跟主 profile 抢锁，也不会把主人正在用的页面带跑。
+   */
+  async shareInTempWindow(who, id) {
+    const mod = await this.loadPlaywright();
+    const chromium = mod.chromium ?? mod.default?.chromium;
+    const dir = path.join(this.dataDir, 'stroll', 'share-profile');
+    let ctx = null;
     try {
-      if (wasHeadless) {
-        // 同一个 profile、同一个会话：关掉无头 → 有头离屏 → 分享 → 再切回无头
-        await this.close();
-        await this.launch({ headless: false, force: true, offscreen: true });
-      }
-      const ctx = this.context ?? (await this.launch({ headless: false }));
-      page = await ctx.newPage();
-      return await this.shareOnPage(page, who, id);
+      fs.mkdirSync(dir, { recursive: true });
+      ctx = await chromium.launchPersistentContext(dir, {
+        headless: false,
+        channel: this.channel ?? 'msedge',
+        viewport: { width: 1400, height: 900 },
+        locale: 'zh-CN',
+        timezoneId: 'Asia/Shanghai',
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          '--autoplay-policy=no-user-gesture-required',
+          // 挪到屏幕外：看得见就打扰人了，但必须真渲染，所以不能 headless
+          '--window-position=-2400,-2400',
+          '--window-size=1420,940',
+          '--disable-features=CalculateNativeWinOcclusion',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+        ],
+        ignoreDefaultArgs: ['--enable-automation'],
+      });
+      const cookies = await this.shareCookies();
+      if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
+      const page = await ctx.newPage();
+      const result = await this.shareOnPage(page, who, id);
+      this.log?.info?.('stroll share temp window', { ok: result.ok, step: result.step ?? '' });
+      return result;
     } catch (error) {
-      return { ok: false, step: 'error', reason: String(error?.message ?? error).slice(0, 80) };
+      return { ok: false, step: 'temp-browser', reason: String(error?.message ?? error).slice(0, 80) };
     } finally {
-      await page?.close().catch(() => {});
-      if (wasHeadless) {
-        await this.close().catch(() => {});
-        await this.launch({ headless: true, force: true }).catch(() => {});
-      }
+      await ctx?.close().catch(() => {});
+    }
+  }
+
+  /** 分享窗口要用的 cookie：优先当前上下文的实时值，没有再用落盘备份。 */
+  async shareCookies() {
+    const pick = (list) =>
+      (Array.isArray(list) ? list : [])
+        .filter((c) => /(^|\.)(douyin|bytedance|amemv|snssdk)\.(com|cn)$/i.test(String(c?.domain ?? '')))
+        .map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path ?? '/',
+          expires: c.expires && c.expires > 0 ? c.expires : undefined,
+          httpOnly: !!c.httpOnly,
+          secure: !!c.secure,
+          sameSite: c.sameSite ?? 'Lax',
+        }));
+    const live = this.context ? await this.context.cookies().catch(() => []) : [];
+    const fromLive = pick(live);
+    if (fromLive.length) return fromLive;
+    try {
+      const saved = JSON.parse(fs.readFileSync(this.cookieFile, 'utf8'));
+      return pick(saved?.cookies ?? []);
+    } catch {
+      return [];
     }
   }
 

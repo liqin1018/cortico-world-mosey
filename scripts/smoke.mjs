@@ -3,7 +3,7 @@ import zlib from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_GROUPS, DEFAULTS } from '../src/config.js';
-import { secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
+import { mapAtNotice, secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
 import { approvalFor } from '../src/policy.js';
 import { StickerBook, extOfBuffer } from '../src/stickers.js';
 import { cutChars, dayKey, imageMimeOf, looksBrokenPath, stripAtName, stripAtPlaceholder } from '../src/util.js';
@@ -1246,6 +1246,10 @@ world.running = true;
 world.cfg.bilibili = true;
 world.cfg.mentionWatch = true;
 world.mentionAt = 0;
+const prevDyMentions = world.douyin.noticeMentions;
+const prevCfgDyM = world.cfg.douyin;
+world.cfg.douyin = false;
+world.douyin.noticeMentions = async () => [];
 const atItem = {
   id: 'at-1',
   kind: 'at',
@@ -1289,7 +1293,58 @@ check(
   '@ 提醒能在设置里关',
   !!CONFIG_GROUPS.find((g) => /私信与群/.test(g.schema.title))?.schema.properties?.['worlds.stroll.mentionWatch'],
 );
+/* 抖音评论区的 @：只做「看见」，不碰楼中楼回复 */
+const mappedDyAt = mapAtNotice({
+  type: 45,
+  nid_str: '7706827679853151242',
+  aweme_id: '7706493792187339619',
+  create_time: 1794385651,
+  at: {
+    sub_type: 2,
+    content: '@小月 看到了吗',
+    schema_url: 'aweme://aweme/detail/7706493792187339619?cid=7706827662362215209',
+    aweme: { aweme_id: '7706493792187339619', desc: '万能的网友救一下。#电脑性能帧数', aweme_type: 68 },
+    user_info: { nickname: '小月月一直在玩', sec_uid: 'MS4wABC' },
+  },
+});
+check(
+  '抖音 @ 通知映射（cid 从 schema_url 里取）',
+  mappedDyAt?.cid === '7706827662362215209' &&
+    mappedDyAt?.awemeId === '7706493792187339619' &&
+    mappedDyAt?.type === 'note' &&
+    mappedDyAt?.user === '小月月一直在玩' &&
+    /万能的网友/.test(mappedDyAt?.where ?? ''),
+  JSON.stringify(mappedDyAt),
+);
+check('抖音 @ 的时间是毫秒', mappedDyAt.at === 1794385651000, String(mappedDyAt.at));
+
+world.cfg.bilibili = false;
+world.cfg.douyin = true;
+world.cfg.mentionWatch = true;
+world.mentionAt = 0;
+world.bili.mentions = async () => [];
+world.douyin.noticeMentions = async () => [
+  {
+    ...mappedDyAt,
+    id: 'dy-at-1',
+  },
+];
+mPushes.length = 0;
+await world.mentionBeat();
+check(
+  '抖音有人 @ 也会叫她，并说明只能发评论/私信',
+  mPushes.length === 1 &&
+    /抖音评论里 @ 了你/.test(mPushes[0].text) &&
+    /action=comment/.test(mPushes[0].text) &&
+    !/reply_to=/.test(mPushes[0].text),
+  JSON.stringify(mPushes).slice(0, 200),
+);
+await world.mentionBeat();
+check('同一条抖音 @ 只叫一次', mPushes.length === 1 && world.store.seenAt('atpush:douyin:dy-at-1'));
+
 world.bili.mentions = prevMentionsFn;
+world.douyin.noticeMentions = prevDyMentions;
+world.cfg.douyin = prevCfgDyM;
 world.push = prevPushM;
 world.running = prevRunningM;
 world.cfg.bilibili = prevCfgM.bilibili;

@@ -1314,11 +1314,19 @@ export class StrollWorld {
    * 评论区 @ 她：查一次「@我的」，有新东西就推给她。
    * 只读接口，失败就当没有（未登录/没开评论通知都会是空的），不打扰她。
    */
+  /**
+   * 评论区 @ 她：B站 + 抖音 一起看，有新东西就推给她。
+   *
+   * 抖音走自己的通知接口（notice_group=6）；**只做「看见」，不做楼中楼回复**——
+   * 回复接口在我们账号上实测 403，容易误报，先不碰。她能回的方式是发一条新评论或私信对方。
+   */
   async mentionBeat() {
     if (!this.running) return;
     if (this.cfg.enabled === false) return;
     const live = this.liveConfig() ?? {};
-    if ((live.bilibili ?? this.cfg.bilibili) === false) return;
+    const biliOn = (live.bilibili ?? this.cfg.bilibili) !== false;
+    const douyinOn = (live.douyin ?? this.cfg.douyin) !== false;
+    if (!biliOn && !douyinOn) return;
     if ((live.mentionWatch ?? this.cfg.mentionWatch ?? true) === false) return;
     if (this.policy.isQuiet()) return;
     const paused = this.policy.paused();
@@ -1328,14 +1336,34 @@ export class StrollWorld {
     // 90 秒一次：以前 5 分钟，主人 @ 完在评论里问「收到没」，她当场答「没收到」，很尴尬
     if (Date.now() - Number(this.mentionAt ?? 0) < 90 * 1000) return;
     this.mentionAt = Date.now();
-    const items = await this.bili.mentions(6).catch(() => []);
-    const fresh = items.filter((x) => x?.id && !this.store.seenAt(`atpush:${x.id}`));
+    const [biliItems, douyinItems] = await Promise.all([
+      biliOn ? this.bili.mentions(6).catch(() => []) : [],
+      douyinOn ? this.douyin.noticeMentions(6).catch(() => []) : [],
+    ]);
+    const items = [
+      ...biliItems.map((x) => ({ ...x, platform: 'bilibili' })),
+      ...douyinItems,
+    ];
+    // B站 沿用老的去重键（升级后不会把旧 @ 再提醒一遍），抖音单独加平台前缀
+    const keyOf = (x) => (x.platform === 'douyin' ? `atpush:douyin:${x.id}` : `atpush:${x.id}`);
+    // B站 的 at 是秒，抖音的是毫秒
+    const stampOf = (x) => (x.platform === 'bilibili' ? Number(x.at ?? 0) * 1000 : Number(x.at ?? 0));
+    const fresh = items.filter((x) => x?.id && !this.store.seenAt(keyOf(x))).sort((a, b) => stampOf(b) - stampOf(a));
     if (!fresh.length) return;
     // 一次最多提两条：被人连着 @ 也不该把她（和主人）刷屏
     const picked = fresh.slice(0, 2);
-    for (const x of picked) this.store.markSeen(`atpush:${x.id}`);
+    for (const x of picked) this.store.markSeen(keyOf(x));
     this.store.save();
     const lines = picked.map((x, i) => {
+      if (x.platform === 'douyin') {
+        return (
+          `${i + 1}. ${x.user || '有人'} 在抖音评论里 @ 了你\n` +
+          `   视频：${x.where || '（没读到标题）'}\n` +
+          `   评论：${x.text}\n` +
+          `   链接：${x.url}\n` +
+          `   想回：stroll_act action=comment platform=douyin target=${x.url} text=…（抖音楼中楼暂不支持，只能发一条新评论；也可以私信他）`
+        );
+      }
       const target = x.bvid
         ? `https://www.bilibili.com/video/${x.bvid}`
         : x.dynamicId
@@ -1347,12 +1375,14 @@ export class StrollWorld {
       const quote = x.quote ? `\n   他在回的那条：${x.quote}` : '';
       return `${head}\n${where}\n${body}${quote}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${x.rpid} text=…`;
     });
-    this.log?.info?.('stroll mention push', { n: picked.length, ids: picked.map((x) => x.id) });
+    const platforms = [...new Set(picked.map((x) => x.platform))];
+    const label = platforms.length === 1 ? (platforms[0] === 'douyin' ? '抖音' : 'B站') : 'B站/抖音';
+    this.log?.info?.('stroll mention push', { n: picked.length, ids: picked.map((x) => x.id), platforms });
     await this.push(
       'stroll.reply',
-      `（B站）有人在评论区 @ 你了：\n${lines.join('\n')}\n` +
-        '想回就照上面给的参数回（reply_to 别丢，丢了就变成新开一条评论）；不想回就放着，不用每条都应。',
-      { kind: 'at', platform: 'bilibili', n: picked.length },
+      `（${label}）有人在评论区 @ 你了：\n${lines.join('\n')}\n` +
+        '想回就照上面给的参数回；不想回就放着，不用每条都应。抖音那边暂时只能发新评论或私信，回不到那条评论下面。',
+      { kind: 'at', platform: platforms.join(','), n: picked.length },
       'debounce',
     );
   }
@@ -3574,7 +3604,9 @@ export class StrollWorld {
     if (!force && this._dyInbox && Date.now() - this._dyInboxAt < ttl) return this._dyInbox;
     try {
       const items = await this.douyin.inbox(5);
-      this._dyInbox = items;
+      // 评论区的 @ 也算「谁找你」，面板的 @我 分类才有东西
+      const ats = await this.douyin.noticeMentions(3).catch(() => []);
+      this._dyInbox = items.concat(ats);
     } catch (error) {
       this.log?.warn?.('stroll douyin inbox failed', { message: error?.message });
       this._dyInbox = this._dyInbox ?? [];

@@ -22,6 +22,45 @@ export class DouyinError extends Error {
   }
 }
 
+/**
+ * 「@我的」通知 → 内部 at 条目。
+ * 抖音把评论里的 @ 放在 notice type=45 的 at 里；评论 id 只出现在 schema_url
+ * 的 cid 参数上，不是独立字段。sub_type=1 是发作品时提到她，没有评论可回。
+ */
+export function mapAtNotice(item) {
+  if (!item || Number(item.type) !== 45) return null;
+  const at = item.at ?? {};
+  const aweme = at.aweme ?? {};
+  const user = at.user_info ?? {};
+  const awemeId = String(
+    item.aweme_id && String(item.aweme_id) !== '0' ? item.aweme_id : aweme.aweme_id ?? '',
+  );
+  if (!awemeId) return null;
+  const schema = String(at.schema_url ?? '');
+  const cid = schema.match(/[?&]cid=(\d+)/)?.[1] ?? String(at.cid ?? at.comment_id ?? '');
+  const rootCid = schema.match(/[?&]reply_id=(\d+)/)?.[1] ?? (String(at.reply_id ?? '') || cid);
+  const note = Number(aweme.aweme_type ?? item.aweme_type ?? 0) === 68;
+  const content = String(at.content ?? at.label_text ?? '').trim();
+  const title = String(aweme.desc ?? aweme.item_title ?? aweme.title ?? '').trim();
+  const nickname = String(user.nickname ?? '').trim();
+  return {
+    kind: 'at',
+    platform: 'douyin',
+    type: note ? 'note' : 'video',
+    id: String(item.nid_str ?? item.nid ?? `${awemeId}:${cid || ''}`),
+    user: nickname,
+    secUid: String(user.sec_uid ?? ''),
+    mid: String(user.uid ?? ''),
+    text: truncate(content || title || '（在评论里 @ 了你）', 140),
+    quote: '',
+    where: truncate(title || `视频 ${awemeId}`, 60),
+    at: Number(item.create_time ?? 0) * 1000,
+    url: `${ORIGIN}/${note ? 'note' : 'video'}/${awemeId}`,
+    awemeId,
+    cid,
+  };
+}
+
 const feedScript = (limit) => String.raw`(() => {
   const limit = ${limit};
   const out = [];
@@ -3616,6 +3655,56 @@ export class DouyinBrowser {
         { id: String(awemeId), pages },
       )
       .catch(() => null);
+  }
+
+  /**
+   * 评论区里 @ 她：读抖音的「@我的」通知（notice_group=6）。
+   *
+   * 不点通知页：页面里的接口要页面上下文带的 cookie，直接 fetch 更稳，
+   * 也不会把她的消息标成已读（is_mark_read=0），主人自己打开抖音时红点还在。
+   */
+  async noticeMentions(limit = 6) {
+    const page = await this.getPage();
+    if (!(await this.isLoggedIn().catch(() => false))) return [];
+    if (!/douyin\.com/.test(page.url())) {
+      await this.goto(page, `${ORIGIN}/user/message`, 2500).catch(() => null);
+    }
+    const list = await page
+      .evaluate(
+        async ({ count }) => {
+          const q = new URLSearchParams({
+            device_platform: 'webapp',
+            aid: '6383',
+            channel: 'channel_pc_web',
+            is_new_notice: '1',
+            is_mark_read: '0',
+            notice_group: '6',
+            count: String(count),
+            min_time: '0',
+            max_time: '0',
+            update_version_code: '170400',
+            pc_client_type: '1',
+            pc_libra_divert: 'Windows',
+            support_h265: '1',
+            support_dash: '1',
+            cpu_core_num: '20',
+            version_code: '170400',
+            version_name: '17.4.0',
+            cookie_enabled: 'true',
+            platform: 'PC',
+          });
+          const r = await fetch(`https://www.douyin.com/aweme/v1/web/notice/?${q}`, {
+            credentials: 'include',
+          });
+          if (!r.ok) return [];
+          const d = await r.json().catch(() => null);
+          if (Number(d?.status_code ?? -1) !== 0) return [];
+          return Array.isArray(d?.notice_list_v2) ? d.notice_list_v2 : [];
+        },
+        { count: Math.max(1, Math.min(20, limit)) },
+      )
+      .catch(() => []);
+    return list.map(mapAtNotice).filter(Boolean).slice(0, Math.max(1, limit));
   }
 
   /**

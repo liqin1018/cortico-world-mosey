@@ -4516,7 +4516,7 @@ export class StrollWorld {
    * 播放器那块的 DOM，页面还挂着验证 iframe），所以用首帧截图 + 标题凑一个「像分享」的效果。
    * 失败就返回 null，上层照旧发纯文字。
    */
-  async shareDouyinLink(name, text) {
+  async shareDouyinLink(name, text, { only = '' } = {}) {
     const raw = String(text ?? '');
     const m = raw.match(/https?:\/\/(?:www\.)?(?:douyin\.com\/(?:video|note)\/\d+|v\.douyin\.com\/[\w-]+)/i);
     if (!m) return null;
@@ -4546,6 +4546,12 @@ export class StrollWorld {
         return { ok: true, sent: true, via: 'card-unconfirmed' };
       }
       this.log?.info?.('stroll share card fallback', { url: m[0], step: card?.step ?? 'unknown' });
+      /**
+       * 群里只试卡片，不降级成「画面 + 标题」：
+       * 群消息带一张视频首帧会显得莫名其妙，而且多花十几秒抽帧。
+       * 卡片发不出去就让上层退回纯文字（链接照样在）。
+       */
+      if (only === 'card') return null;
     }
     const info = await this.douyin.open(m[0], { frames: 1, keep: 120 }).catch(() => null);
     if (!info?.frames?.length) return null;
@@ -5662,10 +5668,17 @@ export class StrollWorld {
             : plan.stranger
               ? await this.douyin.replyDm(target, text, { strict: true })
               : plan.group
-                ? await this.douyin.replyDm(target, text, {
+                ? /**
+                   * 群里发抖音视频链接：先试着发原生卡片（走抖音自己的「分享给朋友」，
+                   * 分享面板里如果列了这个群就能点）。失败就让下面退回纯文字，
+                   * 不降级成「画面 + 标题」——群里甩一张视频首帧很奇怪，
+                   * 而且 ownerChat 抽帧那条路是给私信写的。
+                   */
+                  (await this.shareDouyinLink(target, text, { only: 'card' }).catch(() => null)) ??
+                  (await this.douyin.replyDm(target, text, {
                     // 群里 @ 人必须是真 chip：手打 @ 只是文字，看起来蓝但对方收不到通知
                     mention: String(plan.mention ?? '').trim(),
-                  })
+                  }))
                 : await this.douyinDmFast(target, text);
       } else {
         return { ok: false, code: 'UNKNOWN_ACTION', error: '不认识的动作。' };

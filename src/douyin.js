@@ -6763,6 +6763,12 @@ export class DouyinBrowser {
         args: [
           '--disable-blink-features=AutomationControlled',
           '--autoplay-policy=no-user-gesture-required',
+          /**
+           * 必须静音。这个窗口虽然有头且挪到了屏幕外，但视频是**真播**的——
+           * 不静音的话主人会在电脑后台听见一段不明来历的声音（2026-11-12 反馈）。
+           * 分享只需要点按钮，不需要真的听声音。
+           */
+          '--mute-audio',
           // 挪到屏幕外：看得见就打扰人了，但必须真渲染，所以不能 headless
           '--window-position=-2400,-2400',
           '--window-size=1420,940',
@@ -6775,7 +6781,18 @@ export class DouyinBrowser {
       const cookies = await this.shareCookies();
       if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
       const page = await ctx.newPage();
-      const result = await this.shareOnPage(page, who, id);
+      let result = await this.shareOnPage(page, who, id);
+      /**
+       * `no-trigger` 基本都不是「视频不能分享」，而是浮层没渲染出来：
+       * 连续开关同一个 share-profile（上一轮的锁还没放干净）、抖音自己抽风、
+       * 首屏还在加载。同一页再看一次往往就出来了，比直接降级成「画面 + 标题」便宜。
+       * 2026-11-12 13:25 那次就是：第一次成功，隔 30 秒第二次 no-trigger。
+       */
+      if (!result.ok && result.step === 'no-trigger') {
+        this.log?.info?.('stroll share retry', { who, id, step: result.step });
+        await page.waitForTimeout(900);
+        result = await this.shareOnPage(page, who, id);
+      }
       this.log?.info?.('stroll share temp window', { ok: result.ok, step: result.step ?? '' });
       return result;
     } catch (error) {
@@ -6817,7 +6834,7 @@ export class DouyinBrowser {
     await page
       .goto(`https://www.douyin.com/?modal_id=${id}`, { waitUntil: 'domcontentloaded', timeout: 30000 })
       .catch(() => {});
-    const box = await this.waitShareTrigger(page, 20000);
+    const box = await this.waitShareTrigger(page, 12000);
     if (!box) return { ok: false, step: 'no-trigger' };
     await page.bringToFront().catch(() => {});
     let opened = false;
@@ -6896,14 +6913,29 @@ export class DouyinBrowser {
             .filter((x) => x && !/^(在线|分享|捎句话|已分享)$/.test(x))
             .join(' ');
         const rows = [];
-        document.querySelectorAll('div').forEach((el) => {
-          const t = clean(el.innerText);
-          if (!t || !/(分享|捎句话|已分享)$/.test(t)) return;
-          const r = el.getBoundingClientRect();
-          if (r.width < 240 || r.width > 440 || r.height < 36 || r.height > 100) return;
-          if (bare(t) !== name) return;
-          rows.push(el);
-        });
+        const collect = (match) => {
+          document.querySelectorAll('div').forEach((el) => {
+            const t = clean(el.innerText);
+            if (!t || !/(分享|捎句话|已分享)$/.test(t)) return;
+            const r = el.getBoundingClientRect();
+            if (r.width < 240 || r.width > 440 || r.height < 36 || r.height > 100) return;
+            if (!match(t)) return;
+            rows.push(el);
+          });
+        };
+        // 第一轮：整串严格相等（人名走这条，差一个字都不点）
+        collect((t) => bare(t) === name);
+        if (!rows.length) {
+          /**
+           * 第二轮：群名归一化后再比。
+           * 群在列表里可能写成「A, B, C」也可能写成「A、B、C」，空格多少也不一定；
+           * 严格相等对群几乎永远不成立，于是群里永远发不出卡片（2026-11-12 反馈）。
+           * 只去掉空白、统一逗号/顿号，不做包含匹配——点错就是把视频发给别人。
+           */
+          const key = (s) => String(s ?? '').replace(/[\s\u3000]+/g, '').replace(/[,，、]/g, ',');
+          const want = key(name);
+          collect((t) => key(bare(t)) === want);
+        }
         if (!rows.length) return { ok: false, step: 'no-row' };
         const row = rows[rows.length - 1];
         const btn = Array.from(row.querySelectorAll('div,span,button'))

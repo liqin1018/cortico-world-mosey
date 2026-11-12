@@ -2431,6 +2431,39 @@ world.douyin.clickStrangerThread = prevRyClickStranger;
 world.douyin.waitMsgInput = prevRyWaitInput;
 world.douyin.sendInChat = prevRySend;
 
+/* ---- 读私信前也要点会话：点不到就不读，别把群消息当成主人私信 ----
+   页面停在群上时，群里最后一条通常是「我发的」，尾部判定为空 →
+   永远认为「没有新私信」，主人的话推不过来（2026-11-12 13:04 已读不回）。 */
+const prevPkPage = world.douyin.dmPage;
+const prevPkThread = world.douyin.dmThread;
+const prevPkClick = world.douyin.clickThread;
+const prevPkClickStranger = world.douyin.clickStrangerThread;
+const prevPkRead = world.douyin.readMessages;
+const pkReads = [];
+world.douyin.dmPage = {
+  isClosed: () => false,
+  url: () => 'https://www.douyin.com/chat',
+  waitForTimeout: async () => {},
+};
+world.douyin.dmThread = '小鹿';
+world.douyin.clickThread = async () => false;
+world.douyin.clickStrangerThread = async () => false;
+world.douyin.readMessages = async () => {
+  pkReads.push('read');
+  return [{ from: 'them', text: '群里别人的话', kind: 'text' }];
+};
+const pkMiss = await world.douyin.peekThread('小鹿', 8).catch((e) => ({ ok: false, error: e?.message }));
+check(
+  '读私信点不到会话就不读（不把群消息当主人私信）',
+  pkMiss?.ok === false && pkMiss?.code === 'THREAD_DRIFT' && pkReads.length === 0,
+  JSON.stringify({ pkMiss, pkReads }),
+);
+world.douyin.dmPage = prevPkPage;
+world.douyin.dmThread = prevPkThread;
+world.douyin.clickThread = prevPkClick;
+world.douyin.clickStrangerThread = prevPkClickStranger;
+world.douyin.readMessages = prevPkRead;
+
 // 发送路线：陌生人必须走「按昵称回会话」，绝不能掉进「私信主人」
 const prevDyReplyCard = world.douyin.replyDm;
 const prevDmFast = world.douyinDmFast;

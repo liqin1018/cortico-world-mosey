@@ -6073,12 +6073,20 @@ export class DouyinBrowser {
        * 页面没关、观察器还活着，`dmThread` 却已经过期——这时读到的是别人/群的聊天，
        * 却被当成「主人发私信了」。新开群后私信突然不回，就是这种错位。
        */
-      const title = await this.currentChatTitle(dm).catch(() => '');
-      const onOwner = !title || this.threadTitleMatches(title, who);
-      if (!onOwner) {
-        const back = await this.clickThread(dm, who).catch(() => false);
-        if (!back) return { ok: false, code: 'THREAD_DRIFT', messages: [] };
-        await dm.waitForTimeout(140);
+      /**
+       * 读之前必须按昵称重新点一次会话。
+       *
+       * 这里以前是「标题读不出来就放过」（`const onOwner = !title || ...`）——
+       * 而这个号 `currentChatTitle` **恒为空**，于是页面停在群里时照样往下读，
+       * 读到的是群消息；群里最后一条通常是「我发的」，`dmTailOf` 取不到尾巴，
+       * 判定「没有新私信」→ 主人的话永远推不过来。
+       * 2026-11-12 13:04「私信已读不回」就是这么来的：她根本没收到通知。
+       */
+      const clicked = await this.reopenThread(dm, who).catch(() => false);
+      if (!clicked) {
+        // 点不到就不读：与其把别人/群的会话当成主人的，不如这一轮跳过
+        this.log?.info?.('stroll dm peek miss', { who, url: String(dm.url?.() ?? '') });
+        return { ok: false, code: 'THREAD_DRIFT', messages: [] };
       }
       const live = await this.readMessages(dm, size).catch(() => []);
       if (live.length) return { ok: true, messages: live, live: true };

@@ -2464,6 +2464,31 @@ world.douyin.clickThread = prevPkClick;
 world.douyin.clickStrangerThread = prevPkClickStranger;
 world.douyin.readMessages = prevPkRead;
 
+/* ---- 分享卡片：同一个视频失败后一小时内不再重试 ----
+   no-trigger 里有一部分是「这个视频本来就不给分享」，重试只是白等十几秒。 */
+const prevDoShare = world.douyin.doShareCardTo;
+const prevShareFailAt = world.douyin.shareFailAt;
+const doShareCalls = [];
+world.douyin.doShareCardTo = async () => {
+  doShareCalls.push(1);
+  return { ok: false, step: 'no-trigger' };
+};
+world.douyin.shareFailAt = {};
+const sf1 = await world.douyin.shareCardTo('小鹿', 'https://www.douyin.com/video/7703686851571371283');
+check(
+  '分享失败会记下来',
+  sf1?.ok === false && Number(world.douyin.shareFailAt?.['7703686851571371283'] ?? 0) > 0,
+  JSON.stringify(sf1),
+);
+const sf2 = await world.douyin.shareCardTo('小鹿', 'https://www.douyin.com/video/7703686851571371283');
+check(
+  '同一视频失败后一小时内直接跳过卡片',
+  sf2?.step === 'cached-fail' && doShareCalls.length === 1,
+  JSON.stringify({ sf2, n: doShareCalls.length }),
+);
+world.douyin.doShareCardTo = prevDoShare;
+world.douyin.shareFailAt = prevShareFailAt;
+
 // 发送路线：陌生人必须走「按昵称回会话」，绝不能掉进「私信主人」
 const prevDyReplyCard = world.douyin.replyDm;
 const prevDmFast = world.douyinDmFast;

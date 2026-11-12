@@ -6728,6 +6728,23 @@ export class DouyinBrowser {
     const who = String(name ?? '').trim();
     const id = String(url ?? '').match(/(\d{8,})/)?.[1] ?? '';
     if (!who || !id) return { ok: false, step: 'args' };
+    /**
+     * 同一个视频刚抓失败过：一小时之内别再试。
+     * `no-trigger` 里有一部分是「这个视频本来就不给分享」（作者关了、私密、审核中），
+     * 那种情况重试只是白等十几秒——不如直接走图片。
+     */
+    const lastFail = Number(this.shareFailAt?.[id] ?? 0);
+    if (lastFail && Date.now() - lastFail < 60 * 60 * 1000) {
+      return { ok: false, step: 'cached-fail', at: lastFail };
+    }
+    const result = await this.doShareCardTo(who, id);
+    if (!result?.ok && result?.step !== 'no-confirm') {
+      this.shareFailAt = { ...(this.shareFailAt ?? {}), [id]: Date.now() };
+    }
+    return result;
+  }
+
+  async doShareCardTo(who, id) {
     // 主上下文本来就有头（一起看/扫码登录时）：直接开一页，省一次浏览器启动
     if (this.context && this.headless !== true) {
       let page = null;
@@ -6744,44 +6761,128 @@ export class DouyinBrowser {
   }
 
   /**
-   * 后台（无头）时用的离屏有头窗口：独立资料目录 + 从当前上下文/备份注入登录态，做完就关。
-   * 用独立目录是为了不跟主 profile 抢锁，也不会把主人正在用的页面带跑。
+   * 分享用的离屏有头窗口：**常驻复用**。
+   *
+   * 以前每次分享都 `launchPersistentContext` + `close`，冷启动就要 2.5~3.5 秒，
+   * 而且连续开关同一个 profile 容易卡在「锁没放干净」的状态——第二次分享直接
+   * `no-trigger`（2026-11-12 13:25 实例）。常驻之后这两件事一起消失。
+   * 空闲 5 分钟自动关，不常占内存。
    */
-  async shareInTempWindow(who, id) {
+  async ensureShareWindow() {
+    const alive = this.shareCtx && (typeof this.shareCtx.isClosed !== 'function' || !this.shareCtx.isClosed());
+    if (alive) {
+      let page = this.sharePage && !this.sharePage.isClosed() ? this.sharePage : null;
+      if (!page) {
+        page = await this.shareCtx.newPage().catch(() => null);
+        this.sharePage = page;
+      }
+      if (page) {
+        // 顺手刷新一次登录态：窗口可能挂了几分钟，cookie 轮换过
+        const cookies = await this.shareCookies().catch(() => []);
+        if (cookies.length) await this.shareCtx.addCookies(cookies).catch(() => {});
+        return { page, reused: true };
+      }
+      await this.closeShareWindow().catch(() => {});
+    }
     const mod = await this.loadPlaywright();
     const chromium = mod.chromium ?? mod.default?.chromium;
     const dir = path.join(this.dataDir, 'stroll', 'share-profile');
-    let ctx = null;
+    fs.mkdirSync(dir, { recursive: true });
+    const ctx = await chromium.launchPersistentContext(dir, {
+      headless: false,
+      channel: this.channel ?? 'msedge',
+      viewport: { width: 1400, height: 900 },
+      locale: 'zh-CN',
+      timezoneId: 'Asia/Shanghai',
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--autoplay-policy=no-user-gesture-required',
+        /**
+         * 必须静音。这个窗口虽然有头且挪到了屏幕外，但视频是**真播**的——
+         * 不静音的话主人会在电脑后台听见一段不明来历的声音（2026-11-12 反馈）。
+         * 分享只需要点按钮，不需要真的听声音。
+         */
+        '--mute-audio',
+        // 挪到屏幕外：看得见就打扰人了，但必须真渲染，所以不能 headless
+        '--window-position=-2400,-2400',
+        '--window-size=1420,940',
+        '--disable-features=CalculateNativeWinOcclusion',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+      ],
+      ignoreDefaultArgs: ['--enable-automation'],
+    });
+    const cookies = await this.shareCookies();
+    if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
+    const page = await ctx.newPage();
+    this.shareCtx = ctx;
+    this.sharePage = page;
+    ctx.on?.('close', () => {
+      if (this.shareCtx === ctx) {
+        this.shareCtx = null;
+        this.sharePage = null;
+      }
+    });
+    return { page, reused: false };
+  }
+
+  /** 关掉分享窗口（空闲超时 / 出异常 / 世界停止时）。 */
+  async closeShareWindow() {
+    if (this.shareIdleTimer) clearTimeout(this.shareIdleTimer);
+    this.shareIdleTimer = null;
+    this.sharePage = null;
+    const ctx = this.shareCtx;
+    this.shareCtx = null;
+    if (ctx) await ctx.close().catch(() => {});
+  }
+
+  /** 每次用完续一次空闲计时：5 分钟没人用就关掉，别一直占着 200~300MB 内存。 */
+  touchShareWindow() {
+    if (this.shareIdleTimer) clearTimeout(this.shareIdleTimer);
+    this.shareIdleTimer = setTimeout(() => {
+      this.closeShareWindow().catch(() => {});
+    }, 5 * 60 * 1000);
+    this.shareIdleTimer.unref?.();
+  }
+
+  /**
+   * 抓不到卡片时留一份现场：截图 + 关键状态。
+   * `no-trigger` 本身不带任何信息，没有这个只能靠猜（是没渲染、被频控、还是视频不给分享）。
+   */
+  async captureShareFailure(page, who, id, step) {
     try {
+      const dir = path.join(this.dataDir, 'stroll', 'debug');
       fs.mkdirSync(dir, { recursive: true });
-      ctx = await chromium.launchPersistentContext(dir, {
-        headless: false,
-        channel: this.channel ?? 'msedge',
-        viewport: { width: 1400, height: 900 },
-        locale: 'zh-CN',
-        timezoneId: 'Asia/Shanghai',
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--autoplay-policy=no-user-gesture-required',
-          /**
-           * 必须静音。这个窗口虽然有头且挪到了屏幕外，但视频是**真播**的——
-           * 不静音的话主人会在电脑后台听见一段不明来历的声音（2026-11-12 反馈）。
-           * 分享只需要点按钮，不需要真的听声音。
-           */
-          '--mute-audio',
-          // 挪到屏幕外：看得见就打扰人了，但必须真渲染，所以不能 headless
-          '--window-position=-2400,-2400',
-          '--window-size=1420,940',
-          '--disable-features=CalculateNativeWinOcclusion',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding',
-        ],
-        ignoreDefaultArgs: ['--enable-automation'],
-      });
-      const cookies = await this.shareCookies();
-      if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
-      const page = await ctx.newPage();
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const base = path.join(dir, `share-fail-${id}-${stamp}`);
+      const info = await page
+        .evaluate(() => ({
+          url: String(location.href),
+          title: String(document.title),
+          hasVideo: !!document.querySelector('video'),
+          shareBtns: document.querySelectorAll('[data-e2e="video-player-share"]').length,
+          guide: String(document.body?.innerText ?? '').includes('我知道了'),
+          text: String(document.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 600),
+        }))
+        .catch(() => null);
+      fs.writeFileSync(`${base}.json`, JSON.stringify({ who, id, step, at: Date.now(), info }, null, 2));
+      await page.screenshot({ path: `${base}.png`, timeout: 5000 }).catch(() => {});
+      this.log?.info?.('stroll share fail captured', { id, step, name: `${base}.json` });
+    } catch {
+      // 留证据失败不影响主流程
+    }
+  }
+
+  /**
+   * 后台（无头）时用的离屏有头窗口：独立资料目录 + 从当前上下文/备份注入登录态。
+   * 用独立目录是为了不跟主 profile 抢锁，也不会把主人正在用的页面带跑。
+   */
+  async shareInTempWindow(who, id) {
+    try {
+      const { page, reused } = await this.ensureShareWindow();
+      this.touchShareWindow();
       let result = await this.shareOnPage(page, who, id);
+      this.touchShareWindow();
       /**
        * `no-trigger` 基本都不是「视频不能分享」，而是浮层没渲染出来：
        * 连续开关同一个 share-profile（上一轮的锁还没放干净）、抖音自己抽风、
@@ -6793,12 +6894,15 @@ export class DouyinBrowser {
         await page.waitForTimeout(900);
         result = await this.shareOnPage(page, who, id);
       }
-      this.log?.info?.('stroll share temp window', { ok: result.ok, step: result.step ?? '' });
+      // 还是不通：留一份现场（截图 + 页面状态），下次不用靠猜
+      if (!result.ok) await this.captureShareFailure(page, who, id, result.step);
+      this.touchShareWindow();
+      this.log?.info?.('stroll share temp window', { ok: result.ok, step: result.step ?? '', reused });
       return result;
     } catch (error) {
+      // 窗口本身坏了（崩了/被关）：关掉重来，下次重新启动
+      await this.closeShareWindow().catch(() => {});
       return { ok: false, step: 'temp-browser', reason: String(error?.message ?? error).slice(0, 80) };
-    } finally {
-      await ctx?.close().catch(() => {});
     }
   }
 
@@ -7295,6 +7399,8 @@ export class DouyinBrowser {
     // 关窗之前先备份登录态：进程被强杀时 Chromium 不一定来得及把 cookie 落盘
     await this.saveCookies({ force: true }).catch(() => {});
     await this.closeWatch().catch(() => {});
+    // 分享用的离屏窗口是常驻的（为了省冷启动），这里必须一起收掉
+    await this.closeShareWindow().catch(() => {});
     await this.page?.close().catch(() => {});
     this.page = null;
     await this.dmPage?.close().catch(() => {});

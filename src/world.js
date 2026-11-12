@@ -5732,6 +5732,32 @@ export class StrollWorld {
         return { ok: false, code: 'UNKNOWN_ACTION', error: '不认识的动作。' };
       }
 
+      /**
+       * 抖音评论被压住时，补一条私信告诉主人。
+       *
+       * 抖音会把一部分评论判成「只有自己可见」（status=2）或「审核中」（status=7），
+       * 这两种别人（包括被 @ 的人）都收不到通知。她以为「@ 了主人」，主人那边什么都没有，
+       * 只能干等（2026-11-12 14:10 实际踩到）。
+       * 只在「这条评论是 @ 主人的」时候补——她自己出门逛时评论被压，不该来烦主人。
+       */
+      if (
+        platform === 'douyin' &&
+        (action === 'comment' || action === 'reply') &&
+        plan.mentionOwner &&
+        result &&
+        result.ok !== false &&
+        result.visible === false
+      ) {
+        const st = Number(result.status ?? 0);
+        const why = st === 2 ? '只有我自己看得见' : st === 7 ? '还在审核' : '没公开';
+        const secUid = this.douyinOwner().secUid;
+        const note = `我在视频评论区 @ 了你，但抖音把那条压住了（${why}），你那边应该看不到。我说的是：${cutChars(text, 120)}`;
+        if (secUid) {
+          this.log?.info?.('stroll comment blocked, dm fallback', { status: st });
+          await this.douyinDmFast(secUid, note).catch(() => {});
+        }
+      }
+
       // 记总耗时：主人在追「一秒内回复」，得能看出是发送慢还是别的地方慢
       if (result && typeof result === 'object') result = { ...result, msTotal: Date.now() - t0 };
 

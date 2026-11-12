@@ -2388,6 +2388,49 @@ world.resolveGroups = prevResolveGroups;
 const stPlan2 = await world.buildPlan('dm', { platform: 'douyin', target: '从没说过话的人', text: '在的' });
 check('没给她发过消息的人发不出去', stPlan2.ok === false, JSON.stringify(stPlan2));
 
+/* ---- 私信发送前必须按昵称重新点一次会话 ----
+   这套页面 currentChatTitle 恒为空，旧代码 ensureThreadOpen 在标题为空时直接放行，
+   等于没核实；页面被抖音自己导航走后，私信就原地打进当时开着的群
+   （2026-11-08、2026-11-12 两次事故）。 */
+const prevRyPage = world.douyin.dmPage;
+const prevRyThread = world.douyin.dmThread;
+const prevRyClick = world.douyin.clickThread;
+const prevRyClickStranger = world.douyin.clickStrangerThread;
+const prevRyWaitInput = world.douyin.waitMsgInput;
+const prevRySend = world.douyin.sendInChat;
+const ryCalls = [];
+world.douyin.dmPage = {
+  isClosed: () => false,
+  url: () => 'https://www.douyin.com/chat',
+  waitForTimeout: async () => {},
+};
+world.douyin.dmThread = '小鹿';
+world.douyin.clickThread = async (page, name) => {
+  ryCalls.push(['click', name]);
+  return true;
+};
+world.douyin.clickStrangerThread = async () => {
+  ryCalls.push(['stranger']);
+  return false;
+};
+world.douyin.waitMsgInput = async () => ({ fake: true });
+world.douyin.sendInChat = async () => {
+  ryCalls.push(['send']);
+  return true;
+};
+const ryRes = await world.douyin.replyDm('小鹿', '先点会话再发').catch((e) => ({ ok: false, error: e?.message }));
+check(
+  '私信快路径：先按昵称点会话，再发',
+  ryRes?.ok === true && ryCalls[0]?.[0] === 'click' && ryCalls[0][1] === '小鹿' && ryCalls.some((c) => c[0] === 'send'),
+  JSON.stringify(ryCalls),
+);
+world.douyin.dmPage = prevRyPage;
+world.douyin.dmThread = prevRyThread;
+world.douyin.clickThread = prevRyClick;
+world.douyin.clickStrangerThread = prevRyClickStranger;
+world.douyin.waitMsgInput = prevRyWaitInput;
+world.douyin.sendInChat = prevRySend;
+
 // 发送路线：陌生人必须走「按昵称回会话」，绝不能掉进「私信主人」
 const prevDyReplyCard = world.douyin.replyDm;
 const prevDmFast = world.douyinDmFast;

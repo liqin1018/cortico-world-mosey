@@ -6157,14 +6157,21 @@ export class DouyinBrowser {
     // 诊断用：只在失败/走兜底时打一行，正常发送零开销
     const diag = { who, dmThread: this.dmThread, chatThread: this.chatThread, steps: [] };
     if (dm && !dm.isClosed() && this.dmThread === who) {
-      // 先确认页面真的停在主人这个会话上。点不回来就别硬发——宁可走慢路径重开，
-      // 也不能把私信打进别人的会话里（GLM 审出来的 #1）。
-      // dmPage 是监听器专门停在主人会话上的那一页（群里用的是 groupPages，不共用），
-      // 所以这里不再要求「标题可读」——这套页面读不到标题，强求只会把每条私信都逼到慢兜底。
-      const onThread = await this.ensureThreadOpen(dm, who, { strict }).catch(() => false);
-      if (!onThread) {
+      /**
+       * 不信任 `dmThread`，发送前一律按昵称重新点一次会话。
+       *
+       * 以前这里是 `ensureThreadOpen(dm, who, { strict })`：它读会话标题，读不到就直接
+       * `return true`（`strict` 只管「点完再核一次标题」，标题为空时同样不起作用）。
+       * 而这个号 `currentChatTitle` **恒为空**（日志里 `stroll chat title miss`），
+       * 于是那句「核实」永远通过——只要页面被抖音自己导航走（刷新后恢复上次会话、
+       * SPA 路由、手动切过），私信就原地打进当时开着的群。
+       * 2026-11-08 三条私信进群、2026-11-12 13:06 又进「测试2」，都是这条路。
+       * 点一次 0.2~0.4 秒，比把私信发到群里便宜。
+       */
+      const clicked = await this.reopenThread(dm, who).catch(() => false);
+      if (!clicked) {
         this.dmThread = '';
-        diag.steps.push('dmPage:verify-fail');
+        diag.steps.push('dmPage:click-miss');
         diag.dmTitle = await this.currentChatTitle(dm).catch(() => '');
         diag.dmUrl = String(dm.url?.() ?? '');
       } else {
@@ -6206,8 +6213,9 @@ export class DouyinBrowser {
     // 群：那个群的监听页正停在群里，同样可以直接在那页打字（零跳转）
     const slot = this.groupPages?.get?.(who);
     if (slot?.page && !slot.page.isClosed() && slot.thread === who) {
-      const onThread = await this.ensureThreadOpen(slot.page, who).catch(() => false);
-      if (onThread) {
+      // 和主人私信同一条规矩：读不到标题，slot.thread 只是缓存，发前点一次再发
+      const clicked = await this.reopenThread(slot.page, who).catch(() => false);
+      if (clicked) {
         const t1 = Date.now();
         const input = await this.waitMsgInput(slot.page, 3000).catch(() => null);
         if (input) {
@@ -6233,25 +6241,29 @@ export class DouyinBrowser {
         const needSwitch = this.chatThread !== who || !/\/chat/.test(page.url());
         // 点之前先记一份内容指纹：这套页面读不出标题，靠「内容有没有换」判断切没切过去
         let before = null;
-        if (needSwitch) {
-          if (!/\/chat/.test(page.url())) await this.gotoChat(page);
-          before = await this.threadFingerprint(page);
-          let ok = await this.clickThread(page, who);
-          diag.steps.push(`click:${ok ? 'ok' : 'miss'}`);
-          if (!ok) {
-            // 主列表里没有：抖音会把非好友的私信收进「陌生人消息」文件夹
-            ok = await this.clickStrangerThread(page, who);
-            diag.steps.push(`stranger:${ok ? 'ok' : 'miss'}`);
-          }
-          if (!ok) {
-            diag.chatUrl = String(page.url?.() ?? '');
-            diag.chatTitle = await this.currentChatTitle(page).catch(() => '');
-            this.log?.info?.('stroll dm diag', { ...diag, fail: 'NO_DM' });
-            throw new DouyinError('NO_DM', '聊天列表和「陌生人消息」里都找不到这个会话，可能被新消息刷下去了');
-          }
-          // 点完不用干等两秒：下面 waitMsgInput 会一轮一轮等到输入框真的能打字
-          await page.waitForTimeout(200);
+        /**
+         * 不管 needSwitch 都点一次目标会话。
+         * `chatThread` 只是缓存，页面被抖音自己导航走之后它不会更新；标题又读不出来，
+         * 于是 `verifyThread` 在 needSwitch=false 时直接放行——私信就发进了当时开着的群。
+         * 已经在目标会话时点它自己无害（只是重新激活列表里的那一行）。
+         */
+        if (!/\/chat/.test(page.url())) await this.gotoChat(page);
+        before = await this.threadFingerprint(page);
+        let ok = await this.clickThread(page, who);
+        diag.steps.push(`click:${ok ? 'ok' : 'miss'}`);
+        if (!ok) {
+          // 主列表里没有：抖音会把非好友的私信收进「陌生人消息」文件夹
+          ok = await this.clickStrangerThread(page, who);
+          diag.steps.push(`stranger:${ok ? 'ok' : 'miss'}`);
         }
+        if (!ok) {
+          diag.chatUrl = String(page.url?.() ?? '');
+          diag.chatTitle = await this.currentChatTitle(page).catch(() => '');
+          this.log?.info?.('stroll dm diag', { ...diag, fail: 'NO_DM' });
+          throw new DouyinError('NO_DM', '聊天列表和「陌生人消息」里都找不到这个会话，可能被新消息刷下去了');
+        }
+        // 点完不用干等两秒：下面 waitMsgInput 会一轮一轮等到输入框真的能打字
+        await page.waitForTimeout(200);
         /**
          * 先核实、再认账。
          * 以前点完就把 chatThread 记成 who：只要那一下点空了（限流 toast 盖住列表时很常见），
@@ -6542,6 +6554,32 @@ export class DouyinBrowser {
    * 群页是常驻的，抖音可能自己切到别的会话（新群、刷新、消息跳转）；
    * 不确认就往当前输入框里打字，话会落到另一个群里——看起来「发了」，群里却没有。
    */
+  /**
+   * 不信任任何缓存，按昵称在会话列表里重新点一次目标会话。
+   *
+   * 为什么不信缓存：这套页面 `currentChatTitle` 读出来恒为空，
+   * `ensureThreadOpen` 在标题为空时直接放行，等于没核实；`dmThread` / `chatThread`
+   * 只要和现实对不上（页面被抖音自己导航、刷新后恢复上次会话、手动切过），
+   * 私信就会原地打进当时开着的群——2026-11-08 和 2026-11-12 两次事故都是这样。
+   *
+   * 点不到（列表里没有这个人/这个群）就返回 false，调用方必须不发，而不是猜一个。
+   */
+  async reopenThread(page, who, { wait = 160 } = {}) {
+    if (!page || page.isClosed()) return false;
+    const name = String(who ?? '').trim();
+    if (!name) return false;
+    if (!/\/chat/.test(String(page.url?.() ?? ''))) {
+      await page.goto(`${ORIGIN}/chat`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      await page.waitForTimeout(800).catch(() => {});
+    }
+    let ok = await this.clickThread(page, name).catch(() => false);
+    if (!ok) ok = await this.clickStrangerThread(page, name).catch(() => false);
+    if (!ok) return false;
+    // 点完让切换落定：立刻打字会打在上一个会话里（正是「发进群」的形态）
+    await page.waitForTimeout(wait).catch(() => {});
+    return true;
+  }
+
   async ensureThreadOpen(page, who, { strict = false, requireTitle = false } = {}) {
     let title = await this.currentChatTitle(page).catch(() => '');
     if (!title) {

@@ -1350,14 +1350,30 @@ export class StrollWorld {
     const stampOf = (x) => (x.platform === 'bilibili' ? Number(x.at ?? 0) * 1000 : Number(x.at ?? 0));
     const fresh = items.filter((x) => x?.id && !this.store.seenAt(keyOf(x))).sort((a, b) => stampOf(b) - stampOf(a));
     if (!fresh.length) return;
-    // 一次最多提两条：被人连着 @ 也不该把她（和主人）刷屏
-    const picked = fresh.slice(0, 2);
+    /**
+     * 一次只推**最新的一条**。
+     *
+     * 以前一次推两条，结果很糟：重启后抖音那边会把攒着的 @ 一次全给过来，
+     * 她收到两条（都是旧的），回的是旧的，主人刚 @ 的那条反而排在后面
+     * （2026-11-12 14:00 实际踩到）。剩下的不丢，下一轮 90 秒继续推。
+     */
+    const picked = fresh.slice(0, 1);
     for (const x of picked) this.store.markSeen(keyOf(x));
     this.store.save();
+    // 这条 @ 是什么时候的：积压的旧消息一多，她得能看出「不是刚发的」
+    const whenOf = (ms) => {
+      const t = Number(ms) || 0;
+      if (!t) return '';
+      const d = new Date(t);
+      const now = new Date();
+      const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      const sameDay = d.toDateString() === now.toDateString();
+      return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}-${d.getDate()} ${hm}`;
+    };
     const lines = picked.map((x, i) => {
       if (x.platform === 'douyin') {
         return (
-          `${i + 1}. ${x.user || '有人'} 在抖音评论里 @ 了你\n` +
+          `${i + 1}. ${x.user || '有人'} 在抖音评论里 @ 了你（${whenOf(stampOf(x)) || '时间不明'}）\n` +
           `   视频：${x.where || '（没读到标题）'}\n` +
           `   评论：${x.text}\n` +
           `   链接：${x.url}\n` +
@@ -1369,7 +1385,7 @@ export class StrollWorld {
         : x.dynamicId
           ? `https://t.bilibili.com/${x.dynamicId}`
           : x.url;
-      const head = `${i + 1}. ${x.user || '有人'} @ 了你`;
+      const head = `${i + 1}. ${x.user || '有人'} @ 了你（${whenOf(stampOf(x)) || '时间不明'}）`;
       const where = `   视频：${x.where || '（没读到标题）'}`;
       const body = `   评论：${x.text}`;
       const quote = x.quote ? `\n   他在回的那条：${x.quote}` : '';

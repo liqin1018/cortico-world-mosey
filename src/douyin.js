@@ -32,8 +32,17 @@ export function mapAtNotice(item) {
   const at = item.at ?? {};
   const aweme = at.aweme ?? {};
   const user = at.user_info ?? {};
+  /**
+   * 视频 ID 优先取通知里视频对象自己的 `aweme_id`。
+   *
+   * `item.aweme_id` 是挂在通知项上的字段，个别通知里它跟真正的视频对不上，
+   * 用错就会把「你 @ 我」指到另一条视频上——表现为她回的是之前那个视频
+   * （2026-11-12 14:00 反馈）。视频对象的 id 才是权威，通知项的只当兜底。
+   */
   const awemeId = String(
-    item.aweme_id && String(item.aweme_id) !== '0' ? item.aweme_id : aweme.aweme_id ?? '',
+    (aweme.aweme_id && String(aweme.aweme_id) !== '0' ? aweme.aweme_id : '') ||
+      (item.aweme_id && String(item.aweme_id) !== '0' ? item.aweme_id : '') ||
+      '',
   );
   if (!awemeId) return null;
   const schema = String(at.schema_url ?? '');

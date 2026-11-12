@@ -1267,14 +1267,19 @@ check(
   mPushes.length === 1 && /有人在评论区 @ 你了/.test(mPushes[0].text) && /reply_to=12/.test(mPushes[0].text),
   JSON.stringify(mPushes).slice(0, 200),
 );
+check(
+  '推送里标了这条 @ 的时间（积压的旧消息能一眼看出来）',
+  /（今天 \d{2}:\d{2}|时间不明）/.test(mPushes[0].text),
+  mPushes[0].text.slice(0, 90),
+);
 await world.mentionBeat();
 check('同一条 @ 只叫一次', mPushes.length === 1);
 world.mentionAt = 0;
 world.bili.mentions = async () => [atItem, { ...atItem, id: 'at-2' }, { ...atItem, id: 'at-3' }];
 await world.mentionBeat();
 check(
-  '一次最多提两条，不刷屏',
-  mPushes.length === 2 && (mPushes[1].text.match(/stroll_act action=reply/g) ?? []).length === 2,
+  '一次只提最新一条，不刷屏（旧的下一轮再说）',
+  mPushes.length === 2 && (mPushes[1].text.match(/stroll_act action=reply/g) ?? []).length === 1,
   String(mPushes[1]?.text?.length),
 );
 world.mentionAt = 0;

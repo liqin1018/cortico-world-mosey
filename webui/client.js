@@ -553,7 +553,6 @@ export default {
 
         /* ---------------- 谁找你 ---------------- */
         const inboxSec = el('section', undefined, 'stroll-sec');
-        inboxSec.style.display = 'none';
         const inboxHead = el('div', undefined, 'stroll-sec-head');
         const inboxTitle = el('h3');
         const inboxCount = el('span', '0', 'stroll-count');
@@ -1957,6 +1956,7 @@ export default {
 
         let inboxItems = [];
         let inboxAt = 0;
+        let inboxLoaded = false;
         let inboxCounts = { all: 0, reply: 0, at: 0 };
         let inboxFilter = 'all';
         const INBOX_FOLD = 4;
@@ -1965,9 +1965,16 @@ export default {
         async function loadInbox(force = false) {
           if (!force && Date.now() - inboxAt < 2 * 60 * 1000) return;
           inboxAt = Date.now();
+          // 先把「正在查」摆出来：这一趟要扫私信和评论，几十秒都有可能
+          renderInbox();
           try {
             const result = await ctx.invoke('inbox', [15]);
-            if (result?.ok === false) return;
+            if (result?.ok === false) {
+              inboxLoaded = true;
+              renderInbox();
+              return;
+            }
+            inboxLoaded = true;
             inboxItems = Array.isArray(result.items) ? result.items : [];
             inboxCounts = result.counts ?? {
               all: inboxItems.length,
@@ -1979,7 +1986,9 @@ export default {
             // 顶部那颗「谁找你 N 条新」跟着消息一起变，不用等下一次 15 秒轮询
             if (Number(result.unread ?? 0) !== Number(lastData?.inboxUnread ?? -1)) refresh();
           } catch {
-            // 读不到就保持原样
+            // 读不到也要收尾，否则一直停在「正在查…」
+            inboxLoaded = true;
+            renderInbox();
           }
         }
 
@@ -1989,8 +1998,32 @@ export default {
         }
 
         function renderInbox() {
+          /**
+           * 以前这里 `display: none` 一了百了：首屏还没扫完，「谁找你」整块是不存在的，
+           * 要等一两次扫描（几十秒到几分钟）才突然冒出来——看起来像功能丢了
+           * （2026-11-13 反馈：要登很久才出现）。
+           * 现在始终占位：没查完说「正在查」，查完确实没有说「暂时没人找你」。
+           */
           if (!inboxItems.length) {
-            inboxSec.style.display = 'none';
+            inboxSec.style.display = '';
+            inboxCount.textContent = '0';
+            inboxCount.className = 'stroll-count';
+            inboxHint.textContent = inboxLoaded ? '暂时没人找你' : '正在查…';
+            inboxReadAll.style.display = 'none';
+            inboxTabs.replaceChildren();
+            inboxMore.style.display = 'none';
+            inboxList.replaceChildren();
+            const emptyBox = el('div', undefined, 'stroll-empty soft');
+            emptyBox.append(
+              el('strong', inboxLoaded ? '暂时没人找你' : '正在查…'),
+              el(
+                'span',
+                inboxLoaded
+                  ? '有人私信你、回你评论、或 @ 你的时候，会出现在这里。'
+                  : '第一次要把私信和评论扫一遍，几十秒很正常，别关面板。',
+              ),
+            );
+            inboxList.append(emptyBox);
             return;
           }
           inboxSec.style.display = '';

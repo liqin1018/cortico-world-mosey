@@ -617,6 +617,8 @@ export class DouyinBrowser {
     this.watchContext = null;
     this.watchPage = null;
     this.page = null;
+    /** 登录窗单独开一个标签页：和主页面共用的话，会被私信/群监听导航到抖音去 */
+    this.loginPage = null;
     this.queue = Promise.resolve();
     this.closeTimer = null;
     this.holdOpen = false;
@@ -773,21 +775,14 @@ export class DouyinBrowser {
         ],
       };
       let context;
-      /**
-       * 用哪个浏览器：读「基础」里的选择。
-       * `auto` 保持原样（Edge 优先，没装才退 Chrome）——**不能改成 Chrome 优先**，
-       * 因为 cookie 是用 App-Bound Encryption 加密的、密钥绑浏览器身份，
-       * 换一个浏览器读同一个 profile 会直接「没登录」。所以只在用户明确选了才换。
-       */
-      const wantChannel = this.channel || this.browserChannel();
+      // 先 Edge 再 Chrome：Windows 上基本都有 Edge，没装 Chrome 的机器也能跑。
+      // 注意：Edge 和 Chrome 的 cookie 加密密钥是绑应用身份的（App-Bound Encryption），
+      // 换一个浏览器读同一个 profile 会「没登录」——所以探针/调试要认准当初建库那个。
       const launchOnce = async () => {
         try {
-          return await chromium.launchPersistentContext(this.profileDir, {
-            ...options,
-            channel: wantChannel || 'msedge',
-          });
+          return await chromium.launchPersistentContext(this.profileDir, { ...options, channel: this.channel ?? 'msedge' });
         } catch (error) {
-          if (wantChannel) throw error;
+          if (this.channel) throw error;
           return await chromium.launchPersistentContext(this.profileDir, { ...options, channel: 'chrome' });
         }
       };
@@ -850,29 +845,6 @@ export class DouyinBrowser {
         },
       );
     });
-  }
-
-  /**
-   * 用户在「基础」里选的浏览器，翻译成 Playwright 的 channel。
-   * 返回空串表示「自动」——由调用方保持原来的 Edge 优先顺序。
-   */
-  browserChannel() {
-    const pick = String(this.cfg?.watchBrowser ?? 'auto');
-    if (pick === 'chrome') return 'chrome';
-    if (pick === 'edge') return 'msedge';
-    return '';
-  }
-
-  /**
-   * 陪看窗口用哪个浏览器（和有头/无头无关，是单独一个窗口）。
-   * 这里才真的按用户选择走：陪看窗口是**新开的干净窗口**，不存在老 profile 的加密问题。
-   */
-  watchChannel() {
-    const pick = String(this.cfg?.watchBrowser ?? 'auto');
-    // 强制某一个时也留着兜底：那个浏览器没装就换另一个，别让陪看直接开不了
-    if (pick === 'chrome') return ['chrome', 'msedge'];
-    if (pick === 'edge') return ['msedge', 'chrome'];
-    return ['chrome', 'msedge'];
   }
 
   async getPage() {
@@ -7314,7 +7286,21 @@ export class DouyinBrowser {
         this.holdOpen = true;
         // 换号场景：新窗口里先把目标站点的 cookie 清干净，再跳登录页
         if (clearCookies) await this.clearCookiesMatching(clearCookies);
-        const page = await this.getPage();
+        /**
+         * 登录窗必须用**单独的标签页**。
+         *
+         * 以前这里用的是 `getPage()`——也就是抖音的主页面，那个页面归私信/群监听所有。
+         * 结果点「登录 B站」，窗口先跳到 B站扫码页，几秒钟后私信监听跑一轮，
+         * 把同一个 page 导航到抖音私信，扫码页当场被顶掉（2026-11-13 反馈）。
+         * `holdOpen` 只防自动关窗，防不了被导航走。
+         */
+        const ctx = this.context;
+        if (!ctx) throw new DouyinError('NO_CONTEXT', '浏览器没起来，再点一次「登录」。');
+        // 先把主页面占住（后台任务要用它），登录窗才是额外的那一个
+        await this.getPage().catch(() => null);
+        await this.closeLoginPage();
+        const page = await ctx.newPage();
+        this.loginPage = page;
         if (url) await this.goto(page, url, 2200);
         return { ok: true, url: page.url() };
       } catch (error) {
@@ -7326,8 +7312,16 @@ export class DouyinBrowser {
 
   async loginWindowClose() {
     this.holdOpen = false;
+    await this.closeLoginPage().catch(() => {});
     await this.close().catch(() => {});
     return { ok: true };
+  }
+
+  /** 收掉登录窗那个标签页（扫完码 / 取消 / 重新打开前都要收）。 */
+  async closeLoginPage() {
+    const page = this.loginPage;
+    this.loginPage = null;
+    await page?.close().catch(() => {});
   }
 
   /** 一起看：开一个有头窗口，主人可以自己在这个窗口里翻页，桌宠读同一个页面。 */
@@ -7388,8 +7382,13 @@ export class DouyinBrowser {
     else if (winMode === 'normal') args.push('--window-size=1300,860');
     else args.push('--start-maximized');
     const options = { headless: false, args };
-    // 默认 Chrome 优先；设置里选了 Edge 就 Edge 优先。都没有就用 Playwright 自带的
-    const order = this.channel ? [this.channel, 'chrome', 'msedge'] : this.watchChannel();
+    // 默认 Chrome 优先；也允许在设置里强制 chrome/edge。都没有就用 Playwright 自带的
+    const pref = String(this.cfg.watchBrowser ?? 'auto');
+    const order = this.channel
+      ? [this.channel, 'chrome', 'msedge']
+      : pref === 'edge'
+        ? ['msedge', 'chrome']
+        : ['chrome', 'msedge'];
     for (const channel of order) {
       try {
         return await chromium.launch({ ...options, channel });

@@ -1224,11 +1224,16 @@ export class DouyinBrowser {
   }
 
   async login() {
+    // 和 loginWindow 一样：先在队列外面占住窗口，排队中的任务一执行就退出
+    this.holdOpen = true;
+    if (this.closeTimer) clearTimeout(this.closeTimer);
+    this.closeTimer = null;
     return this.serialize(async () => {
       await this.launch({ headless: false, force: true });
       // 扫码期间不许自动收窗（launch 内部的 close 会清掉，所以放在它后面）
       this.holdOpen = true;
-      const page = await this.getPage();
+      // forLogin：这条就是登录流程，不能被自己的「窗口被占」拦截（2.5.14 在这里出过空白页）
+      const page = await this.getPage({ forLogin: true });
       await this.goto(page, `${ORIGIN}/jingxuan`, 2000);
       if (!(await this.isLoggedIn())) {
         await page.getByText('登录', { exact: true }).first().click({ timeout: 5000 }).catch(() => {});
@@ -1367,14 +1372,27 @@ export class DouyinBrowser {
   /** 退出登录：清 cookie、关窗、删掉登录标记，之后当没登录处理。 */
   async logout() {
     if (!this.context) await this.launch({ headless: true }).catch(() => {});
-    const res = await this.clearCookiesMatching(/(^|\.)douyin\.com$|(^|\.)bytedance\.com$/i).catch(() => null);
+    // 域名放宽：抖音的登录 cookie 不只在 douyin.com，bytedance / snssdk / iesdouyin 都可能有
+    const res = await this.clearCookiesMatching(/(^|\.)(douyin|iesdouyin|bytedance|snssdk|amemv)\.(com|cn)$/i).catch(
+      () => null,
+    );
     await this.close().catch(() => {});
+    /**
+     * `close()` 中途失败会留下 context：那 `isLoggedIn()` 还会去读 cookie，
+     * 面板一刷新就显示「抖音已登录」（2026-11-13 反馈）。这里强制断开。
+     */
+    this.context = null;
+    this.page = null;
+    this.loginPage = null;
     try {
       fs.unlinkSync(this.loginFile);
     } catch {
       // 本来就没存
     }
     this.lastLogin = null;
+    // 登录态缓存也要清：不清的话 sessionAlive 会在 5 分钟内继续返回 true
+    this.sessionOkAt = 0;
+    this.sessionOk = false;
     return { ok: true, cleared: res?.cleared ?? 0 };
   }
 

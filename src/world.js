@@ -5474,7 +5474,19 @@ export class StrollWorld {
       if (!this.cfg.allowPost) return { ok: false, error: '发动态关着。' };
       if ([...text].length < 4) return { ok: false, error: '正文太短。' };
       if ([...text].length > 2000) return { ok: false, error: '正文最多 2000 字。' };
-      const check = this.policy.check('post', platform, 'dynamic', { quotaAction: 'post', userInitiated: asked });
+      /**
+       * 动态不参与「对象去重」。
+       *
+       * 以前 target 写死成 'dynamic'，去重键就是 bilibili:post:dynamic——
+       * 今天发过一条之后，第二条永远被判 DUPLICATE（24 小时窗口），
+       * 表现就是「一天只能发一条，第二天还要等满 24 小时」（2026-11-14 被用户抓到）。
+       * 动态本来每条内容都不一样，防刷屏交给日额度就够了。
+       */
+      const check = this.policy.check('post', platform, 'dynamic', {
+        quotaAction: 'post',
+        userInitiated: asked,
+        noDedupe: true,
+      });
       if (!check.ok) return check;
       return { ok: true, action, platform, target: 'dynamic', text, mentionOwner };
     }

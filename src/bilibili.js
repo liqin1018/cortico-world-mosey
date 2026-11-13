@@ -20,6 +20,41 @@ import { launchHeadless } from './browser.js';
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const ORIGIN = 'https://www.bilibili.com';
+
+/**
+ * 抽帧要取哪几个时间点。
+ *
+ * - 给了 `at`：定点，以这一秒为中心向两边铺开（跨度 ≈ 帧数 × 3 秒），
+ *   这是「想知道这段发生了什么」的正确取法。以前只能按全片比例取，跟内容无关。
+ * - 没给：均匀铺满全片，掐头去尾各 2%（片头片尾多是黑屏/字幕卡）。
+ *
+ * 结果只是「理想时间点」，真正落到哪一格由 storyboard 的 index 吸附决定
+ * （B站预览图大约 20 秒一格），所以调用方要按吸附后的时间再去重。
+ */
+export function pickFrameTimes({ duration = 0, index = [], frames = 9, at = null } = {}) {
+  const n = Math.max(1, Math.min(12, Math.round(Number(frames) || 9)));
+  const last = Array.isArray(index) && index.length ? Number(index[index.length - 1]) || 0 : 0;
+  const dur = Number(duration) || last;
+  if (!dur) return [];
+  const edge = Math.min(6, dur * 0.02);
+  const lo = edge;
+  const hi = Math.max(lo, dur - edge);
+  const out = [];
+  const pinned = at != null && Number.isFinite(Number(at));
+  if (pinned) {
+    const center = Math.max(lo, Math.min(hi, Number(at)));
+    const span = Math.min(hi - lo, Math.max(6, n * 3));
+    const step = n > 1 ? span / (n - 1) : 0;
+    const start = Math.max(lo, Math.min(hi - span, center - span / 2));
+    for (let i = 0; i < n; i += 1) out.push(Math.min(hi, start + step * i));
+  } else {
+    for (let i = 0; i < n; i += 1) {
+      const ratio = (i + 1) / (n + 1);
+      out.push(lo + (hi - lo) * ratio);
+    }
+  }
+  return out.filter((t, i) => i === 0 || Math.abs(t - out[i - 1]) > 0.5);
+}
 const MIXIN = [
   46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
   33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
@@ -782,6 +817,122 @@ export class Bilibili {
       if (bytes) out.push({ at: cell.at, bytes });
     }
     return out;
+  }
+
+  /**
+   * 多帧拼成**一张分镜图**，每格下面烧上时间码。
+   *
+   * 为什么拼：单独发 N 张 160×90 的小图，每张都要付一次「小于 544×544」的地板价
+   * （宿主按 544×544 计费），3 张 ≈ 552 token 只能看 3 帧；
+   * 拼成一张 482×314 只算 184 token，却能看 9 帧。同样的钱多看 3 倍。
+   *
+   * `at` 给了就不均匀取，改成「以这一秒为中心前后各取几帧」——
+   * 这是网友要的「定点抽帧」，之前只能按比例取，跟内容无关。
+   */
+  async framesSheet(idOrUrl, { frames = 9, at = null } = {}) {
+    const v = await this.view(idOrUrl);
+    if (!v.cid) throw new BiliError('NO_CID', '这条视频拿不到 cid，取不了画面');
+    const sheet = await this.storyboard(v.aid, v.cid);
+    if (!sheet) throw new BiliError('NO_FRAME', '这条视频没有进度条预览图');
+    const times = pickFrameTimes({
+      duration: Number(v.duration) || 0,
+      index: sheet.index,
+      frames,
+      at,
+    });
+    if (!times.length) return [];
+    // 落到真实的格子上，并按吸附后的时间再去一次重（多个理想点可能落进同一格）
+    const cells = [];
+    const seen = new Set();
+    for (const t of times) {
+      const cell = sheet.cellAt(t);
+      const k = Math.round(Number(cell.at) || 0);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      cells.push(cell);
+    }
+    if (!cells.length) return [];
+    const bytes = await this.composeSheet(cells).catch(() => null);
+    if (!bytes) return [];
+    const ats = cells.map((c) => c.at);
+    return [{ at: ats[Math.floor(ats.length / 2)] ?? ats[0], ats, cols: 3, bytes }];
+  }
+
+  /**
+   * 把若干格拼到一块画布上。所有格子尺寸相同（B站预览图固定 160×90）。
+   * 一次 `evaluate` 画完：以前每帧都要 setContent + screenshot，9 帧要开关 9 次，
+   * 现在是「下载 1 张精灵图 + 画 9 格」，快一个数量级。
+   */
+  async composeSheet(cells, { cols = 3, gap = 1, labelH = 14 } = {}) {
+    const list = Array.isArray(cells) ? cells.filter((c) => c?.url) : [];
+    if (!list.length) return null;
+    const cw = Math.max(1, Number(list[0].w) || 160);
+    const ch = Math.max(1, Number(list[0].h) || 90);
+    const use = list.slice(0, Math.max(1, cols * 3));
+    const rows = Math.ceil(use.length / cols);
+    const W = cols * cw + (cols - 1) * gap;
+    const H = rows * (ch + labelH) + (rows - 1) * gap;
+    // 长视频的预览图会分成好几张，按 url 去重后各下一次
+    const urls = [...new Set(use.map((c) => c.url))];
+    const raws = {};
+    for (const url of urls) {
+      const raw = await this.fetchRaw(url, { binary: true }).catch(() => null);
+      if (!raw?.length) return null;
+      raws[url] = Buffer.from(raw).toString('base64');
+    }
+    const page = await this.spritePage();
+    await page.setViewportSize({ width: W, height: H });
+    const dataUrl = await page
+      .evaluate(
+        async (p) => {
+          const load = (src) =>
+            new Promise((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => resolve(img);
+              img.onerror = () => reject(new Error('bad image'));
+              img.src = `data:image/jpeg;base64,${src}`;
+            });
+          const uniq = [...new Set(p.cells.map((c) => c.url))];
+          const imgs = {};
+          await Promise.all(uniq.map(async (u) => {
+            imgs[u] = await load(p.raws[u]);
+          }));
+          const canvas = document.createElement('canvas');
+          canvas.width = p.W;
+          canvas.height = p.H;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#121214';
+          ctx.fillRect(0, 0, p.W, p.H);
+          p.cells.forEach((cell, i) => {
+            const col = i % p.cols;
+            const row = Math.floor(i / p.cols);
+            const dx = col * (p.cw + p.gap);
+            const dy = row * (p.ch + p.labelH + p.gap);
+            try {
+              ctx.drawImage(imgs[cell.url], cell.x, cell.y, p.cw, p.ch, dx, dy, p.cw, p.ch);
+            } catch {
+              // 单格失败就留空，别把整张图废掉
+            }
+            const t = Math.max(0, Math.round(Number(cell.at) || 0));
+            const hh = Math.floor(t / 3600);
+            const mm = Math.floor((t % 3600) / 60);
+            const ss = String(t % 60).padStart(2, '0');
+            const label = hh > 0 ? `${hh}:${String(mm).padStart(2, '0')}:${ss}` : `${mm}:${ss}`;
+            ctx.fillStyle = 'rgba(0,0,0,.72)';
+            ctx.fillRect(dx, dy + p.ch, p.cw, p.labelH);
+            ctx.fillStyle = '#ffeb3b';
+            ctx.font = '10px "Microsoft YaHei", sans-serif';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, dx + 3, dy + p.ch + p.labelH / 2 + 0.5);
+          });
+          return canvas.toDataURL('image/jpeg', 0.82);
+        },
+        { cells: use, raws, cols, cw, ch, W, H, gap, labelH },
+      )
+      .catch(() => '');
+    const b64 = String(dataUrl).split(',')[1] ?? '';
+    if (!b64) return null;
+    return Buffer.from(b64, 'base64');
   }
 
   /** 预览图索引（按 cid 缓存 10 分钟）。index 里的值就是每一帧的时间（秒）。 */

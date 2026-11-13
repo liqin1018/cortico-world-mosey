@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_GROUPS, DEFAULTS } from '../src/config.js';
 import { mapAtNotice, secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
+import { pickFrameTimes } from '../src/bilibili.js';
 import { approvalFor } from '../src/policy.js';
 import { StickerBook, extOfBuffer } from '../src/stickers.js';
 import {
@@ -68,6 +69,22 @@ check('20 分钟片子：正好 48', subtitleBudget(48, 1200) === 48);
 check('60 分钟片子：还是 48（不会往下减）', subtitleBudget(48, 3600) === 48);
 check('设 0 就是不带字幕', subtitleBudget(0, 600) === 0);
 check('时长未知：按基准给', subtitleBudget(48, 0) === 48);
+
+/* ---- 抽帧时间点：均匀铺满 / 定点围着某秒 ---- */
+const tSpread = pickFrameTimes({ duration: 600, frames: 9 });
+check(
+  '均匀抽帧：9 个点、都在片内、互不重复',
+  tSpread.length === 9 && tSpread.every((t) => t > 0 && t < 600) && new Set(tSpread.map(Math.round)).size === 9,
+  JSON.stringify(tSpread.map(Math.round)),
+);
+const tPinned = pickFrameTimes({ duration: 3600, frames: 9, at: 1800 });
+check(
+  '定点抽帧：围着 30:00 前后铺开',
+  tPinned.length === 9 && tPinned.every((t) => Math.abs(t - 1800) <= 40) && Math.min(...tPinned) < 1800 && Math.max(...tPinned) > 1800,
+  JSON.stringify(tPinned.map(Math.round)),
+);
+check('只抽 1 帧时返回 1 个点', pickFrameTimes({ duration: 600, frames: 1 }).length === 1);
+check('时长和 index 都没有：返回空', pickFrameTimes({ duration: 0, frames: 9 }).length === 0);
 check('webUi panels', world.webUi().panels?.[0]?.id === 'stroll');
 check('webUi invoke', typeof world.webUi().invoke === 'function');
 check('policy caps', world.policy.snapshot().caps.like > 0);

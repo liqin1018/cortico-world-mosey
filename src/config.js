@@ -96,7 +96,8 @@ export const DEFAULTS = {
   avoid: '',
 
   /** 打开视频时抽几帧。0 = 不抽，最省 token。 */
-  framesPerOpen: 0,
+  // 抽帧默认开着：B站 9 帧拼成一张分镜图只要约 184 token，比 3 张独立小图还便宜
+  framesPerOpen: 9,
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
   keepWindowSeconds: 90,
   /** 默认后台逛（headless）。只有扫码登录和「一起看」才开窗。 */
@@ -570,9 +571,10 @@ const VIEWING = {
         title: '看视频抽几帧',
         description:
           'B站用进度条缩略图（160×90，不用登录、不开播放页，只看得出画面大概在干嘛）；' +
-          '抖音用播放页截图。0 最省；1 帧约 500 token。',
+          '抖音用播放页截图。B站多帧会拼成一张分镜图，每格带时间码——9 帧一张只要约 184 token，' +
+          '比 3 张独立小图还便宜。0 最省；建议 9。',
         minimum: 0,
-        maximum: 3,
+        maximum: 9,
         'x-suffix': ' 帧',
       },
       [P + 'keepWindowSeconds']: {
@@ -908,7 +910,7 @@ export const POLICY_FIELDS = {
   sessionMaxItems: { type: 'int', min: 3, max: 12 },
   interests: { type: 'string', max: 300 },
   avoid: { type: 'string', max: 300 },
-  framesPerOpen: { type: 'int', min: 0, max: 3 },
+  framesPerOpen: { type: 'int', min: 0, max: 9 },
   keepWindowSeconds: { type: 'int', min: 0, max: 600 },
   background: { type: 'boolean' },
   watchSpeakSec: { type: 'int', min: 20, max: 600 },

@@ -3469,7 +3469,7 @@ export class StrollWorld {
     const raw = String(args.url ?? args.id ?? args.target ?? '').trim();
     if (!raw) return JSON.stringify({ ok: false, error: '给个链接或 ID。' });
     const platform = this.inferPlatform(raw, args.platform);
-    const frames = clamp(Number(args.frames ?? this.cfg.framesPerOpen ?? 0), 0, 3);
+    const frames = clamp(Number(args.frames ?? this.cfg.framesPerOpen ?? 0), 0, 9);
     const keep = clamp(Number(this.cfg.keepWindowSeconds ?? 90), 0, 600);
     // at 是「定点读」：想知道第 5 分半发生了什么就带 at=5:30，比把字幕条数拉满省得多
     const atRaw = args.at ?? args.seek ?? args.time;
@@ -3542,7 +3542,16 @@ export class StrollWorld {
           .catch(() => null);
       }
       // 抽帧：B站用进度条预览图，不用登录、不开播放页；没有就如实说，不硬凑
-      const shots = bvid && frames > 0 ? await this.bili.framesOf(bvid, frames).catch(() => []) : [];
+      // 多帧拼成一张分镜图：9 帧一张 184 token，比 3 张独立小图（552 token）便宜还看得多。
+      // frames=1 时仍然走单张，不拼（拼一张只有一格的图没意义）。
+      const shots =
+        bvid && frames > 0
+          ? frames > 1
+            ? await this.bili.framesSheet(bvid, { frames, at }).catch(() => null) ??
+              (await this.bili.framesOf(bvid, Math.min(3, frames)).catch(() => []))
+            : await this.bili.framesOf(bvid, 1).catch(() => [])
+          : [];
+      const shotAts = shots[0]?.ats ?? shots.map((s) => s.at);
       const body = JSON.stringify({
         notice: CONTENT_NOTICE,
         ok: true,
@@ -3559,7 +3568,8 @@ export class StrollWorld {
         ...(frames > 0
           ? {
               framesNote: shots.length
-                ? `附了 ${shots.length} 张画面（约 ${shots.map((s) => clockText(s.at)).join(' / ')}），` +
+                ? `附了 ${shotAts.length} 格画面，拼成一张分镜图（${shotAts.map((t) => clockText(t)).join(' / ')}）` +
+                  `${at != null ? '，以你指定的时间点为中心' : ''}。` +
                   '是 B站进度条的缩略图（160×90），只看得出画面大概在干嘛，看不清字。'
                 : '这条没拿到预览图（有些视频/番剧不提供），所以看不到画面。',
             }
@@ -3573,8 +3583,10 @@ export class StrollWorld {
         blobs: shots.map((s, i) => ({
           bytes: s.bytes,
           mime: 'image/jpeg',
-          name: `bili-${detail.id}-${Math.round(s.at)}s.jpg`,
-          fallbackText: `B站画面 约 ${clockText(s.at)}（第 ${i + 1} 张，缩略图）`,
+          name: `bili-${detail.id}-sheet${Math.round(s.at)}s.jpg`,
+          fallbackText: s.ats
+            ? `B站分镜图（${s.ats.length} 格：${s.ats.map((t) => clockText(t)).join(' / ')}）`
+            : `B站画面 约 ${clockText(s.at)}（第 ${i + 1} 张，缩略图）`,
         })),
       };
     }

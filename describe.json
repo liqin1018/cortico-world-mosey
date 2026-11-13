@@ -86,8 +86,8 @@
           "frames": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 3,
-            "description": "open 用：抽几帧画面。B站用进度条缩略图（160×90，不用登录），抖音用播放页截图。默认 0，最省 token。"
+            "maximum": 9,
+            "description": "open 用：抽几帧画面。B站会把多帧拼成一张分镜图（每格带时间码，9 帧一张比 3 张独立小图还便宜）；抖音用播放页截图。配合 at 用就是「定点看这一段」。默认 9。"
           },
           "at": {
             "type": [

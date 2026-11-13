@@ -847,7 +847,15 @@ export class DouyinBrowser {
     });
   }
 
-  async getPage() {
+  async getPage({ forLogin = false } = {}) {
+    /**
+     * 登录窗开着的时候，谁也别来抢这个浏览器。
+     * 以前只靠 holdOpen 在任务**执行到**那一步才拦，排在队列里的还得一个个跑完；
+     * 现在入口就拦，队列能瞬间清空，登录不用排在十几条后台任务后面（2026-11-13 反馈：等了一分钟）。
+     */
+    if (this.holdOpen && !forLogin) {
+      throw new DouyinError('BUSY_WINDOW', '登录窗开着，先扫码或关掉它');
+    }
     // 沿用当前的窗口模式：开着的登录窗不能被一次隐式 launch 关掉重开
     const context = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });
     if (this.page && !this.page.isClosed() && !this.page.__strollRole) return this.page;
@@ -7274,6 +7282,10 @@ export class DouyinBrowser {
    * 不复用「一起看」，免得扫码扫到一半被 scheduleClose 关掉。
    */
   async loginWindow(url, { clearCookies = null } = {}) {
+    // 先在队列外面把窗口占住：排在后面的后台任务一执行就会立刻退出
+    this.holdOpen = true;
+    if (this.closeTimer) clearTimeout(this.closeTimer);
+    this.closeTimer = null;
     return this.serialize(async () => {
       // 先挂住，别让排队中的自动关页把刚开的窗口关掉
       if (this.closeTimer) clearTimeout(this.closeTimer);
@@ -7297,7 +7309,7 @@ export class DouyinBrowser {
         const ctx = this.context;
         if (!ctx) throw new DouyinError('NO_CONTEXT', '浏览器没起来，再点一次「登录」。');
         // 先把主页面占住（后台任务要用它），登录窗才是额外的那一个
-        await this.getPage().catch(() => null);
+        await this.getPage({ forLogin: true }).catch(() => null);
         await this.closeLoginPage();
         const page = await ctx.newPage();
         this.loginPage = page;

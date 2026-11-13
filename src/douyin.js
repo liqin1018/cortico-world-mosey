@@ -1376,11 +1376,19 @@ export class DouyinBrowser {
     const res = await this.clearCookiesMatching(/(^|\.)(douyin|iesdouyin|bytedance|snssdk|amemv)\.(com|cn)$/i).catch(
       () => null,
     );
-    await this.close().catch(() => {});
     /**
-     * `close()` 中途失败会留下 context：那 `isLoggedIn()` 还会去读 cookie，
-     * 面板一刷新就显示「抖音已登录」（2026-11-13 反馈）。这里强制断开。
+     * 两件事必须一起做，否则「退出」是假的：
+     *   1. close 时 **不能**再备份 cookie —— 否则刚清完又被打包写盘，下次启动原样恢复；
+     *   2. 把 cookie 备份文件直接删掉 —— 残留的 sessionid 只要有备份，一 launch 就活过来
+     *      （`restoreCookies` 会在启动时把它塞回浏览器），于是 isLoggedIn 又变 true，
+     *      文件一写，面板刷新就显示「后台待命」（2026-11-13 反复踩）。
      */
+    await this.close({ skipSave: true }).catch(() => {});
+    try {
+      fs.unlinkSync(this.cookieFile);
+    } catch {
+      // 本来就没备份
+    }
     this.context = null;
     this.page = null;
     this.loginPage = null;

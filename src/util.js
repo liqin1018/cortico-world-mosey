@@ -84,6 +84,36 @@ export function formatDuration(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
+/** 把 "12:34" / "1:02:03" 这种时长文本转回秒数；读不出来返回 0。 */
+export function clockToSec(text) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return 0;
+  const parts = raw.split(':').map((x) => Number(x));
+  if (!parts.length || parts.some((x) => !Number.isFinite(x) || x < 0)) return 0;
+  if (parts.length === 3) return Math.round(parts[0] * 3600 + parts[1] * 60 + parts[2]);
+  if (parts.length === 2) return Math.round(parts[0] * 60 + parts[1]);
+  if (parts.length === 1) return Math.round(parts[0]);
+  return 0;
+}
+
+/**
+ * 看视频时到底带几句字幕。
+ *
+ * 主人设的 `base` 是「**20 分钟**的片子该带多少句」这个基准（默认 48）。
+ * 比 20 分钟短的按比例加密——短片信息密度更高，48 句对 10 分钟的片子太稀
+ * （2026-11-13 网友反馈：长片 48 够用，短的应该抽密点）。
+ * 上限 72 句：再多 token 涨得比信息快。
+ */
+export function subtitleBudget(base, durSec, { ceiling = 72, pivot = 20 * 60 } = {}) {
+  const b = Math.max(0, Math.round(Number(base) || 0));
+  if (!b) return 0;
+  const d = Number(durSec) || 0;
+  if (!d) return b;
+  const scaled = Math.round((b * pivot) / Math.max(60, d));
+  // 只往上加，不往下降：主人设 48 就是「至少 48」
+  return Math.min(ceiling, Math.max(b, scaled));
+}
+
 export function formatCount(n) {
   const v = Number(n) || 0;
   if (v >= 100000000) return `${(v / 100000000).toFixed(1)}亿`;

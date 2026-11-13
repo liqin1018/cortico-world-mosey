@@ -50,7 +50,8 @@ export const DEFAULTS = {
   /** 私信黑名单：昵称片段或 uid，逗号分隔 */
   strangerDmBlock: '',
   /** 字幕/弹幕带多少：后台 open 与一起看分开，数字越大越详细、token 越高 */
-  subtitleOpen: 12,
+  // 字幕这个数是「20 分钟的片子带多少句」，实际句数按时长算，短片会自动加密（上限 72）
+  subtitleOpen: 48,
   danmakuOpen: 30,
   subtitleWatch: 2,
   danmakuWatch: 6,
@@ -549,7 +550,8 @@ const VIEWING = {
         type: 'integer',
         title: '后台看：带几句字幕',
         description:
-          'open 时返回的字幕句数。按时间分段抽样，从开头一路覆盖到结尾（不是只取开头几句）；' +
+          '这个数是「20 分钟的片子带多少句」。比 20 分钟短的会自动加密（最多 72 句），长的按这个数来——' +
+          '10 分钟的片子设 48 实际会带满 72 句。按时间分段抽样，从开头一路覆盖到结尾（不是只取开头几句）；' +
           '想知道某一段可以让她带 at=分:秒 再读。没有 CC 字幕的视频这里设多少都是空。',
         minimum: 0,
         maximum: 60,

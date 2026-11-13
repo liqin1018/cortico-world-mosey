@@ -20,12 +20,14 @@ import {
   openInBrowser,
   parseBvid,
   parseCvid,
+  clockToSec,
   parseDouyinId,
   parseDynamicId,
   pickFolder,
   repairMojibakePath,
   stripAtName,
   stripAtPlaceholder,
+  subtitleBudget,
   truncate,
 } from './util.js';
 
@@ -3519,7 +3521,14 @@ export class StrollWorld {
         url: detail.url,
       });
       // 视频才读字幕/弹幕；专栏、动态没有。条数由「看视频」设置控制，0 = 不带
-      const subOpen = clamp(Number(this.cfg.subtitleOpen ?? 12), 0, 60);
+      /**
+       * 主人设的是「20 分钟的片子带多少句」，实际按这条视频的时长算：
+       * 比 20 分钟短的自动加密（最多 72 句）。
+       * 以前是固定 12/48 句，10 分钟的片子和 1 小时的片子拿到的句数一样，
+       * 短片等于被抽稀了（2026-11-13 网友反馈）。
+       */
+      const subBase = clamp(Number(this.cfg.subtitleOpen ?? 48), 0, 60);
+      const subOpen = subtitleBudget(subBase, clockToSec(detail.dur));
       const dmOpen = clamp(Number(this.cfg.danmakuOpen ?? 30), 0, 60);
       let media = null;
       if (bvid && (subOpen > 0 || dmOpen > 0)) {

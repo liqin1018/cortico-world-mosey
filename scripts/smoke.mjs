@@ -6,7 +6,16 @@ import { CONFIG_GROUPS, DEFAULTS } from '../src/config.js';
 import { mapAtNotice, secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
 import { approvalFor } from '../src/policy.js';
 import { StickerBook, extOfBuffer } from '../src/stickers.js';
-import { cutChars, dayKey, imageMimeOf, looksBrokenPath, stripAtName, stripAtPlaceholder } from '../src/util.js';
+import {
+  clockToSec,
+  cutChars,
+  dayKey,
+  imageMimeOf,
+  looksBrokenPath,
+  stripAtName,
+  stripAtPlaceholder,
+  subtitleBudget,
+} from '../src/util.js';
 import { StrollWorld } from '../src/world.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -49,6 +58,16 @@ function check(name, ok, detail) {
 
 check('tools = 3', world.tools().length === 3);
 check('env prompt vars', Object.keys(world.envPromptVars()).length >= 6);
+
+/* ---- 字幕条数按时长算：长片按基准，短片自动加密 ---- */
+check('时长文本转秒：1:02:03', clockToSec('1:02:03') === 3723);
+check('时长文本转秒：12:34', clockToSec('12:34') === 754);
+check('时长读不出来返回 0', clockToSec('') === 0 && clockToSec('abc') === 0);
+check('10 分钟片子：48 基准 → 加密到 72（上限）', subtitleBudget(48, 600) === 72);
+check('20 分钟片子：正好 48', subtitleBudget(48, 1200) === 48);
+check('60 分钟片子：还是 48（不会往下减）', subtitleBudget(48, 3600) === 48);
+check('设 0 就是不带字幕', subtitleBudget(0, 600) === 0);
+check('时长未知：按基准给', subtitleBudget(48, 0) === 48);
 check('webUi panels', world.webUi().panels?.[0]?.id === 'stroll');
 check('webUi invoke', typeof world.webUi().invoke === 'function');
 check('policy caps', world.policy.snapshot().caps.like > 0);
@@ -814,7 +833,7 @@ world.cfg.mustLike = true;
 world.cfg.dailyLikes = 3;
 world.store.data.usage[mustDay] = { ...(world.store.data.usage[mustDay] ?? {}), like: 1 };
 const mustList = world.mustDoList();
-check('看视频配置默认值', DEFAULTS.subtitleOpen === 12 && DEFAULTS.danmakuOpen === 30 && DEFAULTS.subtitleWatch === 2 && DEFAULTS.danmakuWatch === 6 && DEFAULTS.watchWindowSec === 15);
+check('看视频配置默认值', DEFAULTS.subtitleOpen === 48 && DEFAULTS.danmakuOpen === 30 && DEFAULTS.subtitleWatch === 2 && DEFAULTS.danmakuWatch === 6 && DEFAULTS.watchWindowSec === 15);
 check('必做清单算出还差几次', mustList.length === 1 && mustList[0].done === 1 && mustList[0].left === 2, JSON.stringify(mustList));
 
 const mustPushes = [];

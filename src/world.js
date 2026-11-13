@@ -3137,6 +3137,7 @@ export class StrollWorld {
       if (sub === 'mark') return await this.watchMark();
       return JSON.stringify(await this.watchStatus());
     }
+    if (action === 'test_image') return JSON.stringify(await this.testImageApi());
     if (action === 'login') return JSON.stringify(await this.login(args.platform));
     if (action === 'following') return JSON.stringify(await this.followingFeed(args.platform, args.n));
     if (action === 'weekly') return JSON.stringify(this.weeklyReport(args.days));
@@ -3693,6 +3694,61 @@ export class StrollWorld {
       this.inboxCache = [...items, ...(this.inboxCache ?? []).filter((x) => x.platform !== 'douyin')];
     }
     return { ok: true, platform: p, items, strangers };
+  }
+
+  /**
+   * 测一下出图接口通不通：真发一次最小请求，把成功/失败原因原样带回来。
+   *
+   * 只读动作（不发布、不占额度），所以不走审批。
+   * 不同服务商的返回格式不一样：OpenAI 系回 `data[0].url` 或 `b64_json`，
+   * 有些兼容层直接回 `{ images: [...] }`，这里都认。
+   */
+  async testImageApi() {
+    const base = String(this.cfg.postImageApiBase ?? '').trim().replace(/\/+$/, '');
+    const key = String(this.cfg.postImageApiKey ?? '').trim();
+    const model = String(this.cfg.postImageModel ?? '').trim() || 'gpt-image-1';
+    if (!base) return { ok: false, error: '还没填「出图接口地址」。' };
+    if (!key) return { ok: false, error: '还没填「出图密钥」。' };
+    if (!/^https?:\/\//i.test(base)) return { ok: false, error: '接口地址要以 http:// 或 https:// 开头。' };
+
+    const t0 = Date.now();
+    let res;
+    try {
+      res = await fetch(`${base}/images/generations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model, prompt: 'a plain red circle on white background', n: 1, size: '1024x1024' }),
+        signal: AbortSignal.timeout(60000),
+      });
+    } catch (error) {
+      return { ok: false, error: `连不上：${error?.message ?? String(error)}`, ms: Date.now() - t0 };
+    }
+    const ms = Date.now() - t0;
+    const raw = await res.text().catch(() => '');
+    let json = null;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      // 不是 JSON，下面按原文报
+    }
+    if (!res.ok) {
+      const msg = json?.error?.message ?? json?.message ?? raw.slice(0, 200) ?? '';
+      return { ok: false, status: res.status, error: `接口报错 ${res.status}：${msg}`, ms };
+    }
+    const item = json?.data?.[0] ?? json?.images?.[0] ?? null;
+    const url = item?.url ?? (typeof item === 'string' ? item : '');
+    const b64 = item?.b64_json ?? item?.b64 ?? '';
+    if (!url && !b64) {
+      return { ok: false, status: res.status, error: `接口通了，但返回里没有图。原始返回：${raw.slice(0, 300)}`, ms };
+    }
+    return {
+      ok: true,
+      model,
+      ms,
+      size: b64 ? `${Math.round(String(b64).length / 1024)}KB base64` : '',
+      url: url ? String(url).slice(0, 300) : '',
+      note: url ? '返回的是图片链接，能用。' : '返回的是 base64，能用。',
+    };
   }
 
   /**

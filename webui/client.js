@@ -676,7 +676,6 @@ export default {
           }
         }
 
-        root.append(keySec);
         root.append(draftSec);
 
         /* ---------------- 这一条 ---------------- */
@@ -781,6 +780,8 @@ export default {
         sideCol.append(chartSec, toolSec);
         split.append(recentSec, sideCol);
         root.append(split);
+
+        root.append(keySec);
 
         root.append(
           el(

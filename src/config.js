@@ -272,7 +272,7 @@ const POSTING = {
         title: '配图从哪来',
         description:
           '图片工坊 = 直接用那个插件画好的图，不用配接口；' +
-          '自己生成 = 用下面填的接口现画；本地目录 = 从指定文件夹里挑一张。',
+          '自己生成 = 用下面填的接口现画（密钥在面板最下面的「出图密钥」里填，这里不放密钥）；本地目录 = 从指定文件夹里挑一张。',
         'x-options': 'stroll-post-image-from',
       },
       [P + 'postImageDir']: {
@@ -289,14 +289,6 @@ const POSTING = {
         type: 'string',
         title: '出图接口地址',
         description: 'OpenAI 兼容的 base URL，例如 https://api.openai.com/v1。只存在本地配置文件里。',
-      },
-      [P + 'postImageApiKey']: {
-        type: 'string',
-        title: '出图密钥',
-        format: 'password',
-        description:
-          '⚠️ 这一栏是明文显示（宿主设置页不支持脱敏）。推荐用下面面板里的「出图密钥」入口，那边只显示「已配置」、不回显明文。' +
-          '两处改的是同一个值，留空表示不动。',
       },
       [P + 'postImageModel']: {
         type: 'string',

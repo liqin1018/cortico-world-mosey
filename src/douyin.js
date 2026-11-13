@@ -756,9 +756,9 @@ export class DouyinBrowser {
    * 默认后台（headless）。只有扫码登录和「一起看」才开窗。
    * 模式变了就重开一个上下文，免得把 headless 进程当有头用。
    */
-  async launch({ headless = this.cfg.background !== false, force = false } = {}) {
+  async launch({ headless = this.cfg.background !== false, force = false, skipSave = false } = {}) {
     if (this.context && !force && this.headless === headless) return this.context;
-    if (this.context && (force || this.headless !== headless)) await this.close();
+    if (this.context && (force || this.headless !== headless)) await this.close({ skipSave });
     if (this.launching) return this.launching;
     this.launching = (async () => {
       const mod = await this.loadPlaywright();
@@ -7280,7 +7280,7 @@ export class DouyinBrowser {
       this.closeTimer = null;
       this.holdOpen = true;
       try {
-        await this.launch({ headless: false, force: true });
+        await this.launch({ headless: false, force: true, skipSave: true });
         // launch 内部的 close() 会把 holdOpen 清掉，这里补回来：
         // 不然扫码期间只要来一次 inbox/feed，60 秒后登录窗就被自动关掉（看起来就是「网页闪一下没了」）
         this.holdOpen = true;
@@ -7596,12 +7596,13 @@ export class DouyinBrowser {
     return { ok: true };
   }
 
-  async close() {
+  async close({ skipSave = false } = {}) {
     if (this.closeTimer) clearTimeout(this.closeTimer);
     this.closeTimer = null;
     this.holdOpen = false;
-    // 关窗之前先备份登录态：进程被强杀时 Chromium 不一定来得及把 cookie 落盘
-    await this.saveCookies({ force: true }).catch(() => {});
+    // 关窗之前先备份登录态：进程被强杀时 Chromium 不一定来得及把 cookie 落盘。
+    // 登录窗这条路不用存——马上要用新窗口重新扫码，存一次反而多等一两秒。
+    if (!skipSave) await this.saveCookies({ force: true }).catch(() => {});
     await this.closeWatch().catch(() => {});
     // 分享用的离屏窗口是常驻的（为了省冷启动），这里必须一起收掉
     await this.closeShareWindow().catch(() => {});

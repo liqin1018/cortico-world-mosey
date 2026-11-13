@@ -3767,7 +3767,13 @@ export class DouyinBrowser {
     if (!ok) {
       // 名字后缀（表情、状态）对不上，但 chip 确实插进去了：也算提到了，别把它清掉
       const anyChip = await page
-        .evaluate(() => !!document.querySelector('#comment-input-container .douyin_mention_word'))
+        .evaluate(() => {
+          const ce =
+            document.querySelector('#comment-input-container div[contenteditable="true"]') ??
+            document.querySelector('div[contenteditable="true"]');
+          if (!ce) return false;
+          return !!ce.querySelector('.douyin_mention_word, [contenteditable="false"]');
+        })
         .catch(() => false);
       if (anyChip) return true;
       await this.clearEditor(page);
@@ -3776,13 +3782,41 @@ export class DouyinBrowser {
   }
 
   /** 编辑器里有没有「就是这个人」的 @ chip。 */
+  /**
+   * 编辑器里有没有插上「@某人」的 chip。
+   *
+   * 以前死认 `#comment-input-container` + `.douyin_mention_word`，抖音一改版就永远返回 false，
+   * 于是回执报「@ 没生效」，实际 chip 早就插进去了（2026-11-13 网友反馈）。
+   * 现在：容器和类名各准备几套，再加一条通用特征兜底——chip 是 `contenteditable="false"` 的块。
+   */
   async hasMentionChip(page, flat) {
     return await page
       .evaluate((want) => {
-        const ce = document.querySelector('#comment-input-container div[contenteditable="true"]');
-        if (!ce) return false;
         const norm = (s) => String(s ?? '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^@+/, '');
-        return Array.from(ce.querySelectorAll('.douyin_mention_word')).some((c) => norm(c.innerText) === want);
+        const editors = [
+          '#comment-input-container div[contenteditable="true"]',
+          '[data-e2e="comment-input"] div[contenteditable="true"]',
+          '[class*="comment"] div[contenteditable="true"]',
+          'div[contenteditable="true"]',
+        ];
+        let ce = null;
+        for (const sel of editors) {
+          ce = document.querySelector(sel);
+          if (ce) break;
+        }
+        if (!ce) return false;
+        const chips = Array.from(
+          ce.querySelectorAll(
+            '.douyin_mention_word, [class*="mention" i], [data-e2e*="mention"], [contenteditable="false"]',
+          ),
+        );
+        if (!chips.length) return false;
+        // 名字对得上：算提到了
+        if (chips.some((c) => norm(c.innerText) === want)) return true;
+        // 名字对不上（chip 里带后缀/表情），但确实插了一个 @ 块：也算提到，别把它清掉
+        return chips.some(
+          (c) => String(c.innerText ?? '').includes('@') || String(c.getAttribute('data-e2e') ?? '').includes('mention'),
+        );
       }, flat)
       .catch(() => false);
   }
@@ -4357,13 +4391,46 @@ export class DouyinBrowser {
       }
     }
     if (left) {
-      throw new DouyinError('NOT_SENT', '消息还留在输入框里，没发出去（可能被限流，或对方设置了陌生人限制）');
+      throw new DouyinError('NOT_SENT', '消息还留在输入框里，没发出去（可能被限流，或对方设置了陌生人限制）。后台模式更容易被吞，切到前台模式再试一次。');
     }
     const f = await bodyFlags(page);
     if (f.risk) throw this.riskError(f, '发私信');
     // 记一笔自己刚发出去的话：群里用来兜底区分「我发的」和「别人发的」
     this.noteSent(text);
+    /**
+     * 输入框清空 ≠ 发出去了。抖音风控/限流时会**静默吞消息**：
+     * 输入框照样清空、本地乐观更新，服务端根本没收到。以前这里直接报成功，
+     * 面板亮蓝点，主人那边什么都没有（2026-11-13 网友反馈）。
+     *
+     * **不能在这里同步等**——之前一版回读要轮询 1.8 秒，回消息直接慢到不能忍。
+     * 所以：立刻返回成功，另起一个后台任务在 900ms 后读一次会话；
+     * 真没看到就回调 `onSendUnconfirmed`，由上层补一条提醒。发送延迟一分不加。
+     */
+    const stamp = cutChars(String(body || text || '').replace(/\s+/g, ' ').trim(), 10);
+    if (stamp.length >= 4) {
+      this.verifySentSoon(page, stamp, { where: 'dm', at: Date.now() }).catch(() => {});
+    }
     return true;
+  }
+
+  /**
+   * 发完事后核实：等 900ms 读**一次**会话（不轮询），看刚发的那句在不在。
+   * 读不到任何消息节点时按「不知道」处理，不乱报。
+   */
+  async verifySentSoon(page, stamp, meta = {}) {
+    await new Promise((done) => setTimeout(done, 900));
+    if (!page || page.isClosed()) return;
+    const texts = await page
+      .evaluate(() =>
+        Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]'))
+          .slice(-8)
+          .map((n) => String(n.innerText ?? '').replace(/\s+/g, ' ').trim()),
+      )
+      .catch(() => null);
+    if (texts === null || !texts.length) return;
+    if (texts.some((t) => t.includes(stamp))) return;
+    this.log?.info?.('stroll send unconfirmed', { stamp, ...meta });
+    await this.onSendUnconfirmed?.(stamp, meta).catch(() => {});
   }
 
   /* ---------------- 表情面板 / 发图 / 出问题留证 ---------------- */

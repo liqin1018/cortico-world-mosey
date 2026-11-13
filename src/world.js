@@ -170,6 +170,8 @@ export class StrollWorld {
     this.bili = new Bilibili({ dataDir, cfg, log: this.log, policy: this.policy, store: this.store });
     this.stickers = new StickerBook({ dataDir, log: this.log });
     this.douyin = new DouyinBrowser({ dataDir, cfg, log: this.log, policy: this.policy, stickers: this.stickers });
+    // 发完事后核实失败时回调：由这里补一条提醒（不能拖慢发送，所以在 douyin 侧异步做）
+    this.douyin.onSendUnconfirmed = (stamp, meta) => this.onDouyinSendUnconfirmed(stamp, meta).catch(() => {});
     // 扫码成功后顺手记下「现在登的是哪个抖音号」，面板要显示，也要防「给自己发私信」
     this.douyin.onSelf = (self) => this.noteDouyinSelf(self);
     this.timer = null;
@@ -4204,6 +4206,30 @@ export class StrollWorld {
       ...info,
       note: '陪看窗口已打开。主人在窗口里翻页/拖进度，你在后台跟着看；想评论就说，想发到平台就用 stroll_act。',
     };
+  }
+
+  /**
+   * 发完事后核实失败：抖音把消息吞了。
+   *
+   * 发送那一刻回执是成功的（输入框清空了），900ms 后回读会话却没看到这句——
+   * 典型的风控吞消息。**这条提醒不改回执**（回执早就发出去了），只是让她知道
+   * 「刚才那句可能没到」，别在主人问「你怎么不回」的时候一脸茫然。
+   * 10 分钟内最多提醒一次，别刷屏。
+   */
+  async onDouyinSendUnconfirmed(stamp, meta = {}) {
+    if (!this.running) return;
+    const now = Date.now();
+    if (now - Number(this.lastSendWarnAt ?? 0) < 10 * 60 * 1000) return;
+    this.lastSendWarnAt = now;
+    const mode = this.cfg.background !== false ? '后台' : '前台';
+    this.log?.info?.('stroll send unconfirmed warn', { stamp, mode });
+    await this.push(
+      'stroll.reply',
+      `提醒一句：刚才那条私信，回执是成功的，但我事后回读会话没看到「${stamp}」——大概率被抖音吞了。\n` +
+        `现在是${mode}模式，后台模式更容易被吞。别当成已经发出去；重要的内容再发一次，或者让主人切到前台模式。`,
+      { kind: 'send-unconfirmed', n: 1 },
+      'debounce',
+    ).catch(() => {});
   }
 
   /**

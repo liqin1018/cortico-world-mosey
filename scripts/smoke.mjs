@@ -121,6 +121,29 @@ world.watch = prevWatchObj;
 world.douyin.watchDigest = prevWatchDigest;
 world.douyin.watchShot = prevWatchShot;
 world.bili.mediaText = prevWatchMedia;
+
+/* ---- 发完事后核实：抖音吞了就提醒，但 10 分钟内不刷屏 ---- */
+const prevSendWarnAt = world.lastSendWarnAt;
+const prevPushFn = world.push;
+const unconfPushes = [];
+world.push = async (type, text) => {
+  unconfPushes.push({ type, text });
+  return true;
+};
+world.lastSendWarnAt = 0;
+const prevRunningFlag = world.running;
+world.running = true;
+await world.onDouyinSendUnconfirmed('这条被抖音吞了', {}).catch(() => {});
+check(
+  '事后核实失败会提醒一次（说清是回执成功但没读到）',
+  unconfPushes.length === 1 && /没看到/.test(unconfPushes[0].text) && /别当成已经发出去/.test(unconfPushes[0].text),
+  String(unconfPushes[0]?.text).slice(0, 100),
+);
+await world.onDouyinSendUnconfirmed('又一条被吞', {}).catch(() => {});
+check('10 分钟内不重复刷屏', unconfPushes.length === 1, String(unconfPushes.length));
+world.push = prevPushFn;
+world.lastSendWarnAt = prevSendWarnAt;
+world.running = prevRunningFlag;
 check('webUi panels', world.webUi().panels?.[0]?.id === 'stroll');
 check('webUi invoke', typeof world.webUi().invoke === 'function');
 check('policy caps', world.policy.snapshot().caps.like > 0);

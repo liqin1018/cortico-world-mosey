@@ -293,7 +293,10 @@ const POSTING = {
       [P + 'postImageApiKey']: {
         type: 'string',
         title: '出图密钥',
-        description: '只写在这里、只存在本地，不会发到别处。留空则「自己生成」不可用。',
+        format: 'password',
+        description:
+          '只存在本地配置文件里，不会发到别处。已经填过就留空、不用重复填；要换密钥才粘贴新的覆盖。' +
+          '留空且从没填过时，「自己生成」不可用。',
       },
       [P + 'postImageModel']: {
         type: 'string',

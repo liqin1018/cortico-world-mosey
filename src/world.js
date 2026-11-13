@@ -3132,6 +3132,7 @@ export class StrollWorld {
         return JSON.stringify(await this.watchStart(url));
       }
       if (sub === 'stop') return JSON.stringify(await this.watchStop());
+      if (sub === 'mark') return await this.watchMark();
       return JSON.stringify(await this.watchStatus());
     }
     if (action === 'login') return JSON.stringify(await this.login(args.platform));
@@ -4202,6 +4203,72 @@ export class StrollWorld {
       ok: true,
       ...info,
       note: '陪看窗口已打开。主人在窗口里翻页/拖进度，你在后台跟着看；想评论就说，想发到平台就用 stroll_act。',
+    };
+  }
+
+  /**
+   * 主人在陪看窗口里按了「看这里」：把他**正看着的那一帧** + 前后几十秒的字幕弹幕一起给她。
+   *
+   * 一起看最核心的互动就是这个：他停下来，就是想让她看这个画面。
+   * 以前只有轮询推「进度变了」，她拿不到「你指的是哪一刻」。
+   */
+  async watchMark() {
+    if (!this.watch) {
+      return { text: JSON.stringify({ ok: false, error: '现在没在一起看。先 watch_action=start 开一个陪看窗口。' }) };
+    }
+    const digest = await this.douyin.watchDigest().catch(() => null);
+    if (!digest) {
+      return { text: JSON.stringify({ ok: false, error: '读不到陪看窗口，可能被关了。' }) };
+    }
+    const at = Math.max(0, Math.round(Number(digest.time ?? 0)));
+    const platform = String(digest.platform ?? '');
+    const url = String(digest.url ?? '');
+    // 画面：直接截陪看窗口——他看的是什么，就给什么（另开播放页取的是「同一秒」，不是「他看的那一帧」）
+    const shot = await this.douyin.watchShot().catch(() => null);
+    // 上下文：B站能读字幕弹幕，抖音只有画面
+    let media = null;
+    if (platform === 'bilibili' && url) {
+      media = await this.bili
+        .mediaText(url, {
+          around: at,
+          subtitleLimit: 24,
+          danmakuLimit: 24,
+          windowSec: 18,
+          aroundSpan: { back: 10, ahead: 20 },
+        })
+        .catch(() => null);
+    }
+    const body = {
+      notice: CONTENT_NOTICE,
+      ok: true,
+      marked: clockText(at),
+      platform,
+      title: digest.title ?? '',
+      url,
+      ...(digest.duration ? { duration: clockText(digest.duration) } : {}),
+      ...(media?.ok
+        ? {
+            subtitles: media.subtitles,
+            danmaku: media.danmaku,
+            mediaNote: `上面是 ${clockText(at)} 前后那一段的字幕和弹幕。`,
+          }
+        : {}),
+      ...(shot ? { framesNote: '附了一张画面：主人正看着的那一帧。' } : {}),
+      note:
+        `主人在 ${clockText(at)} 点了「看这里」——他觉得这一刻有意思，想让你也看看。` +
+        '结合画面和上面那段字幕弹幕，说你自己的反应；挑具体的细节说，别泛泛地夸。',
+    };
+    if (!shot) return { text: JSON.stringify(body) };
+    return {
+      text: JSON.stringify(body),
+      blobs: [
+        {
+          bytes: shot.bytes,
+          mime: 'image/jpeg',
+          name: `watch-mark-${at}s.jpg`,
+          fallbackText: `主人标记的画面 ${clockText(at)}`,
+        },
+      ],
     };
   }
 

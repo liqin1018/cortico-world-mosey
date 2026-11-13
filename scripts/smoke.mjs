@@ -85,6 +85,42 @@ check(
 );
 check('只抽 1 帧时返回 1 个点', pickFrameTimes({ duration: 600, frames: 1 }).length === 1);
 check('时长和 index 都没有：返回空', pickFrameTimes({ duration: 0, frames: 9 }).length === 0);
+
+/* ---- 「看这里」：主人在陪看窗口标记的那一帧 ---- */
+const prevWatchObj = world.watch;
+const prevWatchDigest = world.douyin.watchDigest;
+const prevWatchShot = world.douyin.watchShot;
+const prevWatchMedia = world.bili.mediaText;
+
+world.watch = null;
+const markNone = await world.watchMark();
+check('没开陪看时点「看这里」：明确说没在陪看', /没在一起看/.test(String(markNone?.text ?? '')), String(markNone?.text).slice(0, 80));
+
+world.watch = { url: 'https://www.bilibili.com/video/BV1xx411c7mD', title: '测试视频' };
+world.douyin.watchDigest = async () => ({
+  platform: 'bilibili',
+  url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+  title: '测试视频',
+  time: 125,
+  duration: 600,
+  paused: true,
+});
+world.douyin.watchShot = async () => ({ bytes: Buffer.from('fake-jpeg-bytes') });
+world.bili.mediaText = async () => ({ ok: true, subtitles: ['这一句是标记前后的字幕'], danmaku: ['哈哈哈哈'] });
+const markOk = await world.watchMark();
+const markBody = JSON.parse(String(markOk?.text ?? '{}'));
+check(
+  '看这里：标记时间 + 画面 + 那段字幕都在',
+  markBody.ok === true &&
+    /2:05/.test(String(markBody.marked)) &&
+    (markOk?.blobs?.length ?? 0) === 1 &&
+    markBody.subtitles?.[0] === '这一句是标记前后的字幕',
+  JSON.stringify(markBody).slice(0, 200),
+);
+world.watch = prevWatchObj;
+world.douyin.watchDigest = prevWatchDigest;
+world.douyin.watchShot = prevWatchShot;
+world.bili.mediaText = prevWatchMedia;
 check('webUi panels', world.webUi().panels?.[0]?.id === 'stroll');
 check('webUi invoke', typeof world.webUi().invoke === 'function');
 check('policy caps', world.policy.snapshot().caps.like > 0);

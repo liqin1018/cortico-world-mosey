@@ -7353,6 +7353,21 @@ export class DouyinBrowser {
   }
 
   /**
+   * 陪看窗口当前这一帧：主人看到什么，就给她什么。
+   *
+   * 不用 `framesFromVideo` 另开播放页——那样取到的是「同一秒」，不是「主人正看着的那一帧」。
+   * 一起看的意义就在这：他在这停下，就是想让你看这个画面。
+   */
+  async watchShot() {
+    const page = this.watchPage;
+    if (!page || page.isClosed()) return null;
+    const bytes = await page.screenshot({ type: 'jpeg', quality: 78, timeout: 8000 }).catch(() => null);
+    if (!bytes?.length) return null;
+    const box = page.viewportSize?.() ?? null;
+    return { bytes, width: box?.width ?? null, height: box?.height ?? null };
+  }
+
+  /**
    * 一起刷：切到下一条抖音视频。
    * 顺序：页面自带的「下一个」按钮 → 推荐列表里没看过的一条 → 滚一下（推荐流）。
    * 切完会核对 videoId/videoKey 有没有真的变，没变就报 NO_NEXT，别让上层以为刷成功了。

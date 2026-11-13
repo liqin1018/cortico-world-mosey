@@ -1232,8 +1232,14 @@ export class DouyinBrowser {
       await this.launch({ headless: false, force: true });
       // 扫码期间不许自动收窗（launch 内部的 close 会清掉，所以放在它后面）
       this.holdOpen = true;
-      // forLogin：这条就是登录流程，不能被自己的「窗口被占」拦截（2.5.14 在这里出过空白页）
-      const page = await this.getPage({ forLogin: true });
+      // 登录页必须单独一个标签：主页面归群/私信监听所有，共用一个会被导航走，
+      // 于是 isLoggedIn 永远读不到登录态，窗口一直挂着（2026-11-13 反馈）
+      await this.getPage({ forLogin: true }).catch(() => null);
+      await this.closeLoginPage();
+      const ctx = this.context;
+      if (!ctx) throw new DouyinError('NO_CONTEXT', '浏览器没起来，再点一次「登录」。');
+      const page = await ctx.newPage();
+      this.loginPage = page;
       await this.goto(page, `${ORIGIN}/jingxuan`, 2000);
       if (!(await this.isLoggedIn())) {
         await page.getByText('登录', { exact: true }).first().click({ timeout: 5000 }).catch(() => {});
@@ -1298,7 +1304,8 @@ export class DouyinBrowser {
   async sessionAlive({ force = false, maxAge = 5 * 60 * 1000 } = {}) {
     const now = Date.now();
     if (!force && this.sessionOkAt && now - this.sessionOkAt < maxAge) return this.sessionOk;
-    const page = this.page;
+    // 登录期间主页面是别人的，登录态要看登录页
+    const page = this.loginPage ?? this.page;
     if (!page || page.isClosed() || !/douyin\.com/.test(page.url())) return null;
     const res = await page
       .evaluate(async () => {
@@ -7638,6 +7645,8 @@ export class DouyinBrowser {
     if (this.closeTimer) clearTimeout(this.closeTimer);
     this.closeTimer = null;
     this.holdOpen = false;
+    // 登录页跟着 context 一起没了，引用也要断，否则下次会去关一个已经死的页
+    this.loginPage = null;
     // 关窗之前先备份登录态：进程被强杀时 Chromium 不一定来得及把 cookie 落盘。
     // 登录窗这条路不用存——马上要用新窗口重新扫码，存一次反而多等一两秒。
     if (!skipSave) await this.saveCookies({ force: true }).catch(() => {});

@@ -6160,20 +6160,6 @@ export class StrollWorld {
         this.persist({ outingMode: v });
         return { ok: true, outingMode: v };
       }
-      if (method === 'get_post_key') {
-        // 只回「有没有配」，不回明文——面板拿不到密钥本体
-        return { ok: true, configured: !!String(this.cfg.postImageApiKey ?? '').trim() };
-      }
-      if (method === 'set_post_key') {
-        const v = String(args[0] ?? '').trim();
-        if (!v) return { ok: false, error: '没填密钥。' };
-        this.persist({ postImageApiKey: v });
-        return { ok: true, configured: true };
-      }
-      if (method === 'clear_post_key') {
-        this.persist({ postImageApiKey: '' });
-        return { ok: true, configured: false };
-      }
       if (method === 'set_approval') {
         const v = String(args[0] ?? '');
         if (!['dry_run', 'confirm', 'auto_low_risk', 'auto_all'].includes(v)) {

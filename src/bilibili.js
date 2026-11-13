@@ -71,7 +71,7 @@ export class BiliError extends Error {
   }
 }
 
-function signWbi(params, imgUrl, subUrl) {
+export function signWbi(params, imgUrl, subUrl) {
   const raw = imgUrl.split('/').at(-1).split('.')[0] + subUrl.split('/').at(-1).split('.')[0];
   if (raw.length !== 64) throw new BiliError('SIGNING', 'B站签名密钥不可用');
   const key = MIXIN.map((i) => raw[i]).join('').slice(0, 32);

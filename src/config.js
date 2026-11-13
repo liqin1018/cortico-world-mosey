@@ -17,6 +17,17 @@ export const DEFAULTS = {
   allowDm: true,
   allowPost: true,
   allowSave: true,
+  /** 动态：发哪种、配图从哪来、要不要自动发 */
+  postKind: 'text',
+  postImageFrom: 'workshop',
+  postImageDir: '',
+  postImageStyle: '',
+  postImageApiBase: '',
+  postImageApiKey: '',
+  postImageModel: '',
+  postAuto: false,
+  postAt: 20,
+  postDaily: 1,
 
   /** 主人（人类）的账号；@ 和私信要用。留空时只能站内告诉主人。 */
   ownerUid: '',
@@ -236,6 +247,85 @@ const OWNER = {
 };
 
 /** 额度与节奏：每天能做什么、什么时候安静。 */
+/**
+ * 动态：发 B站动态的内容形态、配图来源、自动发。
+ */
+const POSTING = {
+  id: 'world:stroll-post',
+  owner: 'world:stroll',
+  schema: {
+    type: 'object',
+    title: '动态',
+    description: '发 B站动态：发什么、配什么图、什么时候发。',
+    properties: {
+      [P + 'postKind']: {
+        type: 'string',
+        title: '发哪种动态',
+        description:
+          '纯文字 = 只有一段话；纯图片 = 只发图不写字；图文 = 图加一段话。' +
+          '选后两种要先配好下面的「配图从哪来」，否则会退回纯文字。',
+        'x-options': 'stroll-post-kind',
+        'x-hot': true,
+      },
+      [P + 'postImageFrom']: {
+        type: 'string',
+        title: '配图从哪来',
+        description:
+          '图片工坊 = 直接用那个插件画好的图，不用配接口；' +
+          '自己生成 = 用下面填的接口现画；本地目录 = 从指定文件夹里挑一张。',
+        'x-options': 'stroll-post-image-from',
+      },
+      [P + 'postImageDir']: {
+        type: 'string',
+        title: '本地图片目录',
+        description: '配图来源选「本地目录」时生效。填完整路径，例如 E:////////图片////////穹妹。',
+      },
+      [P + 'postImageStyle']: {
+        type: 'string',
+        title: '出图风格',
+        description: '自己生成时拼进提示词。例如：柔和的生活照、胶片颗粒、阴天冷色调。留空就用默认写实风。',
+      },
+      [P + 'postImageApiBase']: {
+        type: 'string',
+        title: '出图接口地址',
+        description: 'OpenAI 兼容的 base URL，例如 https://api.openai.com/v1。只存在本地配置文件里。',
+      },
+      [P + 'postImageApiKey']: {
+        type: 'string',
+        title: '出图密钥',
+        description: '只写在这里、只存在本地，不会发到别处。留空则「自己生成」不可用。',
+      },
+      [P + 'postImageModel']: {
+        type: 'string',
+        title: '出图模型',
+        description: '例如 gpt-image-1、flux-schnell、seedream-3。',
+      },
+      [P + 'postAuto']: {
+        type: 'boolean',
+        title: '每天自动发',
+        description: '开着就按下面的时间自己发一条；关着只能她手动发或你在面板里点。',
+        'x-hot': true,
+      },
+      [P + 'postAt']: {
+        type: 'integer',
+        title: '几点发',
+        description: '0-23 点。挑她自己在线的时候，别挑半夜。',
+        minimum: 0,
+        maximum: 23,
+        'x-suffix': ' 点',
+      },
+      [P + 'postDaily']: {
+        type: 'integer',
+        title: '一天最多发几条',
+        description: '自动发也受这个限制。发太密容易被当成营销号。',
+        minimum: 1,
+        maximum: 5,
+        'x-suffix': ' 条',
+      },
+    },
+  },
+};
+
 const QUOTA = {
   id: 'world:stroll-quota',
   owner: 'world:stroll',
@@ -849,7 +939,7 @@ const MESSAGES = {
  *   基础 → 主人 → 公开动作（她能做什么）→ 每日额度（做多少 / 哪些必做）
  *   → 自己出门（怎么出去）→ 私信与群 → 看视频 → 一起看 → 抖音一起刷 → 高级
  */
-export const CONFIG_GROUPS = [BASIC, OWNER, INTERACT, QUOTA, OUTING, MESSAGES, VIEWING, WATCH, SHORTS, ADVANCED];
+export const CONFIG_GROUPS = [BASIC, OWNER, INTERACT, POSTING, QUOTA, OUTING, MESSAGES, VIEWING, WATCH, SHORTS, ADVANCED];
 
 /** 旧引用兼容：第一组即基础组。 */
 
@@ -862,6 +952,16 @@ export const POLICY_FIELDS = {
   bilibili: { type: 'boolean' },
   douyin: { type: 'boolean' },
   allowFollow: { type: 'boolean' },
+  postKind: { type: 'enum', values: ['text', 'image', 'text_image'] },
+  postImageFrom: { type: 'enum', values: ['workshop', 'generate', 'local'] },
+  postImageDir: { type: 'string', max: 300 },
+  postImageStyle: { type: 'string', max: 200 },
+  postImageApiBase: { type: 'string', max: 300 },
+  postImageApiKey: { type: 'string', max: 300 },
+  postImageModel: { type: 'string', max: 120 },
+  postAuto: { type: 'boolean' },
+  postAt: { type: 'int', min: 0, max: 23 },
+  postDaily: { type: 'int', min: 1, max: 5 },
   douyinFollowMode: { type: 'enum', values: ['browser', 'off'] },
   allowDm: { type: 'boolean' },
   allowPost: { type: 'boolean' },

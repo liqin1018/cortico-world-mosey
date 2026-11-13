@@ -952,7 +952,7 @@ check(
 check(
   '设置页分组顺序',
   CONFIG_GROUPS.map((g) => g.schema.title).join('→') ===
-    '基础→主人→公开动作→每日额度→自己出门→私信与群→看视频→一起看→抖音一起刷→高级',
+    '基础→主人→公开动作→动态→每日额度→自己出门→私信与群→看视频→一起看→抖音一起刷→高级',
   CONFIG_GROUPS.map((g) => g.schema.title).join('→'),
 );
 check(

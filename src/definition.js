@@ -26,6 +26,20 @@ export const STROLL = {
         { value: 'off', label: zh ? '不提醒' : 'Off' },
       ];
     }
+    if (kind === 'stroll-post-kind') {
+      return [
+        { value: 'text', label: zh ? '纯文字' : 'Text only' },
+        { value: 'image', label: zh ? '纯图片' : 'Image only' },
+        { value: 'text_image', label: zh ? '图文（图 + 一句话）' : 'Image + text' },
+      ];
+    }
+    if (kind === 'stroll-post-image-from') {
+      return [
+        { value: 'workshop', label: zh ? '图片工坊（不用配接口）' : 'Picture workshop' },
+        { value: 'generate', label: zh ? '自己生成（要填接口）' : 'Generate via API' },
+        { value: 'local', label: zh ? '本地目录' : 'Local folder' },
+      ];
+    }
     if (kind === 'stroll-watch-browser') {
       return [
         { value: 'auto', label: zh ? '自动（Chrome 优先）' : 'Auto (Chrome first)' },

@@ -618,6 +618,65 @@ export default {
         strangerSec.append(strangerHead, strangerList);
         const draftBox = el('div', undefined, 'stroll-drafts');
         draftSec.append(draftHead, draftHint, strangerSec, draftBox);
+        /* ---------------- 出图密钥（脱敏，只在面板里） ---------------- */
+        // 设置页是宿主渲染的，只能明文显示密钥；这里给一个安全入口：
+        // 只显示「已配置 / 未配置」，要换就粘贴新的覆盖，面板永远不回显明文。
+        const keySec = el('section', undefined, 'stroll-sec');
+        const keyHead = el('div', undefined, 'stroll-sec-head');
+        const keyTitle = el('h3');
+        const keyCount = el('span', '—', 'stroll-count');
+        keyTitle.append(el('span', '出图密钥'), keyCount);
+        keyHead.append(keyTitle);
+        const keyHint = el('p', undefined, 'stroll-muted');
+        const keyRow = el('div');
+        keyRow.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;';
+        const keyInput = document.createElement('input');
+        keyInput.type = 'password';
+        keyInput.autocomplete = 'off';
+        keyInput.style.cssText =
+          'flex:1;min-width:200px;padding:7px 10px;border-radius:8px;border:1px solid rgba(0,0,0,.14);background:transparent;color:inherit;font:inherit;';
+        keyInput.placeholder = '粘贴密钥（只存在本地）';
+        const keySave = button('保存', async () => {
+          const v = String(keyInput.value ?? '').trim();
+          if (!v) { msgSet('先粘贴密钥。', true); return; }
+          try {
+            const r = await ctx.invoke('set_post_key', [v]);
+            if (r?.ok === false) throw new Error(r.error || '没存上');
+            keyInput.value = '';
+            msgSet('密钥已保存（只存在本地，面板不回显）。');
+            await loadPostKey();
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+          }
+        }, 'ghost xs');
+        const keyClear = button('清除', async () => {
+          try {
+            await ctx.invoke('clear_post_key');
+            msgSet('密钥已清除。');
+            await loadPostKey();
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+          }
+        }, 'ghost xs');
+        keyRow.append(keyInput, keySave, keyClear);
+        keySec.append(keyHead, keyHint, keyRow);
+
+        async function loadPostKey() {
+          try {
+            const r = await ctx.invoke('get_post_key');
+            const has = r?.configured === true;
+            keyCount.textContent = has ? '已配置' : '未配置';
+            keyCount.className = ('stroll-count ' + (has ? 'on' : '')).trim();
+            keyInput.placeholder = has ? '已配置；粘贴新的可以覆盖' : '粘贴密钥（只存在本地）';
+            keyHint.textContent = has
+              ? '密钥只存在本地配置文件里，这里不回显。要换就粘贴新的再点保存。'
+              : '还没配。用「自己生成」做配图前必须填这个；用图片工坊的图就不用。';
+          } catch {
+            keySec.style.display = 'none';
+          }
+        }
+
+        root.append(keySec);
         root.append(draftSec);
 
         /* ---------------- 这一条 ---------------- */
@@ -2455,6 +2514,7 @@ export default {
 
         refresh();
         loadInbox(true);
+        loadPostKey();
         if (ctx.interval) {
           ctx.interval(refresh, 15000);
           ctx.interval(() => loadInbox(), 180000);

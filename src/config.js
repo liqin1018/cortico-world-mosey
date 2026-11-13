@@ -184,6 +184,15 @@ const BASIC = {
         description: '开着时都在后台读；只有扫码登录和「一起看」开窗口。',
         'x-hot': true,
       },
+      [P + 'watchBrowser']: {
+        type: 'string',
+        title: '用哪个浏览器',
+        description:
+          '影响私信、评论、看视频、群监听和陪看。默认「自动」：后台操作用 Edge 优先（Windows 都自带），陪看窗口用 Chrome 优先。' +
+          '⚠️ 手动改成 Chrome 或 Edge 会让抖音的登录态失效——cookie 是加密的、密钥跟浏览器绑定，换一个浏览器读不了，要重新扫码登录。' +
+          '只有在「后台发消息老被吞」时换一下试试。',
+        'x-options': 'stroll-watch-browser',
+      },
       [P + 'approval']: {
         type: 'string',
         title: '公开动作怎么放行',
@@ -672,12 +681,6 @@ const WATCH = {
         title: '陪看窗口多大',
         description: '最大化够用；全屏会隐藏标题栏，按 F11 退出。',
         'x-options': 'stroll-watch-window',
-      },
-      [P + 'watchBrowser']: {
-        type: 'string',
-        title: '陪看用哪个浏览器',
-        description: '默认 Chrome 优先；没装会自动退回 Edge/自带 Chromium。',
-        'x-options': 'stroll-watch-browser',
       },
 
     },

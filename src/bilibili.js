@@ -859,6 +859,182 @@ export class Bilibili {
   }
 
   /**
+   * 高清取帧：打开播放页，把 `<video>` seek 到指定秒再画进 canvas。
+   *
+   * 和 `framesSheet`（进度条预览图，160×90）的分工：
+   *   - 这个清楚 3~6 倍（匿名 360×360 起，登录态更高），但**慢 5~10 倍**——
+   *     要加载整个播放页，每次 seek 还要等解码，实测 8~15 秒。
+   *   - 所以只在「要认真看这一段」时用，平时还是走 sprite（1.5 秒）。
+   *
+   * 2026-11-13 探针（.probe/t-video-seek.mjs）实测：匿名无头浏览器能解码、
+   * seek 生效、`canvas.drawImage` **不会被污染**（toDataURL / getImageData 都正常）。
+   */
+  async framesFromVideo(idOrUrl, { frames = 9, at = null, cols = 3, cellW = 320, cellH = 180 } = {}) {
+    const v = await this.view(idOrUrl);
+    if (!v.bvid) throw new BiliError('BAD_ID', '不是有效的 B站视频');
+    const times = pickFrameTimes({ duration: Number(v.duration) || 0, frames, at });
+    if (!times.length) return [];
+    const page = await this.videoPage();
+    try {
+      await page
+        .goto(`https://www.bilibili.com/video/${v.bvid}`, { waitUntil: 'domcontentloaded', timeout: 45000 })
+        .catch(() => {});
+      const ready = await page
+        .waitForFunction(
+          () => {
+            const el = document.querySelector('video');
+            return !!el && el.readyState >= 2 && el.videoWidth > 0;
+          },
+          { timeout: 25000 },
+        )
+        .then(() => true)
+        .catch(() => false);
+      if (!ready) throw new BiliError('NO_VIDEO', '这条视频的播放页没加载出画面（可能要登录，或者不是普通视频）');
+      const dataUrl = await page
+        .evaluate(
+          async (p) => {
+            const video = document.querySelector('video');
+            if (!video) return '';
+            try {
+              video.pause();
+            } catch {
+              // 暂停失败也能画，继续
+            }
+            const gap = 1;
+            const rows = Math.ceil(p.times.length / p.cols);
+            const W = p.cols * p.cellW + (p.cols - 1) * gap;
+            const H = rows * (p.cellH + p.labelH) + (rows - 1) * gap;
+            const canvas = document.createElement('canvas');
+            canvas.width = W;
+            canvas.height = H;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#121214';
+            ctx.fillRect(0, 0, W, H);
+            const vw = video.videoWidth || 16;
+            const vh = video.videoHeight || 9;
+            for (let i = 0; i < p.times.length; i += 1) {
+              const t = p.times[i];
+              await new Promise((done) => {
+                let over = false;
+                const finish = () => {
+                  if (over) return;
+                  over = true;
+                  video.removeEventListener('seeked', finish);
+                  done();
+                };
+                video.addEventListener('seeked', finish);
+                try {
+                  video.currentTime = t;
+                } catch {
+                  finish();
+                }
+                setTimeout(finish, 5000);
+              });
+              /**
+               * `seeked` 只代表「播放位置变了」，不代表画面已经画出来——
+               * 直接画会隔几格出现一张白屏（2026-11-13 第 6 格）。
+               * 这里等 300ms 让解码器把这一帧填进缓冲；画完再抽样检查是不是白屏，
+               * 白就往前后挪一点重来一次。实测比 requestVideoFrameCallback 可靠
+               * （暂停状态下那个回调根本不触发）。
+               */
+              await new Promise((done) => setTimeout(done, 600));
+              const col = i % p.cols;
+              const row = Math.floor(i / p.cols);
+              const dx = col * (p.cellW + gap);
+              const dy = row * (p.cellH + p.labelH + gap);
+              // contain：保持比例、居中、留黑边，绝不拉伸
+              const scale = Math.min(p.cellW / vw, p.cellH / vh);
+              const dw = vw * scale;
+              const dh = vh * scale;
+              const draw = () => {
+                try {
+                  ctx.drawImage(video, 0, 0, vw, vh, dx + (p.cellW - dw) / 2, dy + (p.cellH - dh) / 2, dw, dh);
+                } catch {
+                  // 某一帧画失败就留空，别把整张图废掉
+                }
+              };
+              // 取画面中心 50% 区域算平均亮度：>210 就认为这一帧「白到看不清」（解码没跟上，或者技能闪光这样的过曝帧）。
+              // 不能用「点采样」——白帧常常只白一部分，角上的采样点会漏判（2026-11-13 踩过）。
+              const looksBlank = () => {
+                try {
+                  const cx = Math.round(dx + (p.cellW - dw) / 2);
+                  const cy = Math.round(dy + (p.cellH - dh) / 2);
+                  const w = Math.max(2, Math.round(dw * 0.5));
+                  const h = Math.max(2, Math.round(dh * 0.5));
+                  const data = ctx.getImageData(cx, cy, w, h).data;
+                  let sum = 0;
+                  for (let k = 0; k < data.length; k += 4) sum += (data[k] + data[k + 1] + data[k + 2]) / 3;
+                  return data.length ? sum / (data.length / 4) > 210 : false;
+                } catch {
+                  return false;
+                }
+              };
+              draw();
+              if (looksBlank()) {
+                // 白屏：挪 1.2 秒重来一次（多半是转场、闪白，或者解码器慢了一拍）
+                await new Promise((done) => {
+                  let over = false;
+                  const finish = () => {
+                    if (over) return;
+                    over = true;
+                    video.removeEventListener('seeked', finish);
+                    done();
+                  };
+                  video.addEventListener('seeked', finish);
+                  try {
+                    video.currentTime = t + 1.2;
+                  } catch {
+                    finish();
+                  }
+                  setTimeout(finish, 4000);
+                });
+                await new Promise((done) => setTimeout(done, 300));
+                draw();
+              }
+              const sec = Math.max(0, Math.round(t));
+              const hh = Math.floor(sec / 3600);
+              const mm = Math.floor((sec % 3600) / 60);
+              const ss = String(sec % 60).padStart(2, '0');
+              const label = hh > 0 ? `${hh}:${String(mm).padStart(2, '0')}:${ss}` : `${mm}:${ss}`;
+              ctx.fillStyle = 'rgba(0,0,0,.72)';
+              ctx.fillRect(dx, dy + p.cellH, p.cellW, p.labelH);
+              ctx.fillStyle = '#ffeb3b';
+              ctx.font = '11px "Microsoft YaHei", sans-serif';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(label, dx + 4, dy + p.cellH + p.labelH / 2 + 0.5);
+            }
+            return canvas.toDataURL('image/jpeg', 0.85);
+          },
+          { times, cols, cellW, cellH, labelH: 16 },
+        )
+        .catch(() => '');
+      const b64 = String(dataUrl).split(',')[1] ?? '';
+      if (!b64) return [];
+      return [
+        {
+          at: times[Math.floor(times.length / 2)] ?? times[0],
+          ats: times.map((t) => Math.round(t)),
+          cols,
+          hd: true,
+          bytes: Buffer.from(b64, 'base64'),
+        },
+      ];
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  /** 借精灵图那个无头浏览器开一个独立页（独立 viewport，不共享它的 160×90）。 */
+  async videoPage() {
+    await this.spritePage().catch(() => null);
+    const browser = this._spriteBrowser;
+    if (!browser) throw new BiliError('NO_BROWSER', '开不了浏览器');
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' });
+    page.setDefaultTimeout(60000);
+    return page;
+  }
+
+  /**
    * 把若干格拼到一块画布上。所有格子尺寸相同（B站预览图固定 160×90）。
    * 一次 `evaluate` 画完：以前每帧都要 setContent + screenshot，9 帧要开关 9 次，
    * 现在是「下载 1 张精灵图 + 画 9 格」，快一个数量级。

@@ -3470,6 +3470,8 @@ export class StrollWorld {
     if (!raw) return JSON.stringify({ ok: false, error: '给个链接或 ID。' });
     const platform = this.inferPlatform(raw, args.platform);
     const frames = clamp(Number(args.frames ?? this.cfg.framesPerOpen ?? 0), 0, 9);
+    // hd：走播放页取原片清晰度的帧（慢 5~10 倍，只在「要认真看」时用）
+    const hd = args.hd === true;
     const keep = clamp(Number(this.cfg.keepWindowSeconds ?? 90), 0, 600);
     // at 是「定点读」：想知道第 5 分半发生了什么就带 at=5:30，比把字幕条数拉满省得多
     const atRaw = args.at ?? args.seek ?? args.time;
@@ -3546,10 +3548,10 @@ export class StrollWorld {
       // frames=1 时仍然走单张，不拼（拼一张只有一格的图没意义）。
       const shots =
         bvid && frames > 0
-          ? frames > 1
-            ? await this.bili.framesSheet(bvid, { frames, at }).catch(() => null) ??
-              (await this.bili.framesOf(bvid, Math.min(3, frames)).catch(() => []))
-            : await this.bili.framesOf(bvid, 1).catch(() => [])
+          ? // hd 失败会自动退回进度条预览图，不会因为清晰度拿不到就没有画面
+            (hd ? await this.bili.framesFromVideo(bvid, { frames, at }).catch(() => null) : null) ??
+            (frames > 1 ? await this.bili.framesSheet(bvid, { frames, at }).catch(() => null) : null) ??
+            (await this.bili.framesOf(bvid, Math.min(3, frames)).catch(() => []))
           : [];
       const shotAts = shots[0]?.ats ?? shots.map((s) => s.at);
       const body = JSON.stringify({
@@ -3568,9 +3570,11 @@ export class StrollWorld {
         ...(frames > 0
           ? {
               framesNote: shots.length
-                ? `附了 ${shotAts.length} 格画面，拼成一张分镜图（${shotAts.map((t) => clockText(t)).join(' / ')}）` +
+                ? `附了 ${shotAts.length} 格${shots[0]?.hd ? '高清' : ''}画面，拼成一张分镜图（${shotAts.map((t) => clockText(t)).join(' / ')}）` +
                   `${at != null ? '，以你指定的时间点为中心' : ''}。` +
-                  '是 B站进度条的缩略图（160×90），只看得出画面大概在干嘛，看不清字。'
+                  (shots[0]?.hd
+                    ? '这是从播放页取的原片画面，字和细节看得清。'
+                    : '是 B站进度条的缩略图（160×90），只看得出画面大概在干嘛，看不清字；要看清细节用 hd=true 再看一次。')
                 : '这条没拿到预览图（有些视频/番剧不提供），所以看不到画面。',
             }
           : {}),

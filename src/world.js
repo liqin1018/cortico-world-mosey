@@ -3695,6 +3695,35 @@ export class StrollWorld {
     return { ok: true, platform: p, items, strangers };
   }
 
+  /**
+   * 按配置挑一张配图。
+   * workshop = 图片工坊的产出目录（挑最新一张）；local = 用户指定目录；generate = 还没做，返回空。
+   */
+  pickPostImage() {
+    const from = String(this.cfg.postImageFrom ?? 'workshop');
+    let dir = '';
+    if (from === 'local') dir = String(this.cfg.postImageDir ?? '').trim();
+    else if (from === 'workshop') dir = path.join(this.dataDir, 'workspace', 'media');
+    if (!dir) return '';
+    try {
+      const files = fs
+        .readdirSync(dir)
+        .filter((f) => /\.(jpe?g|png|webp)$/i.test(f))
+        .map((f) => {
+          try {
+            return { f, t: fs.statSync(path.join(dir, f)).mtimeMs };
+          } catch {
+            return { f, t: 0 };
+          }
+        })
+        .sort((a, b) => b.t - a.t);
+      if (!files.length) return '';
+      return path.join(dir, files[0].f);
+    } catch {
+      return '';
+    }
+  }
+
   async login(platform) {
     if (platform === 'bilibili') {
       // 之前点过「退出登录」：开窗时顺手把 B站 cookie 清掉，保证这次看到的是干净二维码
@@ -5488,7 +5517,25 @@ export class StrollWorld {
         noDedupe: true,
       });
       if (!check.ok) return check;
-      return { ok: true, action, platform, target: 'dynamic', text, mentionOwner };
+      /**
+       * 按「动态」组里的设置决定带不带图。
+       * 没配到图就退回纯文字，并在 note 里说清楚——总比整个动作失败好。
+       */
+      const kind = String(this.cfg.postKind ?? 'text');
+      const imagePath = kind === 'text' ? '' : this.pickPostImage();
+      return {
+        ok: true,
+        action,
+        platform,
+        target: 'dynamic',
+        text,
+        mentionOwner,
+        postKind: kind,
+        imagePath,
+        ...(kind !== 'text' && !imagePath
+          ? { note: '配图没找到（图片工坊目录空、或本地目录没填对），这次只发文字。' }
+          : {}),
+      };
     }
 
     if (action === 'dm') {
@@ -5836,7 +5883,10 @@ export class StrollWorld {
               mention: plan.mentionOwner ? await this.douyinOwnerName() : '',
             });
       } else if (action === 'post') {
-        result = await this.bili.post({ text, mentionOwner: plan.mentionOwner });
+        // 有配图就走网页 UI 发（上传 API 走不通，见 bili.postDyn 的注释）
+        result = plan.imagePath
+          ? await this.bili.postDyn({ text, imagePath: plan.imagePath, mentionOwner: plan.mentionOwner })
+          : await this.bili.post({ text, mentionOwner: plan.mentionOwner });
       } else if (action === 'dm') {
         result =
           platform === 'bilibili'
@@ -5990,7 +6040,8 @@ export class StrollWorld {
       if (result.visibility === 'unknown') bits.push('公开列表暂未看到，可能审核中');
       return bits.join('，');
     }
-    if (action === 'post') return `${p} 动态发出去了${result.dynamicId ? `（${result.dynamicId}）` : ''}`;
+    if (action === 'post')
+      return `${p} 动态发出去了${result.dynamicId ? `（${result.dynamicId}）` : ''}${result.hasImage ? '，带图' : ''}`;
     if (action === 'dm') {
       if (plan.stranger) {
         // B站的 target 是 UID，回执里尽量换成人名，别让主人看到一串数字

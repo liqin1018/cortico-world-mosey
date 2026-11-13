@@ -1920,6 +1920,119 @@ export class Bilibili {
     };
   }
 
+  /**
+   * 发带图的动态：走**网页 UI**，不走上传 API。
+   *
+   * 为什么不用 API：`/x/upload/web/image` 一直回 `code:-400`（2026-11-13 实测，
+   * csrf 放 body/query、字段名 file/binary、加 wbi 签名，全部不通；`/x/dynamic/feed/draw/upload` 直接 404）。
+   * 网页版能正常传图，所以这里直接操作页面。
+   *
+   * 两个必须记住的坑：
+   *   1. 注入 cookie **必须带 `DedeUserID`**，只给 SESSDATA 页面不认（nav 返回空）
+   *   2. 首次发动态会弹《动态使用规范》，必须点「确认并发送」，否则请求根本不会发出去
+   */
+  async postDyn({ text = '', imagePath = '', mentionOwner = false } = {}) {
+    const nav = await this.nav(true);
+    if (!nav?.isLogin || !nav.mid) throw new BiliError('LOGIN_REQUIRED', '发动态需要 B站登录');
+
+    let bodyText = String(text ?? '');
+    if (mentionOwner && this.cfg?.ownerUid) {
+      const name = await this.ownerName(String(this.cfg.ownerUid)).catch(() => '');
+      if (name) {
+        bodyText = stripAtName(bodyText, name);
+        bodyText = `@${name} ${bodyText}`.trim();
+      }
+    }
+
+    // 从 cookieHeader() 拆出各个 cookie，补上 DedeUserID
+    const jar = {};
+    for (const part of String(this.cookieHeader() || '').split(';')) {
+      const i = part.indexOf('=');
+      if (i > 0) jar[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+    }
+    const cookies = Object.entries(jar)
+      .filter(([, v]) => v)
+      .map(([name, value]) => ({ name, value, domain: '.bilibili.com', path: '/' }));
+    if (!cookies.some((c) => c.name === 'DedeUserID')) {
+      cookies.push({ name: 'DedeUserID', value: String(nav.mid), domain: '.bilibili.com', path: '/' });
+    }
+
+    const browser = await launchHeadless(this.dataDir);
+    const ctx = await browser
+      .newContext({
+        viewport: { width: 1440, height: 960 },
+        locale: 'zh-CN',
+        userAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      })
+      .catch(async (e) => {
+        await browser.close().catch(() => {});
+        throw e;
+      });
+    try {
+      await ctx.addCookies(cookies);
+      const page = await ctx.newPage();
+      await page.goto('https://t.bilibili.com', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForSelector('[contenteditable="true"]', { timeout: 20000 });
+      await page.waitForTimeout(1200);
+
+      if (bodyText) {
+        const ed = page.locator('[contenteditable="true"]').first();
+        await ed.click({ timeout: 5000 }).catch(() => {});
+        await page.keyboard.type(bodyText, { delay: 20 });
+        await page.waitForTimeout(500);
+      }
+
+      let uploaded = false;
+      if (imagePath) {
+        // 图片入口是工具栏第 2 个图标（第 1 个是表情）
+        const tools = page.locator('[class*="tools"] svg');
+        const n = await tools.count().catch(() => 0);
+        if (n >= 2) {
+          const [fc] = await Promise.all([
+            page.waitForEvent('filechooser', { timeout: 8000 }),
+            tools.nth(1).click({ force: true }),
+          ]).catch(() => [null]);
+          if (fc) {
+            await fc.setFiles(imagePath);
+            uploaded = true;
+          }
+        }
+        if (!uploaded) throw new BiliError('NO_UPLOAD', 'B站动态编辑器里没找到图片入口（可能改版了）');
+        await page.waitForTimeout(6000);
+      }
+
+      const btn = page.getByText('发布', { exact: true }).last();
+      await btn.click({ timeout: 8000 });
+      await page.waitForTimeout(2000);
+      // 首次发动态会有这个弹窗，点了才会真的发
+      const confirm = page.getByText('确认并发送', { exact: true });
+      if (await confirm.count().catch(() => 0)) {
+        await confirm.first().click({ timeout: 5000 }).catch(() => {});
+      }
+      await page.waitForTimeout(6000);
+
+      const after = await this
+        .request('/x/polymer/web-dynamic/v1/feed/space', { host_mid: String(nav.mid) }, {
+          referer: `https://space.bilibili.com/${nav.mid}/dynamic`,
+          cacheMs: 0,
+        })
+        .catch(() => null);
+      const newest = after?.items?.[0];
+      const id = String(newest?.id_str ?? '');
+      const pics = newest?.modules?.module_dynamic?.major?.draw?.items?.length ?? 0;
+      return {
+        ok: true,
+        dynamicId: id,
+        url: id ? `https://t.bilibili.com/${id}` : 'https://t.bilibili.com/',
+        pics,
+        hasImage: !!imagePath && pics > 0,
+      };
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  }
+
   async dm(uid, text) {
     // 登录信息 5 分钟缓存就够了，没必要每发一条都强制拉一次 nav（省一个 650ms 的请求）
     const nav = await this.nav();

@@ -1073,9 +1073,24 @@ export class DouyinBrowser {
            * 以前的 /无需声明|不声明|个人观点/ 匹配不到「无需添加自主声明」，
            * 反而先命中了「内容为个人观点或见解」——选错声明类型（2026-11-14 用户指出）。
            */
+          /**
+           * 「无需添加自主声明」在选项列表最底部，抽屉可视区不够高时它落在滚动区外面，
+           * 直接 click 会因为「不在视口」失败（异常还被 catch 吞掉），
+           * 接着点「确定」时因为没选中而禁用 → 抽屉永远关不掉 → 遮罩吃掉后面的点击。
+           * 所以先滚到可见再点，点完读一次选中态确认。
+           */
           const pref = page.getByText(/无需添加自主声明/).first();
           if (await pref.count().catch(() => 0)) {
-            await pref.click({ timeout: 4000 }).catch(() => {});
+            await pref.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
+            await page.waitForTimeout(300);
+            await pref.click({ timeout: 5000 }).catch(() => {});
+            await page.waitForTimeout(600);
+            const picked = await pref.evaluate((n) => {
+              const box = n.closest('label, [role=radio], [role=option], li, div');
+              const cls = String(box?.className ?? '') + String(n.className ?? '');
+              return /checked|selected|active|is-checked/i.test(cls) || !!box?.querySelector('input:checked');
+            }).catch(() => false);
+            this.log?.info?.('stroll dy post', { step: 'declaration-click', picked });
           } else {
             const first = page.locator('[role=option], .semi-select-option, li').first();
             if (await first.count().catch(() => 0)) await first.click({ timeout: 4000 }).catch(() => {});
@@ -1141,7 +1156,14 @@ export class DouyinBrowser {
           this.log?.info?.('stroll dy post', { step: 'retry-click', btnName, clicked });
         }
         if (!clicked) {
-          this.log?.warn?.('stroll dy post', { step: 'no-button', wantDraft });
+          /**
+           * 点不动的时候一定留一张图。
+           * 2026-11-14 的教训：光看日志猜了六轮，最后是用户截图发现了原生权限弹窗。
+           * 以后失败就自动截图，谁都不用再问「现在屏幕上是什么」。
+           */
+          const failedShot = path.join(this.dataDir ?? '.', 'debug', `dy-fail-${Date.now()}.png`);
+          await page.screenshot({ path: failedShot }).catch(() => {});
+          this.log?.warn?.('stroll dy post', { step: 'no-button', wantDraft, shot: failedShot });
           return { ok: false, code: wantDraft ? 'NO_DRAFT_BUTTON' : 'NO_PUBLISH_BUTTON', error: `没点到「${btnName}」按钮。` };
         }
         await page.waitForTimeout(4000);

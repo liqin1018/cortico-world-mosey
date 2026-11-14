@@ -1401,8 +1401,14 @@ export class StrollWorld {
       const cand = [x.replyTo, x.rpid, x.rootRpid].map((v) => String(v ?? '').trim());
       const replyTo = cand.find((v) => v && v !== '0') || '';
       const rootArg = x.rootRpid && x.rootRpid !== '0' ? ` root=${x.rootRpid}` : '';
+      /**
+       * 别用 whenOf —— 那是 pushMentions 里的局部函数，这里拿不到。
+       * 2026-11-15：写第一版时直接调了它，推送每次抛 ReferenceError 被 catch 吞掉，
+       * 表现就是「一条都没推过，她只能自己去翻」。
+       */
+      const whenText = x.at ? new Date(Number(x.at) * 1000).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '时间不明';
       return (
-        `${i + 1}. ${x.user || '有人'} ${x.kind === 'at' ? '在评论里 @ 了你' : '回复了你的评论'}（${whenOf(stampOf(x)) || '时间不明'}）\n` +
+        `${i + 1}. ${x.user || '有人'} ${x.kind === 'at' ? '在评论里 @ 了你' : '回复了你的评论'}（${whenText}）\n` +
         `   视频：${x.where || '（没读到标题）'}\n` +
         `   他说：${x.text}${x.quote ? `\n   他在回的那条：${x.quote}` : ''}\n` +
         `   链接：${x.url}\n` +

@@ -6574,7 +6574,7 @@ export class StrollWorld {
         if (platform === 'douyin') {
           if (!img) return { ok: false, code: 'DOUYIN_NEEDS_IMAGE', error: '抖音图文必须带图。先在「动态」组把配图来源配好，或者用 file 指定一张。' };
           result = await this.douyin.postImage([img], {
-            title: plan.postTitle || String(text).slice(0, 20),
+            title: plan.postTitle || (String(text).split(/\n+/).map((x) => x.trim()).filter(Boolean)[0] ?? '').slice(0, 20),
             text,
           });
         } else {

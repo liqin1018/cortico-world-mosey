@@ -1455,7 +1455,16 @@ export class StrollWorld {
        * 同时把 root 一起给她：楼中楼里对方那条可能不在评论区前 80 条，
        * 带着 root 就能跳过「翻页找评论」那一步。
        */
-      const replyTo = isReply ? x.replyTo || x.rpid : x.rpid;
+      /**
+       * 注意 `'0'` 是真值。
+       *
+       * 2026-11-15：x.replyTo 取的是 msg.root_id，没值时是字符串 '0'，
+       * `x.replyTo || x.rpid` 会直接选中这个 '0'，推送里就成了 `reply_to=0`。
+       * 她拿到 0 只能靠 root 参数跳过查找，表现出来就是「我没拿到这条的 id」。
+       * 这里挑第一个「有值且不是 '0'」的，实在没有就给 root（同一条主评论）。
+       */
+      const replyCandidates = [x.replyTo, x.rpid, x.rootRpid].map((v) => String(v ?? '').trim());
+      const replyTo = replyCandidates.find((v) => v && v !== '0') || '';
       const rootArg = x.rootRpid && x.rootRpid !== '0' ? ` root=${x.rootRpid}` : '';
       /**
        * B站不提供「他那条评论的 rpid」，只能挂回主评论下面。

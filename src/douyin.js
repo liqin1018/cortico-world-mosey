@@ -963,14 +963,23 @@ export class DouyinBrowser {
           await page.keyboard.type([...String(text)].slice(0, 1000).join(''), { delay: 12 });
           await page.waitForTimeout(900);
         }
+        const titles = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role=button]')).map((b) => (b.innerText || '').trim()).filter(Boolean).slice(0, 30)).catch(() => []);
+        this.log?.info?.('stroll dy post', { step: 'before-publish', buttons: titles.join(' / ').slice(0, 220) });
         const btn = page.getByRole('button', { name: '发布', exact: true }).first();
         const clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
-        if (!clicked) return { ok: false, code: 'NO_PUBLISH_BUTTON', error: '没点到发布按钮。' };
-        await page.waitForTimeout(9000);
+        if (!clicked) {
+          this.log?.warn?.('stroll dy post', { step: 'no-button' });
+          return { ok: false, code: 'NO_PUBLISH_BUTTON', error: '没点到发布按钮。' };
+        }
+        await page.waitForTimeout(6000);
+        // 点完可能弹二次确认（作品声明、活动、审核提示），把这一刻的页面记下来
+        const afterText = await page.evaluate(() => document.body.innerText.slice(0, 500).replace(/\n{2,}/g, '\n')).catch(() => '');
+        const dialogs = await page.evaluate(() => Array.from(document.querySelectorAll('[role=dialog], .semi-modal, .modal')).map((d) => (d.innerText || '').slice(0, 120)).slice(0, 3)).catch(() => []);
+        this.log?.info?.('stroll dy post', { step: 'after-click', url: page.url(), dialogs: JSON.stringify(dialogs).slice(0, 300), text: afterText.slice(0, 240) });
+        await page.waitForTimeout(6000);
         const after = page.url();
         const stillOnEditor = /content.post.image/.test(after);
-        const done = !stillOnEditor;
-        return { ok: true, confirmed: done, url: after, images: list.length };
+        return { ok: true, confirmed: !stillOnEditor, url: after, images: list.length, dialogs, tail: afterText.slice(0, 200) };
       } finally {
         await page.close().catch(() => {});
       }

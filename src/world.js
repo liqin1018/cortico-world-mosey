@@ -3868,13 +3868,12 @@ export class StrollWorld {
 
   /**
    * 按配置挑一张配图。
-   * workshop = 图片工坊的产出目录（挑最新一张）；local = 用户指定目录；generate = 还没做，返回空。
+   * generate = 现画（这里返回空，交给执行阶段）；local = 从用户指定目录挑最新一张。
    */
   pickPostImage() {
-    const from = String(this.cfg.postImageFrom ?? 'workshop');
+    const from = String(this.cfg.postImageFrom ?? 'generate');
     let dir = '';
     if (from === 'local') dir = String(this.cfg.postImageDir ?? '').trim();
-    else if (from === 'workshop') dir = path.join(this.dataDir, 'workspace', 'media');
     /**
      * 「自己生成」不在挑选阶段返回任何东西——交给执行阶段现画。
      *

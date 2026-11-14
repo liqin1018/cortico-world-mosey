@@ -19,7 +19,7 @@ export const DEFAULTS = {
   allowSave: true,
   /** 动态：发哪种、配图从哪来、要不要自动发 */
   postKind: 'text',
-  postImageFrom: 'workshop',
+  postImageFrom: 'generate',
   postImageDir: '',
   postImageStyle: '',
   /** 生成的图存到哪；留空用 data/stroll/media */
@@ -274,9 +274,8 @@ const POSTING = {
         type: 'string',
         title: '配图从哪来',
         description:
-          '图片工坊 = 直接用 cortico-world-image 这个插件画好的图（默认路径），不用配接口；' +
           '自己生成 = 用下面填的接口现画；' +
-          '本地目录 = 从你填的文件夹里挑最新一张——**换成别的生图插件时选这个**，把它的输出目录填到下面。',
+          '本地目录 = 从你填的文件夹里挑最新一张（装了别的生图插件就用这个，把它的输出目录填到下面）。',
         'x-options': 'stroll-post-image-from',
       },
       [P + 'postImageDir']: {
@@ -967,7 +966,7 @@ export const POLICY_FIELDS = {
   douyin: { type: 'boolean' },
   allowFollow: { type: 'boolean' },
   postKind: { type: 'enum', values: ['text', 'image', 'text_image'] },
-  postImageFrom: { type: 'enum', values: ['workshop', 'generate', 'local'] },
+  postImageFrom: { type: 'enum', values: ['generate', 'local'] },
   postImageDir: { type: 'string', max: 300 },
   postImageStyle: { type: 'string', max: 200 },
   postImageSaveDir: { type: 'string', max: 300 },

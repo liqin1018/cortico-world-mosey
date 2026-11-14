@@ -35,7 +35,6 @@ export const STROLL = {
     }
     if (kind === 'stroll-post-image-from') {
       return [
-        { value: 'workshop', label: zh ? '图片工坊（不用配接口）' : 'Picture workshop' },
         { value: 'generate', label: zh ? '自己生成（要填接口）' : 'Generate via API' },
         { value: 'local', label: zh ? '本地目录' : 'Local folder' },
       ];

@@ -1716,7 +1716,11 @@ export class Bilibili {
       ['at', '/x/msgfeed/at'],
     ]) {
       try {
-        const data = await this.request(route, { platform: 'web', build: 0, mobi_app: 'web' }, { cacheMs: 60000 });
+        /**
+         * 60 秒缓存让「有人回复了我的评论」最慢要等一分多钟才推。
+         * 降到 20 秒：每分钟最多 3 次请求，风控上很安全，感知延迟明显下降。
+         */
+        const data = await this.request(route, { platform: 'web', build: 0, mobi_app: 'web' }, { cacheMs: 20000 });
         for (const item of data.items ?? []) {
           const mapped = mapMsgFeedItem(kind, item);
           if (mapped) out.push(mapped);

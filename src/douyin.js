@@ -1106,7 +1106,20 @@ export class DouyinBrowser {
          */
         const wantDraft = mode === 'draft';
         const btnName = wantDraft ? '暂存离开' : '发布';
-        const btn = page.getByRole('button', { name: btnName, exact: true }).first();
+        /**
+         * 不能只按 role=button 找。
+         * 2026-11-14 实测：「发布」是真 button，而「暂存离开」只是可点的 div/span——
+         * innerText 里能列出它，getByRole('button', { name: '暂存离开' }) 却始终 count 为 0。
+         * 所以先按 role 找，没有再退回按文本找。
+         */
+        let target = page.getByRole('button', { name: btnName, exact: true }).first();
+        let how = 'role';
+        if (!(await target.count().catch(() => 0))) {
+          target = page.getByText(btnName, { exact: true }).first();
+          how = 'text';
+        }
+        this.log?.info?.('stroll dy post', { step: 'find-button', btnName, how, count: await target.count().catch(() => 0) });
+        const btn = target;
         let clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
         if (!clicked) {
           // 兜底：可能有残留遮罩挡住，先 Esc 再点一次

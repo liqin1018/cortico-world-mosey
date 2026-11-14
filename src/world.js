@@ -1423,7 +1423,13 @@ export class StrollWorld {
        */
       const replyTo = isReply ? x.replyTo || x.rpid : x.rpid;
       const rootArg = x.rootRpid && x.rootRpid !== '0' ? ` root=${x.rootRpid}` : '';
-      return `${head}\n${where}\n${body}${quote}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${replyTo}${rootArg} text=…`;
+      /**
+       * B站不提供「他那条评论的 rpid」，只能挂回主评论下面。
+       * 想让对方收到通知，正文必须自己写 @昵称——这一点得明确告诉她，
+       * 否则她会以为「回了就是回了」，对方其实收不到（2026-11-14）。
+       */
+      const atHint = isReply ? `\n   注意：正文开头写「@${x.user || '他'}」，B站只认正文里的 @，不然他收不到通知。` : '';
+      return `${head}\n${where}\n${body}${quote}${atHint}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${replyTo}${rootArg} text=…`;
     });
     const platforms = [...new Set(picked.map((x) => x.platform))];
     const label = platforms.length === 1 ? (platforms[0] === 'douyin' ? '抖音' : 'B站') : 'B站/抖音';

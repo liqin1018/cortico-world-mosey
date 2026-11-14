@@ -125,18 +125,16 @@ function mapMsgFeedItem(kind, item) {
     rpid,
     rootRpid,
     /**
-     * 回复通知里：source_id 是"我那条被回复的评论"，target_id 才是"对方说的话"。
-     * 想楼中楼回他，reply_to 必须用 target_id，不然会回自己（2026-11-14 加）。
+     * 楼中楼回复该往哪儿挂。
+     *
+     * 实测（2026-11-14）：B站回复通知里**没有「对方那条评论的 rpid」**——
+     * source_id 是我被回复的那条，target_id 恒等于 root_id（主评论）。
+     * 所以只能回到主评论下面，再靠正文里的 @ 点名，没有更精确的锚点。
+     *
+     * 之前拿 target_id 当 reply_to，碰上「我的评论正好是顶层」就变成 parent=root=我自己，
+     * 结果就是「回复 @了我自己」。
      */
-    /**
-     * 只有「回复通知」才有意义：at 通知里 target_id 可能等于 source_id（就是我自己的评论），
-     * 那种情况用它会回自己——2026-11-14 实际发生：桌宠回复了自己那条评论。
-     * 所以只在 target_id 明确不同于 source_id 时才认。
-     */
-    replyTo:
-      String(msg.target_id ?? '') && String(msg.target_id) !== String(msg.source_id ?? '')
-        ? String(msg.target_id)
-        : '',
+    replyTo: String(msg.root_id ?? '') || '',
     likeState: Number(msg.like_state ?? 0) === 1,
   };
 }

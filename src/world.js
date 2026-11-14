@@ -1385,10 +1385,11 @@ export class StrollWorld {
      * 这里用 seenAt 去重，两条通道谁先看到算谁的，不会重复推。
      */
     const fresh = items.filter(
-      (x) => x && (x.kind === 'reply' || x.kind === 'at') && x.id && !this.store.seenAt(`msg:${x.id}`),
+      (x) => x && (x.kind === 'reply' || x.kind === 'at') && x.id && !this.store.seenAt(`pushed:${x.id}`),
     );
     if (!fresh.length) return;
-    for (const x of fresh) this.store.markSeen(`msg:${x.id}`);
+    // 独立标记：这条「推过」了，但「读过」是另一回事（见下）
+    for (const x of fresh) this.store.markSeen(`pushed:${x.id}`);
     this.store.save();
     const lines = fresh.slice(0, 3).map((x, i) => {
       const target = x.bvid

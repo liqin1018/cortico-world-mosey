@@ -1357,13 +1357,16 @@ export class StrollWorld {
     // 90 秒一次：以前 5 分钟，主人 @ 完在评论里问「收到没」，她当场答「没收到」，很尴尬
     if (Date.now() - Number(this.mentionAt ?? 0) < 90 * 1000) return;
     this.mentionAt = Date.now();
-    const [biliItems, douyinItems] = await Promise.all([
+    const [biliItems, douyinItems, biliReplies] = await Promise.all([
       biliOn ? this.bili.mentions(6).catch(() => []) : [],
       douyinOn ? this.douyin.noticeMentions(6).catch(() => []) : [],
+      // 「谁回复了我的评论」——楼中楼对话链的入口，和 @ 是两套通知
+      biliOn ? this.bili.replies(6).catch(() => []) : [],
     ]);
     const items = [
-      ...biliItems.map((x) => ({ ...x, platform: 'bilibili' })),
+      ...biliItems.map((x) => ({ ...x, platform: 'bilibili', source: 'at' })),
       ...douyinItems,
+      ...biliReplies.map((x) => ({ ...x, platform: 'bilibili', source: 'reply' })),
     ];
     // B站 沿用老的去重键（升级后不会把旧 @ 再提醒一遍），抖音单独加平台前缀
     const keyOf = (x) => (x.platform === 'douyin' ? `atpush:douyin:${x.id}` : `atpush:${x.id}`);
@@ -1406,11 +1409,21 @@ export class StrollWorld {
         : x.dynamicId
           ? `https://t.bilibili.com/${x.dynamicId}`
           : x.url;
-      const head = `${i + 1}. ${x.user || '有人'} @ 了你（${whenOf(stampOf(x)) || '时间不明'}）`;
+      const isReply = x.source === 'reply';
+      const head = isReply
+        ? `${i + 1}. ${x.user || '有人'} 回复了你的评论（${whenOf(stampOf(x)) || '时间不明'}）`
+        : `${i + 1}. ${x.user || '有人'} @ 了你（${whenOf(stampOf(x)) || '时间不明'}）`;
       const where = `   视频：${x.where || '（没读到标题）'}`;
       const body = `   评论：${x.text}`;
       const quote = x.quote ? `\n   他在回的那条：${x.quote}` : '';
-      return `${head}\n${where}\n${body}${quote}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${x.rpid} text=…`;
+      /**
+       * 回复用 target_id（他说的那句），不是 source_id（我那条被回复的）。
+       * 同时把 root 一起给她：楼中楼里对方那条可能不在评论区前 80 条，
+       * 带着 root 就能跳过「翻页找评论」那一步。
+       */
+      const replyTo = isReply ? x.replyTo || x.rpid : x.rpid;
+      const rootArg = x.rootRpid && x.rootRpid !== '0' ? ` root=${x.rootRpid}` : '';
+      return `${head}\n${where}\n${body}${quote}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${replyTo}${rootArg} text=…`;
     });
     const platforms = [...new Set(picked.map((x) => x.platform))];
     const label = platforms.length === 1 ? (platforms[0] === 'douyin' ? '抖音' : 'B站') : 'B站/抖音';
@@ -5718,10 +5731,21 @@ export class StrollWorld {
       if (action === 'reply') {
         const rpid = String(args.reply_to ?? '').trim();
         if (!rpid) return { ok: false, error: '回复要给 reply_to（评论 ID）。' };
-        const found = await this.bili.findReply(commentType, oid, rpid);
-        if (!found) return { ok: false, error: '在评论区里没找到这条评论；可能删了，或再往前翻一页。' };
-        root = found.root && found.root !== '0' ? found.root : found.rpid;
-        parent = found.rpid;
+        /**
+         * 通知里带了 root 就直接用，不再去评论区翻。
+         * 楼中楼里对方那条常常排在前 80 条之外，findReply 找不到就白跑一趟
+         * （2026-11-14：为了让「有人回复我的评论」能接着往下聊）。
+         */
+        const providedRoot = String(args.root ?? '').trim();
+        if (providedRoot) {
+          root = providedRoot;
+          parent = rpid;
+        } else {
+          const found = await this.bili.findReply(commentType, oid, rpid);
+          if (!found) return { ok: false, error: '在评论区里没找到这条评论；可能删了，或再往前翻一页（也可以带上 root 参数跳过查找）。' };
+          root = found.root && found.root !== '0' ? found.root : found.rpid;
+          parent = found.rpid;
+        }
         // 一条评论只回一次；同一内容下的不同评论互不影响
         dedupeKey = `${platform}:${action}:${target}:r${rpid}`;
       }

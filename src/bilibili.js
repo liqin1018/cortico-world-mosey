@@ -124,6 +124,11 @@ function mapMsgFeedItem(kind, item) {
     cvid: parseCvid(link),
     rpid,
     rootRpid,
+    /**
+     * 回复通知里：source_id 是"我那条被回复的评论"，target_id 才是"对方说的话"。
+     * 想楼中楼回他，reply_to 必须用 target_id，不然会回自己（2026-11-14 加）。
+     */
+    replyTo: String(msg.target_id ?? '') || '',
     likeState: Number(msg.like_state ?? 0) === 1,
   };
 }
@@ -1650,6 +1655,15 @@ export class Bilibili {
     return (data.items ?? [])
       .map((item) => mapMsgFeedItem('at', item))
       .filter(Boolean)
+      .slice(0, Math.max(1, limit));
+  }
+
+  /** 谁回复了我的评论（楼中楼对话链的入口）。不走缓存：轮询要立刻看到新的。 */
+  async replies(limit = 6) {
+    const data = await this.request('/x/msgfeed/reply', { platform: 'web', build: 0, mobi_app: 'web' }, { cacheMs: 0 });
+    return (data.items ?? [])
+      .map((item) => mapMsgFeedItem('reply', item))
+      .filter((x) => x && x.replyTo)
       .slice(0, Math.max(1, limit));
   }
 

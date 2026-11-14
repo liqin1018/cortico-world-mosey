@@ -768,10 +768,22 @@ export class DouyinBrowser {
         viewport: { width: 1440, height: 900 },
         locale: 'zh-CN',
         timezoneId: 'Asia/Shanghai',
+        // 空数组 = 一律拒绝，配合 --deny-permission-prompts 双保险
+        permissions: [],
         args: [
           '--disable-blink-features=AutomationControlled',
           '--autoplay-policy=no-user-gesture-required',
           '--window-size=1460,940',
+          /**
+           * 拒绝一切权限请求弹窗（定位 / 通知 / 摄像头 / 麦克风）。
+           *
+           * 抖音创作者中心会请求 navigator.geolocation，浏览器会弹一个
+           * 「是否允许 Microsoft Edge 访问你的精确位置？」的原生对话框，
+           * **它盖在页面最上层，之后所有点击都落在它身上**——
+           * 表现就是「暂存离开 / 发布」怎么点都没反应（2026-11-14 抓到的真凶）。
+           * 这个 flag 让浏览器直接按默认拒绝，不弹窗。
+           */
+          '--deny-permission-prompts',
         ],
       };
       let context;

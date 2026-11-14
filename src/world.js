@@ -2574,8 +2574,19 @@ export class StrollWorld {
    */
   douyinDmTail(messages, name, { commit = true } = {}) {
     const list = Array.isArray(messages) ? messages : [];
-    // 末尾连着的那几句，最多 6 条：主人连发一大串时别把整屏都塞进推送
-    const tail = this.dmTailOf(list, 6);
+    /**
+     * 第二道保险：尾巴里如果出现「自己的昵称：xxx」，说明是自己刚发的那条被读成了对方消息。
+     *
+     * 第一道在 douyin.wasJustSent（按文本比对），但它依赖 recentSent 里还留着原文；
+     * 重启、超时、或者发送时文本被裁过，都可能救不回来。这里直接按昵称前缀再挡一次
+     * （AISBIA 反馈的「鲸鲸：......」就是这种形态）。
+     */
+    const me = String(this.douyinOwner().name ?? '').trim();
+    const mine = me ? new RegExp(`^\\s*${me.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[：:]`) : null;
+    const tail = this.dmTailOf(list, 6).filter((m) => !(mine && mine.test(String(m.text ?? ''))));
+    if (!tail.length && this.dmTailOf(list, 6).length) {
+      this.log?.info?.('stroll dm self echo skipped', { who: name, me });
+    }
     const fp = tail.map((m) => `${m.kind}:${m.text}`).join('|').slice(0, 300);
     const seen = this.store.data.dmSeen?.douyin ?? null;
     // 第一次跑：把当前尾巴记成基线。以前这里直接 return，基线一直为空，

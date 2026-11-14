@@ -5182,11 +5182,32 @@ export class DouyinBrowser {
   }
 
   /** 这句是不是我 3 分钟内刚发的（群消息里抖音可能不给 isFromMe，兜底用）。 */
+  /**
+   * 这条是不是刚刚自己发出去的。
+   *
+   * 抖音的消息 DOM 分不清方向，读出来统一标 from:'them'，
+   * 靠「文本和刚发过的一模一样」来救回来。
+   * 但实际读到的文本常常带发送者前缀（「鲸鲸：在吗」），严格相等就永远救不回来——
+   * 于是自己发的消息被当成对方新来的，反复推送、她又反复回，一晚上几十次
+   * （AISBIA 在 Extension Market 反馈，v2.5.10；用户这边「海底月」一周回了 5 条还在推）。
+   *
+   * 现在：先剥掉「昵称：」前缀再比，再做一次双向包含兜底。
+   */
   wasJustSent(text) {
-    const t = String(text ?? '').trim();
+    const strip = (v) => String(v ?? '').replace(/^\s*[^：:\n]{1,24}[：:]\s*/, '').trim();
+    const t = strip(text);
     if (!t) return false;
     const now = Date.now();
-    return (this.recentSent ?? []).some((x) => x.text === t && now - x.at < 3 * 60 * 1000);
+    return (this.recentSent ?? []).some((x) => {
+      if (now - x.at >= 3 * 60 * 1000) return false;
+      const s = strip(x.text);
+      if (!s) return false;
+      if (s === t) return true;
+      // 前缀/换行/截断导致不完全一致时，用包含关系兜：长的那句里有短的那句就算
+      if (s.length >= 4 && t.includes(s)) return true;
+      if (t.length >= 4 && s.includes(t)) return true;
+      return false;
+    });
   }
 
   async dm(secUid, text) {

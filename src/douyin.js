@@ -993,8 +993,15 @@ export class DouyinBrowser {
             await page.keyboard.press('Control+A').catch(() => {});
             await page.keyboard.insertText(v).catch(() => {});
             await page.waitForTimeout(600);
-            const got = await box.evaluate((el) => (el.innerText || el.value || '').trim()).catch(() => '');
-            if (got.includes(v.slice(0, Math.min(6, v.length)))) return true;
+            /**
+             * 比对时把空白全去掉。
+             * 2026-11-14：正文是「今天\n\n测试一下图文发布」，v.slice(0,6) 带着两个换行，
+             * 而 innerText 读回来的换行会被规范化，两边永远对不上——
+             * 于是文字明明写进去了，bodyOk 还是 false。
+             */
+            const norm = (x) => String(x ?? '').replace(/\s+/g, '');
+            const got = await box.evaluate((el) => (el.innerText || el.value || el.textContent || '')).catch(() => '');
+            if (norm(got).includes(norm(v).slice(0, 6))) return true;
           }
           return false;
         };

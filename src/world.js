@@ -4985,6 +4985,30 @@ export class StrollWorld {
   }
 
   async douyinDmFast(secUid, text) {
+    /**
+     * 防重复：同一句（或几乎同一句）五分钟内只发一次。
+     *
+     * 抖音这条路失败会回退到「按 secUid 的慢路径」再发一遍——
+     * 而 strict 校验（标题读不出来就抛 THREAD_DRIFT）存在「其实已经发出去、只是没确认到」的情况，
+     * 于是主人会收到两条几乎一样的私信（2026-11-14 反馈）。
+     * 这里按字符集重叠率判重，正常聊天（「在吗」「在的」）重叠率低，不会误伤。
+     */
+    const guardKey = String(secUid ?? '');
+    const prev = this.lastDmSent;
+    if (prev && prev.key === guardKey && Date.now() - prev.at < 5 * 60 * 1000) {
+      const strip = (v) => new Set(String(v ?? '').replace(/[^\p{L}\p{N}]/gu, ''));
+      const a = strip(prev.text);
+      const b = strip(text);
+      if (a.size && b.size) {
+        let hit = 0;
+        for (const ch of b) if (a.has(ch)) hit++;
+        const ratio = hit / Math.max(a.size, b.size);
+        if (ratio > 0.7) {
+          this.log?.info?.('stroll dm duplicate skipped', { target: guardKey, ratio: Number(ratio.toFixed(2)) });
+          return { ok: true, sent: true, skipped: 'duplicate', note: '和刚发过的那条几乎一样，没重复发。' };
+        }
+      }
+    }
     const name = this.douyinOwner().name || (await this.douyinOwnerName().catch(() => ''));
     if (name) {
       // 正文里有抖音视频链接：先试着发成「画面 + 标题 + 链接」
@@ -5006,9 +5030,14 @@ export class StrollWorld {
           });
           return false;
         });
-      if (ok) return { ok: true, sent: true, via: 'chat' };
+      if (ok) {
+        this.lastDmSent = { key: guardKey, at: Date.now(), text: String(text) };
+        return { ok: true, sent: true, via: 'chat' };
+      }
     }
-    return await this.douyin.dm(secUid, text);
+    const slow = await this.douyin.dm(secUid, text);
+    this.lastDmSent = { key: guardKey, at: Date.now(), text: String(text) };
+    return slow;
   }
 
   /** 抖音私信：走页面操作，慢一点，也不占她的额度。 */

@@ -4184,9 +4184,14 @@ export class StrollWorld {
       const pickIdx = Math.max(0, fileInputs.findIndex((x) => /image/i.test(x.accept)));
       const fileInput = (await page.$('input[type=file]').catch(() => []))[pickIdx] ?? null;
       if (fileInput) {
-        const mediaDir = path.join(this.dataDir, 'media');
-        const test = fs.existsSync(mediaDir)
-          ? fs.readdirSync(mediaDir).filter((f) => /\.(jpe?g|png)$/i.test(f)).sort().pop()
+        /**
+         * 媒体目录是 dataDir/stroll/media。
+         * 2026-11-14 第一次写成了 dataDir/media，existsSync=false → test 为空 →
+         * uploaded 一直是 ''，页面当然没反应。
+         */
+        const mediaDir = [path.join(this.dataDir, 'stroll', 'media'), path.join(this.dataDir, 'media')].find((d) => fs.existsSync(d)) ?? '';
+        const test = mediaDir
+          ? fs.readdirSync(mediaDir).filter((f) => /\.(jpe?g|png)$/i.test(f)).sort().pop() ?? ''
           : '';
         if (test) {
           await fileInput.setInputFiles(path.join(mediaDir, test)).catch(() => {});

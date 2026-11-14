@@ -6132,6 +6132,17 @@ export class StrollWorld {
     }
 
     if (action === 'post') {
+      /**
+       * 发动态必须明确平台。
+       *
+       * 2026-11-14 实际踩到：她说「发一条抖音图文」，但没传 platform、target 也是空，
+       * inferPlatform('') 默认返回 bilibili —— 结果发成一条 B站纯文字动态，
+       * 她还回「抖音那条发出去了，图没上去、标题也没带」（B站动态本来就没有标题）。
+       * 这种静默发错平台比直接报错糟糕得多。
+       */
+      if (!args.platform) {
+        return { ok: false, error: '发动态要指定 platform：发 B站写 bilibili，发抖音图文写 douyin。' };
+      }
       if (!this.cfg.allowPost) return { ok: false, error: '发动态关着。' };
       if ([...text].length < 4) return { ok: false, error: '正文太短。' };
       // 字数上限按平台算：B站动态 2000，抖音图文正文 1000、标题 20
@@ -6724,8 +6735,20 @@ export class StrollWorld {
       if (result.visibility === 'unknown') bits.push('公开列表暂未看到，可能审核中');
       return bits.join('，');
     }
-    if (action === 'post')
+    if (action === 'post') {
+      /**
+       * 回执按平台分开写。
+       * 2026-11-14：抖音图文走的是 creator 页，返回 { confirmed, url, images }，
+       * 套 B站那套 dynamicId/imageName 模板会全部落空，回执变成「没确认、没配图」，
+       * 其实图已经传了。
+       */
+      if (platform === 'douyin') {
+        if (result?.ok === false) return `抖音图文没发出去：${result.error ?? result.code ?? '未知原因'}`;
+        const n = Number(result?.images ?? 0);
+        return `抖音图文发出去了${n ? `（${n} 张图）` : ''}${result?.confirmed === false ? '，但没等到「发布成功」的回执，可能还在审核' : ''}`;
+      }
       return `${p} 动态发出去了${result.dynamicId ? `（${result.dynamicId}）` : ''}${result.imageName ? `，配图 ${result.imageName}` : result.hasImage ? '，带图' : '，没配图'}`;
+    }
     if (action === 'dm') {
       if (plan.stranger) {
         // B站的 target 是 UID，回执里尽量换成人名，别让主人看到一串数字

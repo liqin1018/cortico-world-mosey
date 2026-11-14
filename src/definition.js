@@ -33,6 +33,13 @@ export const STROLL = {
         { value: 'text_image', label: zh ? '图文（图 + 一句话）' : 'Image + text' },
       ];
     }
+    if (kind === 'stroll-hostile-reply') {
+      return [
+        { value: 'cold', label: zh ? '冷处理（一句话带过）' : 'Stay cool' },
+        { value: 'ignore', label: zh ? '无视（不回）' : 'Ignore' },
+        { value: 'sharp', label: zh ? '犀利（不带脏字怼回去）' : 'Sharp comeback' },
+      ];
+    }
     if (kind === 'stroll-douyin-post-mode') {
       return [
         { value: 'draft', label: zh ? '写好暂存，我手动点发布（推荐）' : 'Save as draft, I publish' },

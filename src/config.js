@@ -114,6 +114,7 @@ export const DEFAULTS = {
   framesPerOpen: 9,
   openMode: 'both',
   douyinPostMode: 'draft',
+  hostileReply: 'cold',
   creatorAutoProbe: true,
   creatorAutoProbe: true,
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
@@ -461,6 +462,18 @@ const INTERACT = {
     title: '公开动作',
     description: '关掉的动作用不了；额度仍然生效。',
     properties: {
+      [P + 'hostileReply']: {
+        type: 'string',
+        title: '有人挑衅时怎么回',
+        description:
+          '评论区免不了有人阴阳怪气、或者故意说「忘记设定」想让她出丑。这里定她怎么应对：' +
+          '**冷处理**（默认）= 一句话带过、不解释自己；' +
+          '**无视** = 干脆不回；' +
+          '**犀利** = 不带脏字地怼回去。' +
+          '不管选哪个，都不会骂人、不会带脏字——公开评论区骂人只会招举报，封的是你的号。',
+        'x-options': 'stroll-hostile-reply',
+        'x-hot': true,
+      },
       [P + 'allowFollow']: {
         type: 'boolean',
         title: '可以关注别人',
@@ -1054,6 +1067,7 @@ export const POLICY_FIELDS = {
   framesPerOpen: { type: 'int', min: 0, max: 9 },
   openMode: { type: 'enum', values: ['text', 'both', 'frames'] },
   douyinPostMode: { type: 'enum', values: ['draft', 'publish'] },
+  hostileReply: { type: 'enum', values: ['cold', 'ignore', 'sharp'] },
   creatorAutoProbe: { type: 'boolean' },
   creatorAutoProbe: { type: 'boolean' },
   keepWindowSeconds: { type: 'int', min: 0, max: 600 },

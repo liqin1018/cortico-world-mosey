@@ -3181,6 +3181,26 @@ export class StrollWorld {
       if (sub === 'mark') return await this.watchMark();
       return JSON.stringify(await this.watchStatus());
     }
+    /**
+     * 只读调用的日上限：不管谁叫她（别的插件定时唤醒、主人对话）都算。
+     * 只卡会真正拉一堆内容的动作，status/whoami 这种轻量查询放行——她随时得能看自己在不在线。
+     */
+    const BROWSE_ACTIONS = new Set(['brief', 'feed', 'open', 'comments', 'inbox', 'history', 'weekly', 'books', 'read', 'note', 'groups', 'stickers', 'images', 'following', 'search']);
+    if (BROWSE_ACTIONS.has(action)) {
+      const day = dayKey(new Date(), this.timeZone);
+      const cap = Number(this.cfg.browseDailyCap ?? 60);
+      this.store.data.browseUsage ??= {};
+      const used = Number(this.store.data.browseUsage[day] ?? 0);
+      if (cap > 0 && used >= cap) {
+        return JSON.stringify({
+          ok: false,
+          code: 'BROWSE_CAP',
+          error: `今天的浏览额度用完了（${cap} 次）。别再刷了，等明天，或者直接跟主人说话。`,
+        });
+      }
+      this.store.data.browseUsage[day] = used + 1;
+      this.store.save();
+    }
     if (action === 'test_image') return JSON.stringify(await this.testImageApi());
     if (action === 'login') return JSON.stringify(await this.login(args.platform));
     if (action === 'following') return JSON.stringify(await this.followingFeed(args.platform, args.n));

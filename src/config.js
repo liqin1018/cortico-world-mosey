@@ -44,6 +44,8 @@ export const DEFAULTS = {
   /** 抖音动态单独一个额度，和 B站 分开算 */
   dailyPostsDouyin: 2,
   dailySaves: 8,
+  /** 每天最多看几次（brief/feed/open 这类只读调用，不管谁叫都算） */
+  browseDailyCap: 60,
   /** 勾上=这项是「每天必须完成」的目标，而不只是上限 */
   mustLike: false,
   mustComment: false,
@@ -410,6 +412,16 @@ const QUOTA = {
         description:
           '勾上后，今天要发够上面的条数（B站+抖音合计）。**这就是自动发**：她自己出门时看到这项没做满，会自己写文案发出去——不用另设定时器。' +
           '审批不是 auto 时会进草稿，批准后才算完成。',
+      },
+      [P + 'browseDailyCap']: {
+        type: 'integer',
+        title: '每天最多看几次',
+        description:
+          'brief / feed / open / comments 这类只读调用，**不管谁叫她都算**（包括别的插件定时唤醒她）。' +
+          '用完就拦，防止「每次醒来都先去刷视频」把 token 吃空。0 = 不限制。',
+        minimum: 0,
+        maximum: 500,
+        'x-suffix': ' 次',
       },
       [P + 'dailySaves']: {
         type: 'integer',
@@ -973,6 +985,7 @@ export const POLICY_FIELDS = {
   dailyPosts: { type: 'int', min: 0, max: 30 },
   dailyPostsDouyin: { type: 'int', min: 0, max: 30 },
   dailySaves: { type: 'int', min: 0, max: 100 },
+  browseDailyCap: { type: 'int', min: 0, max: 500 },
   mustLike: { type: 'boolean' },
   mustComment: { type: 'boolean' },
   mustDm: { type: 'boolean' },

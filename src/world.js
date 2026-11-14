@@ -5745,7 +5745,29 @@ export class StrollWorld {
         const providedRoot = String(args.root ?? '').trim();
         if (providedRoot) {
           root = providedRoot;
-          parent = rpid;
+          /**
+           * 精确锚点：去这串子回复里找**最新一条不是自己发的**。
+           *
+           * B站的回复通知只给 root_id，不给「他说的那句」的 rpid。
+           * 直接 parent=root 会挂在自己楼层下（表现为「回复 @了自己」）；
+           * 所以这里多查一次子回复列表，挑出对方的 rpid 当 parent，
+           * 这样才会真的落在他那条评论下面、@ 也自动带上（2026-11-14）。
+           */
+          const kids = await this.bili.replyChildren(oid, providedRoot, 20).catch(() => []);
+          let mine = '';
+          try {
+            mine = String((await this.bili.nav())?.mid ?? '');
+          } catch {
+            // 拿不到自己的 mid 就不挑，回退到 root
+          }
+          const theirs = mine ? kids.find((r) => r.rpid && r.mid && r.mid !== mine) : null;
+          parent = theirs?.rpid || providedRoot;
+          this.log?.info?.('stroll reply anchor', {
+            root,
+            parent,
+            kids: kids.length,
+            picked: theirs?.name ?? '',
+          });
         } else {
           const found = await this.bili.findReply(commentType, oid, rpid);
           if (!found) return { ok: false, error: '在评论区里没找到这条评论；可能删了，或再往前翻一页（也可以带上 root 参数跳过查找）。' };

@@ -1673,6 +1673,22 @@ export class Bilibili {
       .slice(0, Math.max(1, limit));
   }
 
+  /**
+   * 某个主评论下面的子回复（楼中楼）。
+   * 用途：回复通知里没有「对方那条评论的 rpid」，只能拿 root 去查这一串，
+   * 再挑一条不是自己发的，才能精确回在他下面（2026-11-14）。
+   */
+  async replyChildren(oid, root, limit = 20) {
+    const data = await this
+      .request(
+        '/x/v2/reply/reply',
+        { oid: String(oid), type: 1, root: String(root), ps: Math.min(20, Math.max(1, limit)), pn: 1 },
+        { referer: 'https://www.bilibili.com/', cacheMs: 30000 },
+      )
+      .catch(() => null);
+    return (data?.replies ?? []).map((r) => ({ rpid: String(r.rpid ?? ''), mid: String(r.mid ?? ''), name: stripTags(r.member?.uname ?? '') }));
+  }
+
   async inbox(limit = 8) {
     const out = [];
     for (const [kind, route] of [

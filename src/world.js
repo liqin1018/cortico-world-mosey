@@ -1428,7 +1428,8 @@ export class StrollWorld {
        * 想让对方收到通知，正文必须自己写 @昵称——这一点得明确告诉她，
        * 否则她会以为「回了就是回了」，对方其实收不到（2026-11-14）。
        */
-      const atHint = isReply ? `\n   注意：正文开头写「@${x.user || '他'}」，B站只认正文里的 @，不然他收不到通知。` : '';
+      // parent 已经精确到对方那条，B站会自动加「回复 @xxx」前缀，正文别再写一遍（2026-11-14 实测重复 @）
+      const atHint = isReply ? '\n   正文里不用再写 @他，B站会自动带上。' : '';
       return `${head}\n${where}\n${body}${quote}${atHint}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${replyTo}${rootArg} text=…`;
     });
     const platforms = [...new Set(picked.map((x) => x.platform))];

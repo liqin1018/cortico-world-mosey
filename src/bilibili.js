@@ -2029,9 +2029,17 @@ export class Bilibili {
       }
       await page.waitForTimeout(5000);
 
+      const imageName = imagePath ? path.basename(imagePath) : '';
       if (created.length) {
         const id = created[created.length - 1];
-        return { ok: true, dynamicId: id, url: `https://t.bilibili.com/${id}`, pics: imagePath ? 1 : 0, hasImage: !!imagePath };
+        return {
+          ok: true,
+          dynamicId: id,
+          url: `https://t.bilibili.com/${id}`,
+          pics: imagePath ? 1 : 0,
+          hasImage: !!imagePath,
+          imageName,
+        };
       }
 
       const after = await this
@@ -2049,6 +2057,7 @@ export class Bilibili {
         url: id ? `https://t.bilibili.com/${id}` : 'https://t.bilibili.com/',
         pics,
         hasImage: !!imagePath && pics > 0,
+        imageName,
       };
     } finally {
       await browser.close().catch(() => {});

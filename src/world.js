@@ -3798,7 +3798,14 @@ export class StrollWorld {
     const key = String(this.cfg.postImageApiKey ?? '').trim();
     const model = String(this.cfg.postImageModel ?? '').trim() || 'gpt-image-1';
     if (!base || !key) throw new Error('出图接口还没配好（地址或密钥缺一个）。');
-    const styleText = String(style ?? this.cfg.postImageStyle ?? '').trim();
+    /**
+     * 用 `||` 不是 `??`。
+     *
+     * 函数签名里 `style = ''`，默认为空串；`'' ?? 配置值` 的结果还是 `''`（?? 只认 null/undefined），
+     * 于是配置里的「科幻电影风格」永远读不到——日志里 styleHash 一直是 d41d8c（空串的 md5）。
+     * 这就是「换了风格出来的还是旧风格」的真正原因（2026-11-14）。
+     */
+    const styleText = String(style || this.cfg.postImageStyle || '').trim();
     /**
      * 风格必须放**最前面**。
      *
@@ -6276,7 +6283,7 @@ export class StrollWorld {
       return bits.join('，');
     }
     if (action === 'post')
-      return `${p} 动态发出去了${result.dynamicId ? `（${result.dynamicId}）` : ''}${result.hasImage ? '，带图' : ''}`;
+      return `${p} 动态发出去了${result.dynamicId ? `（${result.dynamicId}）` : ''}${result.imageName ? `，配图 ${result.imageName}` : result.hasImage ? '，带图' : '，没配图'}`;
     if (action === 'dm') {
       if (plan.stranger) {
         // B站的 target 是 UID，回执里尽量换成人名，别让主人看到一串数字

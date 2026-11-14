@@ -3752,10 +3752,28 @@ export class StrollWorld {
     if (!url && !b64) {
       return { ok: false, status: res.status, error: `接口通了，但返回里没有图。原始返回：${raw.slice(0, 300)}`, ms };
     }
+    /**
+     * 存一份到本地。
+     * 不存的话，她画完一张满意的，发动态时又得现画一张（还未必一样）——
+     * 存下来之后 pickPostImage 会优先复用十分钟内的图。
+     */
+    let file = '';
+    try {
+      const bytes = b64
+        ? Buffer.from(String(b64), 'base64')
+        : Buffer.from(await (await fetch(url, { signal: AbortSignal.timeout(60000) })).arrayBuffer());
+      const dir = path.join(this.dataDir, 'stroll', 'media');
+      fs.mkdirSync(dir, { recursive: true });
+      file = path.join(dir, `gen-${Date.now()}.jpg`);
+      fs.writeFileSync(file, bytes);
+    } catch {
+      // 存不下也不影响「通不通」这个结论
+    }
     return {
       ok: true,
       model,
       ms,
+      file,
       size: b64 ? `${Math.round(String(b64).length / 1024)}KB base64` : '',
       url: url ? String(url).slice(0, 300) : '',
       note: url ? '返回的是图片链接，能用。' : '返回的是 base64，能用。',
@@ -3829,6 +3847,36 @@ export class StrollWorld {
     let dir = '';
     if (from === 'local') dir = String(this.cfg.postImageDir ?? '').trim();
     else if (from === 'workshop') dir = path.join(this.dataDir, 'workspace', 'media');
+    /**
+     * 「自己生成」：**优先用十分钟内刚画过的那张**。
+     *
+     * 否则她刚画了一张满意的，发动态时又现画一张不一样的——
+     * 她说「发出去用的是哪张我没法核对」（2026-11-14 反馈），体验很怪，还白花一次钱。
+     */
+    if (from === 'generate') {
+      const genDir = path.join(this.dataDir, 'stroll', 'media');
+      try {
+        const recent = fs
+          .readdirSync(genDir)
+          .filter((f) => /^gen-.*\.(jpe?g|png|webp)$/i.test(f))
+          .map((f) => {
+            try {
+              return { f, t: fs.statSync(path.join(genDir, f)).mtimeMs };
+            } catch {
+              return { f, t: 0 };
+            }
+          })
+          .filter((x) => Date.now() - x.t < 10 * 60 * 1000)
+          .sort((a, b) => b.t - a.t);
+        if (recent.length) {
+          this.log?.info?.('stroll post reuse recent image', { file: recent[0].f });
+          return path.join(genDir, recent[0].f);
+        }
+      } catch {
+        // 目录不存在就往下走，交给执行阶段现画
+      }
+      return '';
+    }
     if (!dir) return '';
     try {
       const files = fs

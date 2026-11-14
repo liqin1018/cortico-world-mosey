@@ -941,7 +941,15 @@ export class DouyinBrowser {
     const list = (Array.isArray(files) ? files : [files]).filter(Boolean).slice(0, 35);
     if (!list.length) return { ok: false, code: 'NO_IMAGE', error: '没有图片可发。' };
     return this.serialize(async () => {
-      const ctx = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });
+      /**
+       * 发布/暂存一律开**有头**窗口。
+       *
+       * 原因：抖音那个「上次未发布的图文」是浏览器本地状态，不是服务端草稿。
+       * 插件用自己的 profile（data/stroll/douyin-profile），和主人日常的 Edge 是两个世界——
+       * 后台 headless 存下的草稿，主人用自己的浏览器怎么看都看不到（2026-11-15 反馈）。
+       * 开窗口他就能直接在这个窗口里点「继续编辑 → 发布」，顺便还能自己填验证码。
+       */
+      const ctx = await this.launch({ headless: false });
       const page = await ctx.newPage();
       try {
         await page.goto('https://creator.douyin.com/creator-micro/content/upload', { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -1190,6 +1198,7 @@ export class DouyinBrowser {
           await page.waitForTimeout(2500);
           const dsh = path.join(this.dataDir ?? '', '..', 'stroll', 'debug', `dy-draft-${Date.now()}.png`);
           await page.screenshot({ path: dsh }).catch(() => {});
+          this.__keepPage = true;
           this.log?.info?.('stroll dy post', { step: 'draft-saved', url: page.url(), shot: dsh });
           return { ok: true, draft: true, url: page.url(), images: list.length };
         }
@@ -1214,7 +1223,12 @@ export class DouyinBrowser {
         const stillOnEditor = /content.post.image/.test(after);
         return { ok: true, confirmed: !stillOnEditor, url: after, images: list.length, dialogs, tail: afterText.slice(0, 200) };
       } finally {
-        await page.close().catch(() => {});
+        // 草稿存好后把窗口留着：主人要在这个窗口里点「继续编辑 → 发布」
+        if (this.__keepPage) {
+          this.__keepPage = false;
+        } else {
+          await page.close().catch(() => {});
+        }
       }
     });
   }

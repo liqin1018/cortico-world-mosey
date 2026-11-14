@@ -5629,6 +5629,11 @@ export class StrollWorld {
        */
       const kind = String(this.cfg.postKind ?? 'text');
       const imagePath = kind === 'text' ? '' : this.pickPostImage();
+      this.log?.info?.('stroll post plan', {
+        kind,
+        imageFrom: String(this.cfg.postImageFrom ?? ''),
+        picked: imagePath ? path.basename(imagePath) : '',
+      });
       return {
         ok: true,
         action,
@@ -5996,8 +6001,16 @@ export class StrollWorld {
          * 画失败就退回纯文字，别让整条动态发不出去。
          */
         let img = String(plan.imagePath ?? '');
-        if (!img && String(plan.postKind ?? 'text') !== 'text' && String(this.cfg.postImageFrom ?? '') === 'generate') {
-          img = await this.generatePostImage({ prompt: text }).catch((error) => {
+        const wantGen =
+          !img && String(plan.postKind ?? 'text') !== 'text' && String(this.cfg.postImageFrom ?? '') === 'generate';
+        this.log?.info?.('stroll post exec', {
+          postKind: String(plan.postKind ?? ''),
+          imageFrom: String(this.cfg.postImageFrom ?? ''),
+          planImage: img ? path.basename(img) : '',
+          wantGen,
+        });
+        if (wantGen) {
+          img = await this.generatePostImage({ prompt: String(text).slice(0, 200) }).catch((error) => {
             this.log?.warn?.('stroll generate post image failed', { message: error?.message });
             return '';
           });

@@ -2002,6 +2002,15 @@ export class Bilibili {
         await page.waitForTimeout(6000);
       }
 
+      // 发布请求一出去就把 id 抓下来——只靠事后查空间接口不可靠（新动态有延迟，会拿到空 id）
+      const created = [];
+      page.on('response', async (r) => {
+        if (!r.url().includes('create/dyn')) return;
+        const j = await r.json().catch(() => null);
+        const id = j?.data?.dynamic_id_str ?? j?.data?.dynamic_id;
+        if (id) created.push(String(id));
+      });
+
       const btn = page.getByText('发布', { exact: true }).last();
       await btn.click({ timeout: 8000 });
       await page.waitForTimeout(2000);
@@ -2010,7 +2019,12 @@ export class Bilibili {
       if (await confirm.count().catch(() => 0)) {
         await confirm.first().click({ timeout: 5000 }).catch(() => {});
       }
-      await page.waitForTimeout(6000);
+      await page.waitForTimeout(5000);
+
+      if (created.length) {
+        const id = created[created.length - 1];
+        return { ok: true, dynamicId: id, url: `https://t.bilibili.com/${id}`, pics: imagePath ? 1 : 0, hasImage: !!imagePath };
+      }
 
       const after = await this
         .request('/x/polymer/web-dynamic/v1/feed/space', { host_mid: String(nav.mid) }, {

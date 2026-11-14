@@ -413,7 +413,9 @@ const QUOTA = {
       [P + 'dailyPostsDouyin']: {
         type: 'integer',
         title: '每天最多发几条抖音动态',
-        description: '只算抖音。和 B站分开计数、分开限流。',
+        description:
+          '只算抖音。和 B站分开计数、分开限流。' +
+          '**抖音图文发布还没实现**（要单独登录创作者中心，风险比 B站高），计划会做——这个额度先留着，现在就当占位。',
         minimum: 0,
         maximum: 30,
         'x-suffix': ' 条',

@@ -3072,7 +3072,14 @@ export class StrollWorld {
           }
           if (decl.name === 'stroll_act') {
             const r = await this.toolAct(a);
-            this.log?.info?.('stroll tool', { name: 'stroll_act', action: a.action ?? '', ms: Date.now() - t0 });
+            // platform / 内容摘要 一起记：排查「同一条私信发了两遍」这类问题必须有这两个
+            this.log?.info?.('stroll tool', {
+              name: 'stroll_act',
+              action: a.action ?? '',
+              platform: a.platform ?? '',
+              text: String(a.text ?? '').slice(0, 24),
+              ms: Date.now() - t0,
+            });
             return r;
           }
           const r = await this.toolPolicy(a);

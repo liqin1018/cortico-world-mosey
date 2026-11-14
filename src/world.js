@@ -6205,7 +6205,15 @@ export class StrollWorld {
           } catch {
             // 拿不到自己的 mid 就不挑，回退到 root
           }
-          const theirs = mine ? kids.find((r) => r.rpid && r.mid && r.mid !== mine) : null;
+          /**
+           * 要「最新一条不是自己发的」，不是「第一条不是自己的」。
+           *
+           * 2026-11-15 实测：日志里 picked 连刷 7 次全是同一个人（主人），
+           * 因为 find 拿的是列表第一条，而主人在这层里发得最多，永远被逮住，
+           * 路人（穹和黑助等）的回复永远轮不上。B站子回复列表是正序，取最后一条才是最新的。
+           */
+          const others = mine ? kids.filter((r) => r.rpid && r.mid && r.mid !== mine) : [];
+          const theirs = others.length ? others[others.length - 1] : null;
           parent = theirs?.rpid || providedRoot;
           this.log?.info?.('stroll reply anchor', {
             root,

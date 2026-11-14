@@ -4189,6 +4189,8 @@ export class StrollWorld {
       await page.getByText('发布图文', { exact: true }).first().click({ timeout: 8000 }).catch(() => {});
       await page.waitForTimeout(1500);
       let uploaded = '';
+      let mediaDir = '';
+      let test = '';
       /**
        * 先把页面上所有 input[type=file] 都列出来。
        * 2026-11-14 第一次跑：塞了文件但页面没反应、截图还是上传前的样子——
@@ -4215,10 +4217,18 @@ export class StrollWorld {
          * 2026-11-14 第一次写成了 dataDir/media，existsSync=false → test 为空 →
          * uploaded 一直是 ''，页面当然没反应。
          */
-        const mediaDir = [path.join(this.dataDir, 'stroll', 'media'), path.join(this.dataDir, 'media')].find((d) => fs.existsSync(d)) ?? '';
-        const test = mediaDir
-          ? fs.readdirSync(mediaDir).filter((f) => /\.(jpe?g|png)$/i.test(f)).sort().pop() ?? ''
-          : '';
+        /**
+         * 直接试几个候选目录，别依赖 this.dataDir 拼出来的那一个。
+         * 2026-11-14：日志里 shot 落在 data/debug，说明 dataDir=data，
+         * 但 uploaded 一直是空，宁可多试几条路径也不要再猜。
+         */
+        const roots = [
+          path.join(this.dataDir, 'stroll', 'media'),
+          path.join(this.dataDir, 'media'),
+          'F:/Coopanion/data/home/companion/data/stroll/media',
+        ];
+        mediaDir = roots.find((d) => { try { return fs.existsSync(d) && fs.readdirSync(d).length > 0; } catch { return false; } }) ?? '';
+        test = mediaDir ? (fs.readdirSync(mediaDir).filter((f) => /\.(jpe?g|png)$/i.test(f)).sort().pop() ?? '') : '';
         if (test) {
           await fileInput.setInputFiles(path.join(mediaDir, test)).catch(() => {});
           uploaded = test;
@@ -4251,7 +4261,7 @@ export class StrollWorld {
         pick: pickIdx,
         shot: file,
       });
-      return { ok: true, ...info, fileInputs, uploaded, shot: file };
+      return { ok: true, ...info, fileInputs, uploaded, dataDir: this.dataDir, mediaDirOk: !!mediaDir, testFile: test, shot: file };
     } catch (error) {
       await page.close().catch(() => {});
       return { ok: false, error: error?.message ?? String(error) };

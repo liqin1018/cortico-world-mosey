@@ -1408,7 +1408,8 @@ export class StrollWorld {
       `（B站）有人在评论区回复你了：\n${lines.join('\n')}`
       ,
       { kind: 'reply', platform: 'bilibili', n: fresh.length },
-      'debounce',
+      // 评论回复是对话，不是通知：用 interrupt 立刻打断，别走 debounce 攒批
+      'interrupt',
     );
   }
 

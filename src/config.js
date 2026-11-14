@@ -22,6 +22,8 @@ export const DEFAULTS = {
   postImageFrom: 'workshop',
   postImageDir: '',
   postImageStyle: '',
+  /** 生成的图存到哪；留空用 data/stroll/media */
+  postImageSaveDir: '',
   postImageApiBase: '',
   postImageApiKey: '',
   postImageModel: '',
@@ -285,6 +287,13 @@ const POSTING = {
         type: 'string',
         title: '出图风格',
         description: '自己生成时拼进提示词。例如：柔和的生活照、胶片颗粒、阴天冷色调。留空就用默认写实风。',
+      },
+      [P + 'postImageSaveDir']: {
+        type: 'string',
+        title: '生成的图存到哪',
+        description:
+          '留空就存在插件数据目录下的 media（默认）。填一个目录，生成的图就全存那里，方便你直接用资源管理器翻看。' +
+          '注意和上面「本地图片目录」不一样：那个是**从哪读**，这个是**存到哪**。',
       },
       [P + 'postImageApiBase']: {
         type: 'string',
@@ -958,6 +967,7 @@ export const POLICY_FIELDS = {
   postImageFrom: { type: 'enum', values: ['workshop', 'generate', 'local'] },
   postImageDir: { type: 'string', max: 300 },
   postImageStyle: { type: 'string', max: 200 },
+  postImageSaveDir: { type: 'string', max: 300 },
   postImageApiBase: { type: 'string', max: 300 },
   postImageApiKey: { type: 'string', max: 300 },
   postImageModel: { type: 'string', max: 120 },

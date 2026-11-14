@@ -3768,7 +3768,7 @@ export class StrollWorld {
       const bytes = b64
         ? Buffer.from(String(b64), 'base64')
         : Buffer.from(await (await fetch(url, { signal: AbortSignal.timeout(60000) })).arrayBuffer());
-      const dir = path.join(this.dataDir, 'stroll', 'media');
+      const dir = this.postImageSaveDir();
       fs.mkdirSync(dir, { recursive: true });
       const h = crypto.createHash('md5').update(String(this.cfg.postImageStyle ?? '').trim()).digest('hex').slice(0, 6);
       file = path.join(dir, `gen-${Date.now()}-${h}.jpg`);
@@ -3837,7 +3837,7 @@ export class StrollWorld {
     }
     if (!bytes?.length) throw new Error(`出图接口没返回图。原始返回：${raw.slice(0, 200)}`);
 
-    const dir = path.join(this.dataDir, 'stroll', 'media');
+    const dir = this.postImageSaveDir();
     fs.mkdirSync(dir, { recursive: true });
     // 文件名带风格指纹：换风格之后就不会再复用旧风格的图
     const styleHash = crypto.createHash('md5').update(styleText).digest('hex').slice(0, 6);
@@ -3845,6 +3845,16 @@ export class StrollWorld {
     fs.writeFileSync(file, bytes);
     this.log?.info?.('stroll post image generated', { model, bytes: bytes.length, styleHash, file });
     return file;
+  }
+
+  /**
+   * 生成的图存到哪个目录。
+   * 配置里填了就存那里（方便主人用资源管理器直接翻），没填就用插件默认的 data/stroll/media。
+   */
+  postImageSaveDir() {
+    const custom = String(this.cfg.postImageSaveDir ?? '').trim();
+    if (custom) return custom;
+    return path.join(this.dataDir, 'stroll', 'media');
   }
 
   /**
@@ -3863,7 +3873,7 @@ export class StrollWorld {
      * 她说「发出去用的是哪张我没法核对」（2026-11-14 反馈），体验很怪，还白花一次钱。
      */
     if (from === 'generate') {
-      const genDir = path.join(this.dataDir, 'stroll', 'media');
+      const genDir = this.postImageSaveDir();
       /**
        * 只复用**当前风格**画过的图。
        * 不看风格的话，用户把「宫崎骏」改成「科幻」，发出去还是旧风格那张

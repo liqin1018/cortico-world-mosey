@@ -1199,6 +1199,7 @@ export class DouyinBrowser {
           const dsh = path.join(this.dataDir ?? '', '..', 'stroll', 'debug', `dy-draft-${Date.now()}.png`);
           await page.screenshot({ path: dsh }).catch(() => {});
           this.__keepPage = true;
+          this.__keepPage = true;
           this.log?.info?.('stroll dy post', { step: 'draft-saved', url: page.url(), shot: dsh });
           return { ok: true, draft: true, url: page.url(), images: list.length };
         }

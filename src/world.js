@@ -4232,31 +4232,40 @@ export class StrollWorld {
         test = mediaDir ? (fs.readdirSync(mediaDir).filter((f) => /\.(jpe?g|png)$/i.test(f)).sort().pop() ?? '') : '';
         if (test) {
           /**
-           * 逐个 input 试，别只认第 N 个。
+           * 用「点按钮 + 拦文件选择框」这条路。
            *
-           * evaluate 能数到 2 个 input，但 $$('input[type=file]')[1] 可能拿不到
-           * （元素在 shadow root / 隐藏容器里，选择器穿透不了）。
-           * setInputFiles 塞给不对的那个不会报错、只是没反应，所以必须每个都试一遍。
+           * 2026-11-14 实测：直接给 input[type=file] 塞文件，setInputFiles 不报错、
+           * 但页面毫无反应（截图还是「点击上传」原始状态）——
+           * 页面上那两个 input 不是这个上传区的，或者它只认真实的选择动作。
+           *
+           * Playwright 的标准解法是等 filechooser 事件：点按钮 → 系统对话框弹出 →
+           * 在事件里 setFiles，等于替人做了「选择文件」这一步。
            */
-          const handles = await page.$$('input[type=file]').catch(() => []);
-          for (const h of handles) {
-            const ok = await h
-              .setInputFiles(path.join(mediaDir, test))
-              .then(() => true)
-              .catch(() => false);
-            if (!ok) continue;
-            uploaded = test;
-            // 塞进去之后等页面反应：真收下会有缩略图/进编辑器
-            await page.waitForTimeout(3000);
-            const moved = await page
-              .evaluate(() => {
-                const t = document.body.innerText;
-                return !/点击上传|直接将图片文件拖入/.test(t) || /编辑|标题|发布/.test(t);
-              })
-              .catch(() => false);
-            if (moved) break;
+          const filePath = path.join(mediaDir, test);
+          const btn = page.getByRole('button', { name: /上传图文/ }).first();
+          const clicked = await btn.click({ timeout: 5000 }).then(() => true).catch(() => false);
+          if (clicked) {
+            const chooser = await page
+              .waitForEvent('filechooser', { timeout: 5000 })
+              .then((c) => c)
+              .catch(() => null);
+            if (chooser) {
+              await chooser.setFiles(filePath).catch(() => {});
+              uploaded = test;
+              await page.waitForTimeout(6000);
+            }
           }
-          await page.waitForTimeout(4000);
+          // 按钮没点到（可能是拖拽区），退回直接塞 input
+          if (!uploaded) {
+            const handles = await page.$$('input[type=file]').catch(() => []);
+            for (const h of handles) {
+              const ok = await h.setInputFiles(filePath).then(() => true).catch(() => false);
+              if (!ok) continue;
+              await page.waitForTimeout(2500);
+              break;
+            }
+          }
+          await page.waitForTimeout(3000);
         }
       }
       const info = await page

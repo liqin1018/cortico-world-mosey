@@ -951,17 +951,54 @@ export class DouyinBrowser {
         if (!ids.length) return { ok: false, code: 'NO_FILE_INPUT', error: '发布页上没有文件输入框。' };
         await client.send('DOM.setFileInputFiles', { files: list, nodeId: ids[Math.min(1, ids.length - 1)] });
         await page.waitForTimeout(9000);
-        if (title) {
-          const box = page.getByPlaceholder('添加作品标题').first();
-          await box.click({ timeout: 6000 }).catch(() => {});
-          await page.keyboard.type([...String(title)].slice(0, 20).join(''), { delay: 18 });
-          await page.waitForTimeout(600);
-        }
-        if (text) {
-          const box = page.getByPlaceholder('添加作品描述...').first();
-          await box.click({ timeout: 6000 }).catch(() => {});
-          await page.keyboard.type([...String(text)].slice(0, 1000).join(''), { delay: 12 });
-          await page.waitForTimeout(900);
+        /**
+         * 标题和正文分开填，而且**每次都要确认焦点真的在那个框里**。
+         *
+         * 2026-11-14 踩到：getByPlaceholder('添加作品描述...') 没匹配上，
+         * click 抛错被 catch 吞掉，紧接着 keyboard.type 还把文字打进了上一个框（标题），
+         * 结果标题变成 12/20、正文 0/1000，发布按钮点了毫无反应（内容校验没过）。
+         *
+         * 现在：先按更宽的选择器找框，点完读一次焦点/内容确认，填完再读回来验证。
+         */
+        const fillBox = async (selectors, value, maxLen) => {
+          const v = [...String(value)].slice(0, maxLen).join('');
+          if (!v) return false;
+          for (const sel of selectors) {
+            const box = page.locator(sel).first();
+            const n = await box.count().catch(() => 0);
+            if (!n) continue;
+            const ok = await box.click({ timeout: 4000 }).then(() => true).catch(() => false);
+            if (!ok) continue;
+            // 用 insertText 而不是 type：不依赖键盘布局，也不会漏字符
+            await page.keyboard.press('Control+A').catch(() => {});
+            await page.keyboard.insertText(v).catch(() => {});
+            await page.waitForTimeout(600);
+            const got = await box.evaluate((el) => (el.innerText || el.value || '').trim()).catch(() => '');
+            if (got.includes(v.slice(0, Math.min(6, v.length)))) return true;
+          }
+          return false;
+        };
+        // 先填正文、后填标题：正文的 contenteditable 兜底选择器可能命中的是标题框，
+        // 反过来写就会把标题覆盖掉。正文填错还能再填标题纠正，标题填错就没救了。
+        const bodyOk = text
+          ? await fillBox(
+              ['div[placeholder*="作品描述"]', 'textarea[placeholder*="作品描述"]', 'div[contenteditable="true"]'],
+              text,
+              1000,
+            )
+          : false;
+        const titleOk = title
+          ? await fillBox(['input[placeholder*="标题"]', 'textarea[placeholder*="标题"]', 'div[contenteditable="true"][data-placeholder*="标题"]'], title, 20)
+          : false;
+        this.log?.info?.('stroll dy post', {
+          step: 'filled',
+          titleOk,
+          bodyOk,
+          titleLen: [...String(title ?? '')].length,
+          textLen: [...String(text ?? '')].length,
+        });
+        if (!bodyOk) {
+          return { ok: false, code: 'FILL_BODY_FAILED', error: '正文没填进去（找不到作品描述编辑框）。' };
         }
         const titles = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role=button]')).map((b) => (b.innerText || '').trim()).filter(Boolean).slice(0, 30)).catch(() => []);
         this.log?.info?.('stroll dy post', { step: 'before-publish', buttons: titles.join(' / ').slice(0, 220) });

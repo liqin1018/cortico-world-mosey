@@ -1053,7 +1053,15 @@ export class DouyinBrowser {
         if (await declBtn.count().catch(() => 0)) {
           await declBtn.click({ timeout: 5000 }).catch(() => {});
           await page.waitForTimeout(1200);
-          const pref = page.getByText(/无需声明|不声明|个人观点/).first();
+          /**
+           * 选项顺序（实测截图）：内容由AI生成 / 内容为个人观点或见解 / 内容为转载信息 /
+           * 内容含营销广告信息 / 虚构演绎，仅供娱乐 / **无需添加自主声明**。
+           *
+           * 必须选最后那项「无需添加自主声明」。
+           * 以前的 /无需声明|不声明|个人观点/ 匹配不到「无需添加自主声明」，
+           * 反而先命中了「内容为个人观点或见解」——选错声明类型（2026-11-14 用户指出）。
+           */
+          const pref = page.getByText(/无需添加自主声明/).first();
           if (await pref.count().catch(() => 0)) {
             await pref.click({ timeout: 4000 }).catch(() => {});
           } else {
@@ -1061,7 +1069,10 @@ export class DouyinBrowser {
             if (await first.count().catch(() => 0)) await first.click({ timeout: 4000 }).catch(() => {});
           }
           await page.waitForTimeout(900);
-          await page.keyboard.press('Escape').catch(() => {});
+          // 抽屉底部是「取消 / 确定」，选完要按确定才生效（Esc 只会关掉面板，选择不落）
+          const okBtn = page.getByRole('button', { name: '确定', exact: true }).first();
+          if (await okBtn.count().catch(() => 0)) await okBtn.click({ timeout: 4000 }).catch(() => {});
+          await page.waitForTimeout(900);
           this.log?.info?.('stroll dy post', { step: 'declaration-picked' });
         }
 
@@ -1078,6 +1089,18 @@ export class DouyinBrowser {
         const afterText = await page.evaluate(() => document.body.innerText.slice(0, 500).replace(/\n{2,}/g, '\n')).catch(() => '');
         const dialogs = await page.evaluate(() => Array.from(document.querySelectorAll('[role=dialog], .semi-modal, .modal')).map((d) => (d.innerText || '').slice(0, 120)).slice(0, 3)).catch(() => []);
         this.log?.info?.('stroll dy post', { step: 'after-click', url: page.url(), dialogs: JSON.stringify(dialogs).slice(0, 300), text: afterText.slice(0, 240) });
+        /**
+         * 短信验证：抖音对新设备/新会话的首发会要求本人验证。
+         * 这是平台风控，脚本绕不过去，也不该绕——直接如实返回，别让她以为发出去了。
+         */
+        if (/接收短信验证码|为确保是本人操作|请输入验证码/.test(afterText) || dialogs.some((d) => /验证码/.test(d))) {
+          return {
+            ok: false,
+            code: 'VERIFY_REQUIRED',
+            error:
+              '抖音要短信验证（不是封号）。让主人手动发一次，或点面板「登录抖音创作者中心」开窗完成验证；同一个浏览器资料会记住这台设备，之后就不用再验。',
+          };
+        }
         await page.waitForTimeout(6000);
         const after = page.url();
         const stillOnEditor = /content.post.image/.test(after);

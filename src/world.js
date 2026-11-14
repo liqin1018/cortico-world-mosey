@@ -49,7 +49,7 @@ const ACTION_NAMES = {
 const PLATFORM_NAMES = { bilibili: 'B站', douyin: '抖音' };
 
 /** 额度模式里给主人看的短名：出门推送和面板上的「还差 赞 17、评 3」用它。 */
-const QUOTA_SHORT = { like: '赞', comment: '评', follow: '关注', post: '动态', save: '稍后再看' };
+const QUOTA_SHORT = { like: '赞', comment: '评', follow: '关注', post: '动态', 'post:bilibili': 'B站动态', 'post:douyin': '抖音动态', save: '稍后再看' };
 
 /**
  * 别人发来的内容统一加边界。
@@ -566,7 +566,13 @@ export class StrollWorld {
     ]
       .filter(([, flag]) => this.cfg[flag] === true)
       .map(([key]) => key)
-      .filter((key) => this.canAct(key));
+      /**
+       * 发动态按平台分了额度：展开成两个 key，总量才是 B站+抖音的和。
+       * 以前只返回 'post'，面板永远按 B站 的 30 算，抖音那 1 条加不进去
+       * （2026-11-14 用户发现：应该显示 5/31）。
+       */
+      .flatMap((key) => (key === 'post' ? ['post:bilibili', 'post:douyin'] : [key]))
+      .filter((key) => this.canAct(String(key).split(':')[0]));
     if (wanted.length) return wanted;
     // 没勾必做（或者勾了但都做不了）：退回全部主动额度，不然额度模式会永远不出门
     return ['like', 'comment', 'follow', 'post', 'save'].filter((key) => this.canAct(key));
@@ -3764,7 +3770,8 @@ export class StrollWorld {
         : Buffer.from(await (await fetch(url, { signal: AbortSignal.timeout(60000) })).arrayBuffer());
       const dir = path.join(this.dataDir, 'stroll', 'media');
       fs.mkdirSync(dir, { recursive: true });
-      file = path.join(dir, `gen-${Date.now()}.jpg`);
+      const h = crypto.createHash('md5').update(String(this.cfg.postImageStyle ?? '').trim()).digest('hex').slice(0, 6);
+      file = path.join(dir, `gen-${Date.now()}-${h}.jpg`);
       fs.writeFileSync(file, bytes);
     } catch {
       // 存不下也不影响「通不通」这个结论
@@ -3832,9 +3839,11 @@ export class StrollWorld {
 
     const dir = path.join(this.dataDir, 'stroll', 'media');
     fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `gen-${Date.now()}.jpg`);
+    // 文件名带风格指纹：换风格之后就不会再复用旧风格的图
+    const styleHash = crypto.createHash('md5').update(styleText).digest('hex').slice(0, 6);
+    const file = path.join(dir, `gen-${Date.now()}-${styleHash}.jpg`);
     fs.writeFileSync(file, bytes);
-    this.log?.info?.('stroll post image generated', { model, bytes: bytes.length, file });
+    this.log?.info?.('stroll post image generated', { model, bytes: bytes.length, styleHash, file });
     return file;
   }
 
@@ -3855,10 +3864,20 @@ export class StrollWorld {
      */
     if (from === 'generate') {
       const genDir = path.join(this.dataDir, 'stroll', 'media');
+      /**
+       * 只复用**当前风格**画过的图。
+       * 不看风格的话，用户把「宫崎骏」改成「科幻」，发出去还是旧风格那张
+       * （2026-11-14 用户实测到）。
+       */
+      const wantHash = crypto
+        .createHash('md5')
+        .update(String(this.cfg.postImageStyle ?? '').trim())
+        .digest('hex')
+        .slice(0, 6);
       try {
         const recent = fs
           .readdirSync(genDir)
-          .filter((f) => /^gen-.*\.(jpe?g|png|webp)$/i.test(f))
+          .filter((f) => /^gen-.*\.(jpe?g|png|webp)$/i.test(f) && f.includes(`-${wantHash}.`))
           .map((f) => {
             try {
               return { f, t: fs.statSync(path.join(genDir, f)).mtimeMs };

@@ -2332,8 +2332,16 @@ export class StrollWorld {
           ...(extra ? { hit: truncate(String(extra), 24) } : {}),
         });
       if (!row.preview || /^\d+分钟内在线$|^在线$/.test(row.preview)) continue;
-      if (this.looksLikeKnownGroup(row.who, knownGroups)) continue;
-      const key = `douyin:${row.who}`;
+      /**
+       * 会话名后面常挂相对时间（「海底月 昨天」→「海底月 10:39」），必须洗掉再用。
+       *
+       * 以前 key 直接用 row.who，时间一过 key 就变 → 同一个陌生人被当成新的 →
+       * 每变一次推一次，正是「海底月一直弹、回了五条还在弹」（2026-11-14）。
+       * 读取那边（recentStrangers）早就 stripRowTime 了，写入这边漏了。
+       */
+      const whoKey = stripRowTime(row.who);
+      if (this.looksLikeKnownGroup(whoKey, knownGroups)) continue;
+      const key = `douyin:${whoKey}`;
       /**
        * 指纹只用正文，**不带时间**。
        * 以前是 `at|preview`，而 at 是「9分钟前 / 刚刚」这种相对文案——

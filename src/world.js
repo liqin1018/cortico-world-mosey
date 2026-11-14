@@ -4189,6 +4189,9 @@ export class StrollWorld {
       await page.getByText('发布图文', { exact: true }).first().click({ timeout: 8000 }).catch(() => {});
       await page.waitForTimeout(1500);
       let uploaded = '';
+      let clicked = false;
+      let chooserOk = false;
+      let inputTried = 0;
       let mediaDir = '';
       let test = '';
       /**
@@ -4243,7 +4246,7 @@ export class StrollWorld {
            */
           const filePath = path.join(mediaDir, test);
           const btn = page.getByRole('button', { name: /上传图文/ }).first();
-          const clicked = await btn.click({ timeout: 5000 }).then(() => true).catch(() => false);
+          clicked = await btn.click({ timeout: 5000 }).then(() => true).catch(() => false);
           if (clicked) {
             const chooser = await page
               .waitForEvent('filechooser', { timeout: 5000 })
@@ -4251,6 +4254,7 @@ export class StrollWorld {
               .catch(() => null);
             if (chooser) {
               await chooser.setFiles(filePath).catch(() => {});
+              chooserOk = true;
               uploaded = test;
               await page.waitForTimeout(6000);
             }
@@ -4259,6 +4263,7 @@ export class StrollWorld {
           if (!uploaded) {
             const handles = await page.$$('input[type=file]').catch(() => []);
             for (const h of handles) {
+              inputTried += 1;
               const ok = await h.setInputFiles(filePath).then(() => true).catch(() => false);
               if (!ok) continue;
               await page.waitForTimeout(2500);
@@ -4293,7 +4298,7 @@ export class StrollWorld {
         pick: pickIdx,
         shot: file,
       });
-      return { ok: true, ...info, fileInputs, uploaded, dataDir: this.dataDir, mediaDirOk: !!mediaDir, testFile: test, shot: file };
+      return { ok: true, ...info, fileInputs, uploaded, clicked, chooserOk, inputTried, dataDir: this.dataDir, mediaDirOk: !!mediaDir, testFile: test, shot: file };
     } catch (error) {
       await page.close().catch(() => {});
       return { ok: false, error: error?.message ?? String(error) };

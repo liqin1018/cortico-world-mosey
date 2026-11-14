@@ -4155,6 +4155,27 @@ export class StrollWorld {
     try {
       await page.goto('https://creator.douyin.com/creator-micro/content/upload', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForTimeout(4500);
+      /**
+       * 切到「发布图文」：URL 不变，靠 tab 切换。
+       * 然后找隐藏的 input[type=file] 直接塞一张测试图——
+       * 点「上传图文」按钮会弹系统文件对话框，Playwright 控制不了，只能绕过去。
+       */
+      await page.getByText('发布图文', { exact: true }).first().click({ timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      let uploaded = '';
+      const fileInput = await page.$('input[type=file]').catch(() => null);
+      if (fileInput) {
+        const mediaDir = path.join(this.dataDir, 'media');
+        const test = fs.existsSync(mediaDir)
+          ? fs.readdirSync(mediaDir).filter((f) => /\.(jpe?g|png)$/i.test(f)).sort().pop()
+          : '';
+        if (test) {
+          await fileInput.setInputFiles(path.join(mediaDir, test)).catch(() => {});
+          uploaded = test;
+          // 上传 + 进编辑器要几秒（图大时更久）
+          await page.waitForTimeout(7000);
+        }
+      }
       const info = await page
         .evaluate(() => ({
           url: location.href,
@@ -4171,8 +4192,8 @@ export class StrollWorld {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       await page.screenshot({ path: file }).catch(() => {});
       await page.close().catch(() => {});
-      this.log?.info?.('stroll creator probe', { url: info.url, login: info.login, shot: file });
-      return { ok: true, ...info, shot: file };
+      this.log?.info?.('stroll creator probe', { url: info.url, login: info.login, uploaded, shot: file });
+      return { ok: true, ...info, uploaded, shot: file };
     } catch (error) {
       await page.close().catch(() => {});
       return { ok: false, error: error?.message ?? String(error) };

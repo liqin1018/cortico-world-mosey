@@ -2599,21 +2599,32 @@ export class StrollWorld {
       this.log?.info?.('stroll dm self echo skipped', { who: name, me });
     }
     const fp = tail.map((m) => `${m.kind}:${m.text}`).join('|').slice(0, 300);
-    const seen = this.store.data.dmSeen?.douyin ?? null;
+    /**
+     * 指纹必须**按会话**存，不能全局一个。
+     *
+     * 全局一份时：海底月发一句（指纹 A）→ 别人发一句（指纹 B）→ 再回到海底月，
+     * 指纹又变回 A ≠ 当前的 B，于是海底月那句旧话被当成新消息再推一遍，
+     * 来回跳几次就是「一直弹同一句，第十几遍」（2026-11-14 用户反馈）。
+     *
+     * 旧版本存的是 { fp, at }（单个对象）——靠「有没有 fp 字段」区分，读到就丢弃重来。
+     */
+    const rawSeen = this.store.data.dmSeen?.douyin;
+    const seenMap = rawSeen && !('fp' in rawSeen) ? { ...rawSeen } : {};
+    const seen = seenMap[name] ?? null;
+    const put = (v) => {
+      this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: { ...seenMap, [name]: v } };
+      this.store.save();
+    };
     // 第一次跑：把当前尾巴记成基线。以前这里直接 return，基线一直为空，
     // 于是「装好以后主人发的第一句」永远被当成基线吞掉——正是「发了没反应」。
     if (!seen) {
-      this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: { fp, at: Date.now() } };
-      this.store.save();
+      put({ fp, at: Date.now() });
       return null;
     }
     if (!tail.length) {
       // 末尾是我发的（说明已经接住了）：把指纹清掉，
       // 否则主人过会儿再发一模一样的一句（「在吗」），指纹相同就被当成旧消息吞了。
-      if (seen.fp) {
-        this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: { fp: '', at: Date.now() } };
-        this.store.save();
-      }
+      if (seen.fp) put({ fp: '', at: Date.now() });
       return null;
     }
     if (seen.fp === fp) return null;
@@ -2625,14 +2636,10 @@ export class StrollWorld {
       // 主人发来的图片：推的时候下载成附件，她才能真的看见
       images: tail.flatMap((m) => (m.image ? [m.image] : [])),
     };
-    if (commit) {
-      this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: nextSeen };
-      this.store.save();
-    } else {
+    if (commit) put(nextSeen);
+    else {
       // 推送成功后再落指纹；推失败就不落，下一轮还会重来，不会把主人的话永久吞掉
-      payload.commit = () => {
-        this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: nextSeen };
-      };
+      payload.commit = () => put(nextSeen);
     }
     return payload;
   }

@@ -1472,9 +1472,20 @@ export class StrollWorld {
     const savedLine = blobs?.saved?.length
       ? `\n图已存到本地：${blobs.saved.map((f) => f.name).join('、')}（要转发就用 stroll_act action=image file=<这个名字>）`
       : '';
+    /**
+     * 消息里带 B站链接时，别再让她「别查」——那样她只会干巴巴回一句「打不开」。
+     *
+     * 2026-11-14 实测：主人在私信里发 b23.tv 短链问「看看这个」，
+     * 她收到的是「现在就回一句短的，别查 status/feed」，于是既没 open 也没解析，
+     * 直接回「b23.tv 我这边过不去」。指令和内容打架，她只能选指令。
+     */
+    const said = lines.join(' ');
+    const hasBiliLink = /b23\.tv\/|(?:www\.)?bilibili\.com\/video\/|BV[0-9A-Za-z]{10}/.test(said);
     const body =
       `主人私信你：\n${lines.join('\n')}\n` +
-      '现在就回一句短的，别查 status/feed。' +
+      (hasBiliLink
+        ? '消息里有 B站链接。想聊内容就先 stroll action=open target=<那个链接原样>，看完再回一句短的；打不开就直说不懂，别猜 BV 号。'
+        : '现在就回一句短的，别查 status/feed。') +
       (fresh[0].platform === 'douyin' ? '抖音记得 target=主人。' : '') +
       savedLine;
     if (!urls.length && /\[图片\]|\[表情\]/.test(lines.join(' '))) {

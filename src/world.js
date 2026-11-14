@@ -3814,7 +3814,9 @@ export class StrollWorld {
      * 现在写成两段：先画风，再画面内容，风格权重明显更高。
      */
     const scene = String(prompt || '').slice(0, 200) || '日常一角，随手拍的感觉';
-    const full = styleText ? `画风：${styleText}。画面：${scene}。整体保持这个画风。` : scene;
+    const full =
+      (styleText ? `画风：${styleText}。` : '') +
+      `画面：${scene}。构图：单张完整画面，不要分格、不要拼贴、不要多宫格、不要四联图。`;
 
     const res = await fetch(`${base}/images/generations`, {
       method: 'POST',

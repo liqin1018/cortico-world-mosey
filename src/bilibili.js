@@ -1706,7 +1706,20 @@ export class Bilibili {
         { referer: 'https://www.bilibili.com/', cacheMs: 0 },
       )
       .catch(() => null);
-    return (data?.replies ?? []).map((r) => ({ rpid: String(r.rpid ?? ''), mid: String(r.mid ?? ''), name: stripTags(r.member?.uname ?? '') }));
+    /**
+     * 带上 ctime。
+     *
+     * 2026-11-15：挑「最新一条不是自己发的」时原本靠数组顺序（取最后一条），
+     * 结果日志里 picked 一直是同一个人——说明 B站 返回的顺序不是我以为的正序。
+     * 有 ctime 就按时间排，不再依赖顺序。
+     */
+    return (data?.replies ?? []).map((r) => ({
+      rpid: String(r.rpid ?? ''),
+      mid: String(r.mid ?? ''),
+      name: stripTags(r.member?.uname ?? ''),
+      ctime: Number(r.ctime ?? 0),
+      text: String(r.content?.message ?? ''),
+    }));
   }
 
   async inbox(limit = 8) {

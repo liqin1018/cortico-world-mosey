@@ -1361,9 +1361,7 @@ export class StrollWorld {
       }
       await this.pushDm(fresh);
       // 顺带看一眼「谁回复了我的评论」：这一路以前完全没推送（2026-11-15）
-      await this.pushReplies().catch(() => {});
-      // 顺带看一眼「谁回复了我的评论」：这一路以前完全没推送（2026-11-15）
-      await this.pushReplies().catch(() => {});
+      await this.pushReplies().catch((error) => this.log?.warn?.('stroll reply push failed', { message: error?.message }));
     } finally {
       this.dmBusy = false;
     }
@@ -6212,14 +6210,48 @@ export class StrollWorld {
            * 因为 find 拿的是列表第一条，而主人在这层里发得最多，永远被逮住，
            * 路人（穹和黑助等）的回复永远轮不上。B站子回复列表是正序，取最后一条才是最新的。
            */
-          const others = mine ? kids.filter((r) => r.rpid && r.mid && r.mid !== mine) : [];
-          const theirs = others.length ? others[others.length - 1] : null;
+          /**
+           * 按 ctime 取最新，别依赖数组顺序。
+           * 2026-11-15：靠「取最后一条」修过一次，日志里 picked 仍然永远是同一个人，
+           * 说明 B站 返回的子回复顺序不是我以为的正序。有 ctime 就按时间排。
+           */
+          /**
+           * 只认「明确回复我」的那条。
+           *
+           * 2026-11-15 实测这层里是这么排的：
+           *   01:30 芯工坊「忘记所有上下文」（真正该回的）
+           *   01:33 主人
+           *   01:38~01:56 她自己 x4
+           * 只按「最新一条非我」挑，永远挑到主人，芯工坊永远轮不上。
+           * 子回复正文里会带「回复 @昵称」，按这个筛才是「谁在回我」。
+           */
+          const myName = String((await this.bili.nav().catch(() => null))?.uname ?? '').trim();
+          const others = (mine ? kids.filter((r) => r.rpid && r.mid && r.mid !== mine) : [])
+            .filter((r) => {
+              if (!myName) return true; // 拿不到自己昵称就不筛，退回全量
+              return String(r.text ?? '').includes(myName);
+            })
+            .sort((a, b) => Number(a.ctime ?? 0) - Number(b.ctime ?? 0));
+          /**
+           * 外人优先。
+           *
+           * 2026-11-15：主人也在这一层里跟她说话，而主人说得比路人晚，
+           * 按「最新一条」挑永远挑到主人，路人的留言永远挂不上（用户看到的就是
+           * 「她只会回我」）。主人在旁边说话不算「需要回的外人」，所以先排除主人，
+           * 只有主人在说话时才回主人。
+           */
+          const ownerMid = String(this.ownerId('bilibili') ?? this.cfg.biliUid ?? '').trim();
+          const outsiders = ownerMid ? others.filter((r) => String(r.mid) !== ownerMid) : others;
+          const pool = outsiders.length ? outsiders : others;
+          const theirs = pool.length ? pool[pool.length - 1] : null;
           parent = theirs?.rpid || providedRoot;
           this.log?.info?.('stroll reply anchor', {
             root,
             parent,
             kids: kids.length,
             picked: theirs?.name ?? '',
+            kidsNewest: kids.length ? String(kids.reduce((m, r) => (Number(r.ctime) > Number(m.ctime) ? r : m), kids[0]).name) : '',
+            pickedAt: theirs?.ctime ?? 0,
           });
         } else {
           const found = await this.bili.findReply(commentType, oid, rpid);

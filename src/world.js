@@ -4211,7 +4211,8 @@ export class StrollWorld {
       // 优先挑 accept 里带 image 的那个（图文区），没有就退回第一个
       const pickIdx = Math.max(0, fileInputs.findIndex((x) => /image/i.test(x.accept)));
       const fileInput = (await page.$('input[type=file]').catch(() => []))[pickIdx] ?? null;
-      if (fileInput) {
+      // 不再用 fileInput 当门闩：它取不到不代表页面上没有 input（下面会逐个试）
+      {
         /**
          * 媒体目录是 dataDir/stroll/media。
          * 2026-11-14 第一次写成了 dataDir/media，existsSync=false → test 为空 →
@@ -4230,10 +4231,32 @@ export class StrollWorld {
         mediaDir = roots.find((d) => { try { return fs.existsSync(d) && fs.readdirSync(d).length > 0; } catch { return false; } }) ?? '';
         test = mediaDir ? (fs.readdirSync(mediaDir).filter((f) => /\.(jpe?g|png)$/i.test(f)).sort().pop() ?? '') : '';
         if (test) {
-          await fileInput.setInputFiles(path.join(mediaDir, test)).catch(() => {});
-          uploaded = test;
-          // 上传 + 进编辑器要几秒（图大时更久）
-          await page.waitForTimeout(7000);
+          /**
+           * 逐个 input 试，别只认第 N 个。
+           *
+           * evaluate 能数到 2 个 input，但 $$('input[type=file]')[1] 可能拿不到
+           * （元素在 shadow root / 隐藏容器里，选择器穿透不了）。
+           * setInputFiles 塞给不对的那个不会报错、只是没反应，所以必须每个都试一遍。
+           */
+          const handles = await page.$$('input[type=file]').catch(() => []);
+          for (const h of handles) {
+            const ok = await h
+              .setInputFiles(path.join(mediaDir, test))
+              .then(() => true)
+              .catch(() => false);
+            if (!ok) continue;
+            uploaded = test;
+            // 塞进去之后等页面反应：真收下会有缩略图/进编辑器
+            await page.waitForTimeout(3000);
+            const moved = await page
+              .evaluate(() => {
+                const t = document.body.innerText;
+                return !/点击上传|直接将图片文件拖入/.test(t) || /编辑|标题|发布/.test(t);
+              })
+              .catch(() => false);
+            if (moved) break;
+          }
+          await page.waitForTimeout(4000);
         }
       }
       const info = await page

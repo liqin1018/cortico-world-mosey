@@ -6151,7 +6151,16 @@ export class StrollWorld {
           parent = found.rpid;
         }
         // 一条评论只回一次；同一内容下的不同评论互不影响
-        dedupeKey = `${platform}:${action}:${target}:r${rpid}`;
+        /**
+         * 楼中楼回复的去重键不能只用 rpid。
+         *
+         * B站回复通知里没有「对方那条评论的 rpid」，reply_to 只能填 root_id（楼层根），
+         * 而 root_id 是**一整层不变**的——于是同一个楼里聊第二句就被判 DUPLICATE，
+         * 她只能另起一楼回复（2026-11-15 用户抓到）。
+         * 把「对方说的那句」也算进去，不同内容就是不同的事。
+         */
+        const contentTag = action === 'reply' ? `:${String(text ?? '').slice(0, 24).replace(/\s+/g, '')}` : '';
+        dedupeKey = `${platform}:${action}:${target}:r${rpid}${contentTag}`;
       }
       const check = this.policy.check(action, platform, target, { quotaAction: 'comment', dedupeKey, userInitiated: asked });
       if (!check.ok) return check;

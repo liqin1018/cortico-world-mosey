@@ -4259,15 +4259,32 @@ export class StrollWorld {
               await page.waitForTimeout(6000);
             }
           }
-          // 按钮没点到（可能是拖拽区），退回直接塞 input
+          /**
+           * 兜底：用 CDP 直接给「图片那个 input」设文件。
+           *
+           * 2026-11-14 诊断：clicked=true 但 chooserOk=false（点按钮不弹文件框），
+           * 且 page.$ 只拿到 1 个 input（视频那个），图片那个在 shadow DOM 里。
+           * CDP 的 DOM.getDocument 带 pierce:true 能穿透 shadow root。
+           */
           if (!uploaded) {
-            const handles = await page.$$('input[type=file]').catch(() => []);
-            for (const h of handles) {
-              inputTried += 1;
-              const ok = await h.setInputFiles(filePath).then(() => true).catch(() => false);
-              if (!ok) continue;
-              await page.waitForTimeout(2500);
-              break;
+            try {
+              const client = await page.context().newCDPSession(page);
+              const { root } = await client.send('DOM.getDocument', { depth: -1, pierce: true });
+              const found = await client.send('DOM.querySelectorAll', {
+                nodeId: root.nodeId,
+                selector: 'input[type=file]',
+              });
+              const ids = found?.nodeIds ?? [];
+              // accept 里带 image 的那个排在最后（诊断里看到的顺序），优先挑它
+              const idx = Math.min(Math.max(pickIdx, 0), Math.max(ids.length - 1, 0));
+              if (ids.length) {
+                await client.send('DOM.setFileInputFiles', { files: [filePath], nodeId: ids[idx] });
+                inputTried = ids.length;
+                uploaded = test;
+                await page.waitForTimeout(6000);
+              }
+            } catch {
+              // CDP 不通就维持未上传
             }
           }
           await page.waitForTimeout(3000);

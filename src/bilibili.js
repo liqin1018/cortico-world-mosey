@@ -128,7 +128,15 @@ function mapMsgFeedItem(kind, item) {
      * 回复通知里：source_id 是"我那条被回复的评论"，target_id 才是"对方说的话"。
      * 想楼中楼回他，reply_to 必须用 target_id，不然会回自己（2026-11-14 加）。
      */
-    replyTo: String(msg.target_id ?? '') || '',
+    /**
+     * 只有「回复通知」才有意义：at 通知里 target_id 可能等于 source_id（就是我自己的评论），
+     * 那种情况用它会回自己——2026-11-14 实际发生：桌宠回复了自己那条评论。
+     * 所以只在 target_id 明确不同于 source_id 时才认。
+     */
+    replyTo:
+      String(msg.target_id ?? '') && String(msg.target_id) !== String(msg.source_id ?? '')
+        ? String(msg.target_id)
+        : '',
     likeState: Number(msg.like_state ?? 0) === 1,
   };
 }

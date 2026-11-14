@@ -6132,10 +6132,12 @@ export class StrollWorld {
     }
 
     if (action === 'post') {
-      if (platform !== 'bilibili') return { ok: false, error: '抖音图文发布暂未开放；B站可以发纯文字动态。' };
       if (!this.cfg.allowPost) return { ok: false, error: '发动态关着。' };
       if ([...text].length < 4) return { ok: false, error: '正文太短。' };
-      if ([...text].length > 2000) return { ok: false, error: '正文最多 2000 字。' };
+      // 字数上限按平台算：B站动态 2000，抖音图文正文 1000、标题 20
+      if (platform === 'bilibili' && [...text].length > 2000) return { ok: false, error: '正文最多 2000 字。' };
+      if (platform === 'douyin' && [...text].length > 1000) return { ok: false, error: '抖音正文最多 1000 字。' };
+      const postTitle = String(args.title ?? '').trim().slice(0, 20);
       /**
        * 动态不参与「对象去重」。
        *
@@ -6177,6 +6179,7 @@ export class StrollWorld {
         mentionOwner,
         postKind: kind,
         imagePath,
+        postTitle,
         /**
          * 必须把 quotaAction 一路带到 consume。
          * 不带的话：check 读的是 post:bilibili（永远是 0，额度永远用不完），
@@ -6557,9 +6560,17 @@ export class StrollWorld {
           });
           if (img) plan.generatedImage = true;
         }
-        result = img
-          ? await this.bili.postDyn({ text, imagePath: img, mentionOwner: plan.mentionOwner })
-          : await this.bili.post({ text, mentionOwner: plan.mentionOwner });
+        if (platform === 'douyin') {
+          if (!img) return { ok: false, code: 'DOUYIN_NEEDS_IMAGE', error: '抖音图文必须带图。先在「动态」组把配图来源配好，或者用 file 指定一张。' };
+          result = await this.douyin.postImage([img], {
+            title: plan.postTitle || String(text).slice(0, 20),
+            text,
+          });
+        } else {
+          result = img
+            ? await this.bili.postDyn({ text, imagePath: img, mentionOwner: plan.mentionOwner })
+            : await this.bili.post({ text, mentionOwner: plan.mentionOwner });
+        }
       } else if (action === 'dm') {
         result =
           platform === 'bilibili'

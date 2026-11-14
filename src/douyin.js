@@ -912,6 +912,71 @@ export class DouyinBrowser {
     this.lastError = '';
   }
 
+  /**
+   * 发抖音图文（图片 + 标题 + 正文）。
+   *
+   * 走创作者中心的内容发布页，步骤是实测出来的（2026-11-14）：
+   *   1. 打开发布页，切「发布图文」tab（URL 不变，靠 tab 切）
+   *   2. 用 CDP 的 DOM.setFileInputFiles 把图塞进图片区的 input
+   *      （点「上传图文」不弹文件选择框；page.$ 又只能拿到视频那个 input，
+   *        图片那个在 shadow DOM 里，只有 CDP 的 pierce:true 能穿透）
+   *   3. 填标题（20 字上限）和正文（1000 字上限）
+   *   4. 点「发布」
+   *
+   * 注意：创作者中心是独立登录态，「网页登录」那套 cookie 带不过来。
+   */
+  async postImage(files, { title = '', text = '' } = {}) {
+    const list = (Array.isArray(files) ? files : [files]).filter(Boolean).slice(0, 35);
+    if (!list.length) return { ok: false, code: 'NO_IMAGE', error: '没有图片可发。' };
+    return this.serialize(async () => {
+      const ctx = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });
+      const page = await ctx.newPage();
+      try {
+        await page.goto('https://creator.douyin.com/creator-micro/content/upload', { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.waitForTimeout(4000);
+        const needLogin = await page.evaluate(() => /扫码登录|登录即代表同意/.test(document.body.innerText.slice(0, 400))).catch(() => false);
+        if (needLogin) {
+          return {
+            ok: false,
+            code: 'CREATOR_LOGIN_REQUIRED',
+            error: '创作者中心没登录（和网页登录是两套）。让她先调 login platform=douyin_creator 扫码。',
+          };
+        }
+        await page.getByText('发布图文', { exact: true }).first().click({ timeout: 8000 }).catch(() => {});
+        await page.waitForTimeout(1500);
+        const client = await page.context().newCDPSession(page);
+        const { root } = await client.send('DOM.getDocument', { depth: -1, pierce: true });
+        const found = await client.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type=file]' });
+        const ids = found?.nodeIds ?? [];
+        if (!ids.length) return { ok: false, code: 'NO_FILE_INPUT', error: '发布页上没有文件输入框。' };
+        await client.send('DOM.setFileInputFiles', { files: list, nodeId: ids[Math.min(1, ids.length - 1)] });
+        await page.waitForTimeout(9000);
+        if (title) {
+          const box = page.getByPlaceholder('添加作品标题').first();
+          await box.click({ timeout: 6000 }).catch(() => {});
+          await page.keyboard.type([...String(title)].slice(0, 20).join(''), { delay: 18 });
+          await page.waitForTimeout(600);
+        }
+        if (text) {
+          const box = page.getByPlaceholder('添加作品描述...').first();
+          await box.click({ timeout: 6000 }).catch(() => {});
+          await page.keyboard.type([...String(text)].slice(0, 1000).join(''), { delay: 12 });
+          await page.waitForTimeout(900);
+        }
+        const btn = page.getByRole('button', { name: '发布', exact: true }).first();
+        const clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
+        if (!clicked) return { ok: false, code: 'NO_PUBLISH_BUTTON', error: '没点到发布按钮。' };
+        await page.waitForTimeout(9000);
+        const after = page.url();
+        const stillOnEditor = /content.post.image/.test(after);
+        const done = !stillOnEditor;
+        return { ok: true, confirmed: done, url: after, images: list.length };
+      } finally {
+        await page.close().catch(() => {});
+      }
+    });
+  }
+
   /** 拿到那个「回私信专用页」（没有就建一个，同一个 context，cookie 共用）。 */
   async chatPageForSend() {
     const ctx = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });

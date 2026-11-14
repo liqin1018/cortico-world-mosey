@@ -3556,8 +3556,16 @@ export class StrollWorld {
 
   async readOpen(args) {
     // target 是 act 那边的叫法，她很容易顺手带过来——两个都认，少一次失败
-    const raw = String(args.url ?? args.id ?? args.target ?? '').trim();
-    if (!raw) return JSON.stringify({ ok: false, error: '给个链接或 ID。' });
+    const raw0 = String(args.url ?? args.id ?? args.target ?? '').trim();
+    if (!raw0) return JSON.stringify({ ok: false, error: '给个链接或 ID。' });
+    /**
+     * 短链在这里展开。
+     *
+     * 之前只在 toolAct（评论/回复）和发图那边调用过 expandBiliLink，
+     * **open 这条路径漏了**——所以主人在私信里发 b23.tv 短链，她 open 时永远解析失败
+     * （2026-11-14，试了四次都是同一个错）。
+     */
+    const raw = await this.expandBiliLink(raw0);
     const platform = this.inferPlatform(raw, args.platform);
     const frames = clamp(Number(args.frames ?? this.cfg.framesPerOpen ?? 0), 0, 9);
     // hd：走播放页取原片清晰度的帧（慢 5~10 倍，只在「要认真看」时用）

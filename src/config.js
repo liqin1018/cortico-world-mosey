@@ -651,6 +651,17 @@ const VIEWING = {
     title: '看视频',
     description: 'B站视频的字幕和弹幕带多少条。数字越大越详细，token 和延迟也越高；填 0 就是不看不带。',
     properties: {
+      [P + 'openMode']: {
+        type: 'string',
+        title: '看视频方式',
+        description:
+          '**只看文字**：带字幕和弹幕，不抽图——最省 token，也最能看清说了什么。' +
+          '**文字 + 分镜图**：多给一张 9 格分镜，能看画面但贵一个数量级。' +
+          '**只看画面**：不带字幕。' +
+          '文字模式碰上没字幕的视频（纯音乐、生肉）会自动补 1 帧，不会什么都看不到。',
+        'x-options': 'stroll-open-mode',
+        'x-hot': true,
+      },
       [P + 'subtitleOpen']: {
         type: 'integer',
         title: '后台看：带几句字幕',
@@ -669,17 +680,6 @@ const VIEWING = {
         minimum: 0,
         maximum: 60,
         'x-suffix': ' 条',
-      },
-      [P + 'openMode']: {
-        type: 'string',
-        title: '看视频方式',
-        description:
-          '**只看文字**：带字幕和弹幕，不抽图——最省 token，也最能看清说了什么。' +
-          '**文字 + 分镜图**：多给一张 9 格分镜，能看画面但贵一个数量级。' +
-          '**只看画面**：不带字幕。' +
-          '文字模式碰上没字幕的视频（纯音乐、生肉）会自动补 1 帧，不会什么都看不到。',
-        'x-options': 'stroll-open-mode',
-        'x-hot': true,
       },
       [P + 'framesPerOpen']: {
         type: 'integer',

@@ -1,6 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { cutChars, formatDuration, humanPause, imageMimeOf, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
+
+/**
+ * 去掉会话名后面的相对时间（「海底月 周六」→「海底月」）。
+ * world.js 里有个同名函数；这边要独立用（常驻页按昵称做键），所以复制一份。
+ */
+function stripRowTime(name) {
+  return String(name ?? '')
+    .replace(
+      /\s+(刚刚|今天|昨天|前天|周[一二三四五六日天]|星期[一二三四五六日天]|\d{1,2}-\d{1,2}|\d{1,2}:\d{2}|\d+\s*(?:秒|分钟|小时|天)前)(\s+\d{1,2}:\d{2})?$/,
+      '',
+    )
+    .trim();
+}
 import { loadPlaywright } from './browser.js';
 
 const ORIGIN = 'https://www.douyin.com';
@@ -1272,7 +1285,14 @@ export class DouyinBrowser {
    * 失败就返回 null，调用方退回共享页那条老路，不影响发送。
    */
   async ensureStrangerPage(who, { max = 2 } = {}) {
-    const want = String(who ?? '').trim();
+    /**
+     * 键要先洗掉相对时间。
+     *
+     * 2026-11-15 用户截图：同一栏出现 4 个「小月月一直在玩」标签页——
+     * 因为 who 分别是「小月月一直在玩」「… 周六」「… 周二」，Map 里成了四个键，
+     * 每个键各开一个常驻页。洗完时间后缀就只剩一个。
+     */
+    const want = stripRowTime(String(who ?? '').trim());
     if (!want) return null;
     this.strangerPages ??= new Map();
     const hit = this.strangerPages.get(want);

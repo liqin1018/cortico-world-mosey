@@ -6573,7 +6573,14 @@ export class StrollWorld {
         }
         if (platform === 'douyin') {
           if (!img) return { ok: false, code: 'DOUYIN_NEEDS_IMAGE', error: '抖音图文必须带图。先在「动态」组把配图来源配好，或者用 file 指定一张。' };
-          result = await this.douyin.postImage([img], {
+          /**
+           * 必须解析成绝对路径再交给 CDP。
+           * 2026-11-14：她传 file=recv-xxx.jpg（相对名），B站那边 postDyn 内部会解析，
+           * 抖音这条直接把相对名交给 DOM.setFileInputFiles，找不到文件就一路挂到 240 秒超时。
+           */
+          const picked = this.resolveWorkshopImage(img);
+          if (!picked.ok) return { ok: false, code: 'IMAGE_NOT_FOUND', error: `配图找不到：${img}` };
+          result = await this.douyin.postImage([picked.path], {
             title: plan.postTitle || (String(text).split(/\n+/).map((x) => x.trim()).filter(Boolean)[0] ?? '').slice(0, 20),
             text,
           });

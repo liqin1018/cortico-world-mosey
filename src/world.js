@@ -3600,7 +3600,17 @@ export class StrollWorld {
       });
     }
     const platform = this.inferPlatform(raw, args.platform);
-    const frames = clamp(Number(args.frames ?? this.cfg.framesPerOpen ?? 0), 0, 9);
+    /**
+     * 看视频方式：text = 只给字幕（省 token）；both = 字幕 + 分镜图；frames = 只看画面。
+     * 文字模式读到没字幕时会在下面兜底补 1 帧，所以这里先给 0。
+     */
+    const openMode = String(this.cfg.openMode ?? 'both').toLowerCase();
+    let frames =
+      args.frames !== undefined && args.frames !== null
+        ? clamp(Number(args.frames), 0, 9)
+        : openMode === 'text'
+          ? 0
+          : clamp(Number(this.cfg.framesPerOpen ?? 9), 0, 9);
     // hd：走播放页取原片清晰度的帧（慢 5~10 倍，只在「要认真看」时用）
     const hd = args.hd === true;
     const keep = clamp(Number(this.cfg.keepWindowSeconds ?? 90), 0, 600);
@@ -3661,8 +3671,8 @@ export class StrollWorld {
        * 短片等于被抽稀了（2026-11-13 网友反馈）。
        */
       const subBase = clamp(Number(this.cfg.subtitleOpen ?? 48), 0, 60);
-      const subOpen = subtitleBudget(subBase, clockToSec(detail.dur));
-      const dmOpen = clamp(Number(this.cfg.danmakuOpen ?? 30), 0, 60);
+      const subOpen = openMode === 'frames' ? 0 : subtitleBudget(subBase, clockToSec(detail.dur));
+      const dmOpen = openMode === 'frames' ? 0 : clamp(Number(this.cfg.danmakuOpen ?? 30), 0, 60);
       let media = null;
       if (bvid && (subOpen > 0 || dmOpen > 0)) {
         media = await this.bili
@@ -3674,6 +3684,11 @@ export class StrollWorld {
           })
           .catch(() => null);
       }
+      /**
+       * 文字模式的兜底：这条视频压根没字幕（纯音乐、生肉），只给空文字等于「看了个寂寞」。
+       * 这时候补 1 帧，至少知道画面是什么。
+       */
+      if (openMode === 'text' && frames === 0 && !media?.subtitles?.length) frames = 1;
       // 抽帧：B站用进度条预览图，不用登录、不开播放页；没有就如实说，不硬凑
       // 多帧拼成一张分镜图：9 帧一张 184 token，比 3 张独立小图（552 token）便宜还看得多。
       // frames=1 时仍然走单张，不拼（拼一张只有一格的图没意义）。

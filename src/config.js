@@ -112,6 +112,7 @@ export const DEFAULTS = {
   /** 打开视频时抽几帧。0 = 不抽，最省 token。 */
   // 抽帧默认开着：B站 9 帧拼成一张分镜图只要约 184 token，比 3 张独立小图还便宜
   framesPerOpen: 9,
+  openMode: 'both',
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
   keepWindowSeconds: 90,
   /** 默认后台逛（headless）。只有扫码登录和「一起看」才开窗。 */
@@ -669,6 +670,17 @@ const VIEWING = {
         maximum: 60,
         'x-suffix': ' 条',
       },
+      [P + 'openMode']: {
+        type: 'string',
+        title: '看视频方式',
+        description:
+          '**只看文字**：带字幕和弹幕，不抽图——最省 token，也最能看清说了什么。' +
+          '**文字 + 分镜图**：多给一张 9 格分镜，能看画面但贵一个数量级。' +
+          '**只看画面**：不带字幕。' +
+          '文字模式碰上没字幕的视频（纯音乐、生肉）会自动补 1 帧，不会什么都看不到。',
+        'x-options': 'stroll-open-mode',
+        'x-hot': true,
+      },
       [P + 'framesPerOpen']: {
         type: 'integer',
         title: '看视频抽几帧',
@@ -1024,6 +1036,7 @@ export const POLICY_FIELDS = {
   interests: { type: 'string', max: 300 },
   avoid: { type: 'string', max: 300 },
   framesPerOpen: { type: 'int', min: 0, max: 9 },
+  openMode: { type: 'enum', values: ['text', 'both', 'frames'] },
   keepWindowSeconds: { type: 'int', min: 0, max: 600 },
   background: { type: 'boolean' },
   watchSpeakSec: { type: 'int', min: 20, max: 600 },

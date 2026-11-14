@@ -33,6 +33,13 @@ export const STROLL = {
         { value: 'text_image', label: zh ? '图文（图 + 一句话）' : 'Image + text' },
       ];
     }
+    if (kind === 'stroll-open-mode') {
+      return [
+        { value: 'text', label: zh ? '只看文字（字幕为主，省 token）' : 'Text only' },
+        { value: 'both', label: zh ? '文字 + 分镜图（默认）' : 'Text + frames' },
+        { value: 'frames', label: zh ? '只看画面' : 'Frames only' },
+      ];
+    }
     if (kind === 'stroll-post-image-from') {
       return [
         { value: 'generate', label: zh ? '自己生成（要填接口）' : 'Generate via API' },

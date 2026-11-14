@@ -1695,7 +1695,15 @@ export class Bilibili {
       .request(
         '/x/v2/reply/reply',
         { oid: String(oid), type: 1, root: String(root), ps: Math.min(20, Math.max(1, limit)), pn: 1 },
-        { referer: 'https://www.bilibili.com/', cacheMs: 30000 },
+        /**
+         * 这里不能用长缓存。
+         *
+         * 2026-11-15：楼中楼里刚发出的子回复（40 秒前）读不到——
+         * 30 秒缓存返回的是旧快照，kids 只有 1 条，挑不到「对方那条」，
+         * parent 只能退回 root，看起来就是「她又挂在根评论下了」。
+         * 这个请求只在回复时发一次，关掉缓存代价很小。
+         */
+        { referer: 'https://www.bilibili.com/', cacheMs: 0 },
       )
       .catch(() => null);
     return (data?.replies ?? []).map((r) => ({ rpid: String(r.rpid ?? ''), mid: String(r.mid ?? ''), name: stripTags(r.member?.uname ?? '') }));

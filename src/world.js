@@ -1484,7 +1484,7 @@ export class StrollWorld {
     const body =
       `主人私信你：\n${lines.join('\n')}\n` +
       (hasBiliLink
-        ? '消息里有 B站链接。想聊内容就先 stroll action=open target=<那个链接原样>，看完再回一句短的；打不开就直说不懂，别猜 BV 号。'
+        ? '消息里有 B站链接。想聊内容就先 stroll action=open url=<那个链接原样>（参数名是 url，不是 target），看完再回一句短的；打不开就直说不懂，别拿用户 ID 当视频号。'
         : '现在就回一句短的，别查 status/feed。') +
       (fresh[0].platform === 'douyin' ? '抖音记得 target=主人。' : '') +
       savedLine;
@@ -3579,6 +3579,18 @@ export class StrollWorld {
      * （2026-11-14，试了四次都是同一个错）。
      */
     const raw = await this.expandBiliLink(raw0);
+    /**
+     * 纯数字（8-12 位）几乎都是用户 ID / 会话 ID，不是视频号。
+     * 2026-11-14：她五次拿 '32842111'（主人的 uid）当视频号 open，每次都是同一个错。
+     * 这里提前说清楚，别让她在 B站接口那边绕一圈才得到一个看不懂的报错。
+     */
+    if (/^\d{6,14}$/.test(raw)) {
+      return JSON.stringify({
+        ok: false,
+        code: 'NOT_A_VIDEO_ID',
+        error: `${raw} 看着是用户 ID，不是视频号。B站视频要么给链接（b23.tv 短链也行），要么给 BV 号。`,
+      });
+    }
     const platform = this.inferPlatform(raw, args.platform);
     const frames = clamp(Number(args.frames ?? this.cfg.framesPerOpen ?? 0), 0, 9);
     // hd：走播放页取原片清晰度的帧（慢 5~10 倍，只在「要认真看」时用）

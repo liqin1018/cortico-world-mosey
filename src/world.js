@@ -3885,23 +3885,40 @@ export class StrollWorld {
      */
     if (from === 'generate') return '';
     if (!dir) return '';
-    try {
-      const files = fs
-        .readdirSync(dir)
-        .filter((f) => /\.(jpe?g|png|webp)$/i.test(f))
-        .map((f) => {
-          try {
-            return { f, t: fs.statSync(path.join(dir, f)).mtimeMs };
-          } catch {
-            return { f, t: 0 };
-          }
-        })
-        .sort((a, b) => b.t - a.t);
-      if (!files.length) return '';
-      return path.join(dir, files[0].f);
-    } catch {
-      return '';
-    }
+    /**
+     * 递归找图（最多两层子目录、最多 300 个）。
+     *
+     * 别的生图插件往往按日期/批次分子目录（2026-11-14/xxx.png），
+     * 只扫一层会一个都找不到。用户填一个目录就该能用，不该要求他把图摊平。
+     */
+    const out = [];
+    const walk = (base, depth) => {
+      if (depth > 2 || out.length >= 300) return;
+      let entries = [];
+      try {
+        entries = fs.readdirSync(base, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (out.length >= 300) return;
+        const full = path.join(base, entry.name);
+        if (entry.isDirectory()) {
+          walk(full, depth + 1);
+          continue;
+        }
+        if (!/\.(jpe?g|png|webp)$/i.test(entry.name)) continue;
+        try {
+          out.push({ file: full, t: fs.statSync(full).mtimeMs });
+        } catch {
+          // 刚被删掉的就跳过
+        }
+      }
+    };
+    walk(dir, 0);
+    if (!out.length) return '';
+    out.sort((a, b) => b.t - a.t);
+    return out[0].file;
   }
 
   async login(platform) {

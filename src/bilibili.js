@@ -1617,14 +1617,26 @@ export class Bilibili {
         const body = obj.content ?? '';
         // msg_type 2 = 图片；图片消息的 URL 在 content.url 里
         const type = Number(m.msg_type ?? 0);
+        /**
+         * msg_type 7 是「分享卡片」（视频/动态/专栏），结构完全不一样：
+         *   { title, headline, thumb, author, url, bvid }
+         * 没有 content 字段，封面在 thumb、链接在 url。
+         * 以前只读 content/image_urls，于是卡片正文和封面一起丢了——
+         * 桌宠只能说「图这边只显示一个『图片』占位」（2026-11-14）。
+         */
+        const thumb = String(obj.thumb ?? '') || String(obj.cover ?? '');
+        const cardUrl = String(obj.url ?? '');
+        const cardTitle = stripTags(obj.title ?? obj.headline ?? '').trim();
+        const cardText = cardUrl ? [cardTitle || '分享', cardUrl].filter(Boolean).join(' ') : '';
         const pic = String(obj.url ?? '') || String(Array.isArray(obj.image_urls) ? obj.image_urls[0] : '');
-        const isPic = type === 2 || (!body && /^https?:/.test(pic));
+        const isPic = type === 2 || (!body && !cardText && /^https?:/.test(pic));
         return {
           at: Number(m.timestamp ?? 0) * 1000,
           from: String(m.sender_uid ?? ''),
           type,
-          text: stripTags(body) || (isPic ? '[图片]' : ''),
-          image: isPic ? pic : '',
+          text: stripTags(body) || cardText || (isPic ? '[图片]' : ''),
+          // 卡片带封面：一起带出去，她才能真的看见视频长什么样
+          image: isPic ? pic : thumb,
           key: String(m.msg_key ?? ''),
         };
       })

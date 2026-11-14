@@ -4108,7 +4108,22 @@ export class StrollWorld {
     walk(dir, 0);
     if (!out.length) return '';
     out.sort((a, b) => b.t - a.t);
-    return out[0].file;
+    /**
+     * 跳过最近发过的那几张，免得连着发几条都用同一张。
+     * 2026-11-15 用户要的：目录里图多的时候轮着用，但只有一张时还得能用。
+     */
+    const recent = new Set((this.store?.data?.recentPostImages ?? []).map((p) => path.resolve(p)));
+    const fresh = out.filter((x) => !recent.has(path.resolve(x.file)));
+    const pick = (fresh.length ? fresh : out)[0].file;
+    try {
+      const list = [path.resolve(pick), ...(this.store.data.recentPostImages ?? []).map((p) => path.resolve(p))];
+      // 只记最近 12 张，太老的放回去可再选
+      this.store.data.recentPostImages = [...new Set(list)].slice(0, 12);
+      this.store.save?.();
+    } catch {
+      // 记不进去也不影响发
+    }
+    return pick;
   }
 
   async login(platform) {

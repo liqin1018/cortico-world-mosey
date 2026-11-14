@@ -113,6 +113,7 @@ export const DEFAULTS = {
   // 抽帧默认开着：B站 9 帧拼成一张分镜图只要约 184 token，比 3 张独立小图还便宜
   framesPerOpen: 9,
   openMode: 'both',
+  creatorAutoProbe: true,
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
   keepWindowSeconds: 90,
   /** 默认后台逛（headless）。只有扫码登录和「一起看」才开窗。 */
@@ -1037,6 +1038,7 @@ export const POLICY_FIELDS = {
   avoid: { type: 'string', max: 300 },
   framesPerOpen: { type: 'int', min: 0, max: 9 },
   openMode: { type: 'enum', values: ['text', 'both', 'frames'] },
+  creatorAutoProbe: { type: 'boolean' },
   keepWindowSeconds: { type: 'int', min: 0, max: 600 },
   background: { type: 'boolean' },
   watchSpeakSec: { type: 'int', min: 20, max: 600 },

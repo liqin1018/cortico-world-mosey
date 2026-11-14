@@ -240,6 +240,19 @@ export class StrollWorld {
   async start(host) {
     this.host = host;
     this.running = true;
+    /**
+     * 调试用：启动后自动探一次抖音创作者中心的发布页。
+     *
+     * 浏览器 profile 是插件独占的，外面开不了第二个实例——
+     * 所以「探发布页」只能在这里触发。开着这个开关就不用每次叫人去问了，
+     * 重启后等 20 秒自己跑，结果进日志和 data/debug 的截图。
+     * 图文发布跑通后把 creatorAutoProbe 关掉即可。
+     */
+    if (this.cfg.creatorAutoProbe) {
+      setTimeout(() => {
+        this.creatorProbe().catch(() => {});
+      }, 20000);
+    }
     this.store.load();
     this.store.data.autoSessions ??= {};
     this.migrateConfig();

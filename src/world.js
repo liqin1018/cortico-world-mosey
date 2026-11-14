@@ -3246,6 +3246,7 @@ export class StrollWorld {
     }
     if (action === 'test_image') return JSON.stringify(await this.testImageApi());
     if (action === 'login') return JSON.stringify(await this.login(args.platform));
+    if (action === 'creator_probe') return JSON.stringify(await this.creatorProbe());
     if (action === 'following') return JSON.stringify(await this.followingFeed(args.platform, args.n));
     if (action === 'weekly') return JSON.stringify(this.weeklyReport(args.days));
     if (action === 'books') return JSON.stringify(this.listBooks());
@@ -4122,7 +4123,60 @@ export class StrollWorld {
         url: info.url,
       };
     }
+    if (platform === 'douyin_creator') {
+      /**
+       * 创作者中心是独立登录态（www.douyin.com 的 cookie 带不过去），
+       * 所以要单独开一次窗扫码。扫完之后 cookie 落在这个 profile 里，
+       * 后面发图文才用得上（2026-11-14）。
+       */
+      try {
+        const info = await this.douyin.loginWindow('https://creator.douyin.com/creator-micro/home', {});
+        return {
+          ok: true,
+          message: '创作者中心登录窗开了。在窗口里扫码登录，登进去之后让我看一眼发布页。',
+          url: info.url,
+        };
+      } catch (error) {
+        return { ok: false, code: error?.code ?? 'BROWSER_LAUNCH', error: `登录窗没打开：${error?.message ?? String(error)}` };
+      }
+    }
     return this.douyin.login();
+  }
+
+  /**
+   * 探抖音创作者中心的发布页：打开发布页、截一张图、把可见文字和按钮抓回来。
+   * 只为「能不能自动发图文」做技术判断，不点任何发布按钮。
+   */
+  async creatorProbe() {
+    const ctx = this.douyin.context;
+    if (!ctx) return { ok: false, error: '浏览器还没开。先做 action=login platform=douyin_creator。' };
+    const page = await ctx.newPage().catch(() => null);
+    if (!page) return { ok: false, error: '开不了新标签页。' };
+    try {
+      await page.goto('https://creator.douyin.com/creator-micro/content/upload', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(4500);
+      const info = await page
+        .evaluate(() => ({
+          url: location.href,
+          title: document.title,
+          login: /扫码登录|登录即代表同意/.test(document.body.innerText.slice(0, 400)),
+          text: document.body.innerText.slice(0, 900).replace(/\n{2,}/g, '\n'),
+          buttons: Array.from(document.querySelectorAll('button, [role=button], [class*=tab]'))
+            .map((b) => (b.innerText || '').trim())
+            .filter((t) => t && t.length < 20)
+            .slice(0, 24),
+        }))
+        .catch(() => ({ error: 'evaluate failed' }));
+      const file = path.join(this.dataDir, 'debug', `creator-${Date.now()}.png`);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      await page.screenshot({ path: file }).catch(() => {});
+      await page.close().catch(() => {});
+      this.log?.info?.('stroll creator probe', { url: info.url, login: info.login, shot: file });
+      return { ok: true, ...info, shot: file };
+    } catch (error) {
+      await page.close().catch(() => {});
+      return { ok: false, error: error?.message ?? String(error) };
+    }
   }
 
   /** 退出 B站：删掉插件存的 cookie，并把窗口里的 B站 cookie 一起清掉。 */

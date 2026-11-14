@@ -1362,6 +1362,8 @@ export class StrollWorld {
       await this.pushDm(fresh);
       // 顺带看一眼「谁回复了我的评论」：这一路以前完全没推送（2026-11-15）
       await this.pushReplies().catch(() => {});
+      // 顺带看一眼「谁回复了我的评论」：这一路以前完全没推送（2026-11-15）
+      await this.pushReplies().catch(() => {});
     } finally {
       this.dmBusy = false;
     }

@@ -998,9 +998,17 @@ export class DouyinBrowser {
               const focused = await box.evaluate((el) => { el.focus(); return document.activeElement === el; }).catch(() => false);
               if (!focused) continue;
             }
-            // 用 insertText 而不是 type：不依赖键盘布局，也不会漏字符
+            /**
+             * 必须用 keyboard.type 逐字敲，不能用 insertText。
+             *
+             * 2026-11-14 离线试验台（.probe/t-dy-post.mjs）实测：
+             * 同一个元素 focus 成功、点也点得到，insertText 写进去读回来是空；
+             * 换成 type(v, { delay: 30 }) 立刻生效（8/1000、2/20 都对上）。
+             * 抖音这个编辑器只认真实键盘事件（beforeinput/input），不认 execCommand 那一路。
+             */
             await page.keyboard.press('Control+A').catch(() => {});
-            await page.keyboard.insertText(v).catch(() => {});
+            await page.keyboard.press('Delete').catch(() => {});
+            await page.keyboard.type(v, { delay: 30 }).catch(() => {});
             await page.waitForTimeout(600);
             /**
              * 比对时把空白全去掉。
@@ -1036,6 +1044,27 @@ export class DouyinBrowser {
         if (!bodyOk) {
           return { ok: false, code: 'FILL_BODY_FAILED', error: '正文没填进去（找不到作品描述编辑框）。' };
         }
+        /**
+         * 自主声明必须选，不选点发布毫无反应（没弹窗、URL 也不变）。
+         * 实测截图：『请选择自主声明』一直是空着的那一栏。
+         * 优先挑「无需声明/不声明/个人观点」，没有就点第一个选项。
+         */
+        const declBtn = page.getByText('请选择自主声明', { exact: true }).first();
+        if (await declBtn.count().catch(() => 0)) {
+          await declBtn.click({ timeout: 5000 }).catch(() => {});
+          await page.waitForTimeout(1200);
+          const pref = page.getByText(/无需声明|不声明|个人观点/).first();
+          if (await pref.count().catch(() => 0)) {
+            await pref.click({ timeout: 4000 }).catch(() => {});
+          } else {
+            const first = page.locator('[role=option], .semi-select-option, li').first();
+            if (await first.count().catch(() => 0)) await first.click({ timeout: 4000 }).catch(() => {});
+          }
+          await page.waitForTimeout(900);
+          await page.keyboard.press('Escape').catch(() => {});
+          this.log?.info?.('stroll dy post', { step: 'declaration-picked' });
+        }
+
         const titles = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role=button]')).map((b) => (b.innerText || '').trim()).filter(Boolean).slice(0, 30)).catch(() => []);
         this.log?.info?.('stroll dy post', { step: 'before-publish', buttons: titles.join(' / ').slice(0, 220) });
         const btn = page.getByRole('button', { name: '发布', exact: true }).first();

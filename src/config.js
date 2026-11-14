@@ -27,7 +27,6 @@ export const DEFAULTS = {
   postImageModel: '',
   postAuto: false,
   postAt: 20,
-  postDaily: 1,
 
   /** 主人（人类）的账号；@ 和私信要用。留空时只能站内告诉主人。 */
   ownerUid: '',
@@ -303,24 +302,16 @@ const POSTING = {
       [P + 'postAuto']: {
         type: 'boolean',
         title: '每天自动发',
-        description: '开着就按下面的时间自己发一条；关着只能她手动发或你在面板里点。',
+        description: '**自动发还没接上**，现在开不开都一样，只能她手动发或你在对话里让她发。这个开关先留着。',
         'x-hot': true,
       },
       [P + 'postAt']: {
         type: 'integer',
         title: '几点发',
-        description: '0-23 点。挑她自己在线的时候，别挑半夜。',
+        description: '自动发用的时间（自动发还没接上，先留着）。0-23 点，挑她自己在线的时候。',
         minimum: 0,
         maximum: 23,
         'x-suffix': ' 点',
-      },
-      [P + 'postDaily']: {
-        type: 'integer',
-        title: '一天最多发几条',
-        description: '自动发也受这个限制。发太密容易被当成营销号。',
-        minimum: 1,
-        maximum: 5,
-        'x-suffix': ' 条',
       },
     },
   },
@@ -961,7 +952,6 @@ export const POLICY_FIELDS = {
   postImageModel: { type: 'string', max: 120 },
   postAuto: { type: 'boolean' },
   postAt: { type: 'int', min: 0, max: 23 },
-  postDaily: { type: 'int', min: 1, max: 5 },
   douyinFollowMode: { type: 'enum', values: ['browser', 'off'] },
   allowDm: { type: 'boolean' },
   allowPost: { type: 'boolean' },

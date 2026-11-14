@@ -279,7 +279,7 @@ const POSTING = {
       [P + 'postImageDir']: {
         type: 'string',
         title: '本地图片目录',
-        description: '配图来源选「本地目录」时生效。填完整路径，例如 E:////////图片////////穹妹。',
+        description: '配图来源选「本地目录」时生效。填完整路径，正斜杠反斜杠都行，例如 D:/图片/我的图。',
       },
       [P + 'postImageStyle']: {
         type: 'string',

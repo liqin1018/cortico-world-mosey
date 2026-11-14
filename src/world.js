@@ -3763,7 +3763,15 @@ export class StrollWorld {
     const model = String(this.cfg.postImageModel ?? '').trim() || 'gpt-image-1';
     if (!base || !key) throw new Error('出图接口还没配好（地址或密钥缺一个）。');
     const styleText = String(style ?? this.cfg.postImageStyle ?? '').trim();
-    const full = [String(prompt || ''), styleText].filter(Boolean).join('，') || '日常一角，随手拍的感觉';
+    /**
+     * 风格必须放**最前面**。
+     *
+     * 以前是「正文 + 风格」拼在一起，风格排在几百字之后再提，等于没提——
+     * 用户填了「宫崎骏二次元动漫风格」，出来的还是写实照（2026-11-14 反馈）。
+     * 现在写成两段：先画风，再画面内容，风格权重明显更高。
+     */
+    const scene = String(prompt || '').slice(0, 200) || '日常一角，随手拍的感觉';
+    const full = styleText ? `画风：${styleText}。画面：${scene}。整体保持这个画风。` : scene;
 
     const res = await fetch(`${base}/images/generations`, {
       method: 'POST',

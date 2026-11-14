@@ -1149,11 +1149,27 @@ export class DouyinBrowser {
         const btn = target;
         let clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
         if (!clicked) {
-          // 兜底：可能有残留遮罩挡住，先 Esc 再点一次
+          // 第一步：Esc 清掉可能的残留遮罩，再点一次
           await page.keyboard.press('Escape').catch(() => {});
           await page.waitForTimeout(800);
           clicked = await btn.click({ timeout: 6000 }).then(() => true).catch(() => false);
           this.log?.info?.('stroll dy post', { step: 'retry-click', btnName, clicked });
+        }
+        if (!clicked) {
+          /**
+           * 第二步：绕过 Playwright 的 hit-test，直接让元素自己 click()。
+           *
+           * 2026-11-14 卡了一晚上就是这里：抽屉/遮罩盖在按钮上时，
+           * Playwright 认为「这个点不属于你」直接超时；但 DOM 的 el.click() 不看遮挡，
+           * 事件照样冒泡到 React 的 onClick。多数「点不动」都能靠这一下过去。
+           */
+          clicked = await btn
+            .evaluate((el) => {
+              el.click();
+              return true;
+            })
+            .catch(() => false);
+          this.log?.info?.('stroll dy post', { step: 'js-click', btnName, clicked });
         }
         if (!clicked) {
           /**

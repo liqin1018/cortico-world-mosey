@@ -113,6 +113,7 @@ export const DEFAULTS = {
   // 抽帧默认开着：B站 9 帧拼成一张分镜图只要约 184 token，比 3 张独立小图还便宜
   framesPerOpen: 9,
   openMode: 'both',
+  douyinPostMode: 'draft',
   creatorAutoProbe: true,
   creatorAutoProbe: true,
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
@@ -271,6 +272,17 @@ const POSTING = {
           '纯文字 = 只有一段话；纯图片 = 只发图不写字；图文 = 图加一段话。' +
           '选后两种要先配好下面的「配图从哪来」，否则会退回纯文字。',
         'x-options': 'stroll-post-kind',
+        'x-hot': true,
+      },
+      [P + 'douyinPostMode']: {
+        type: 'string',
+        title: '抖音图文怎么发',
+        description:
+          '**写好暂存，你手动点发布**（默认，推荐）：她负责选图、填标题正文、选好自主声明，然后存成草稿；' +
+          '你在创作者中心看一眼，点一下发布。发布权在你手上，不会撞抖音的「本人验证」。' +
+          '**账号养熟了、发布不再要验证码**的，可以换成「让她自己发」全自动。' +
+          '（新号、新设备上抖音会在发布时要求短信验证码或手机扫码，那是平台的本人确认机制，脚本绕不过去也不该绕。）',
+        'x-options': 'stroll-douyin-post-mode',
         'x-hot': true,
       },
       [P + 'postImageFrom']: {
@@ -1039,6 +1051,7 @@ export const POLICY_FIELDS = {
   avoid: { type: 'string', max: 300 },
   framesPerOpen: { type: 'int', min: 0, max: 9 },
   openMode: { type: 'enum', values: ['text', 'both', 'frames'] },
+  douyinPostMode: { type: 'enum', values: ['draft', 'publish'] },
   creatorAutoProbe: { type: 'boolean' },
   creatorAutoProbe: { type: 'boolean' },
   keepWindowSeconds: { type: 'int', min: 0, max: 600 },

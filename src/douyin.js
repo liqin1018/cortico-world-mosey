@@ -925,7 +925,7 @@ export class DouyinBrowser {
    *
    * 注意：创作者中心是独立登录态，「网页登录」那套 cookie 带不过来。
    */
-  async postImage(files, { title = '', text = '' } = {}) {
+  async postImage(files, { title = '', text = '', mode = 'publish' } = {}) {
     const list = (Array.isArray(files) ? files : [files]).filter(Boolean).slice(0, 35);
     if (!list.length) return { ok: false, code: 'NO_IMAGE', error: '没有图片可发。' };
     return this.serialize(async () => {
@@ -1078,13 +1078,30 @@ export class DouyinBrowser {
 
         const titles = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role=button]')).map((b) => (b.innerText || '').trim()).filter(Boolean).slice(0, 30)).catch(() => []);
         this.log?.info?.('stroll dy post', { step: 'before-publish', buttons: titles.join(' / ').slice(0, 220) });
-        const btn = page.getByRole('button', { name: '发布', exact: true }).first();
+        /**
+         * 两种收尾方式：
+         *   draft   → 点「暂存离开」，存成草稿，主人在创作者中心点一下发布
+         *   publish → 点「发布」，全自动（账号养熟、不再要验证码时才用）
+         */
+        const wantDraft = mode === 'draft';
+        const btnName = wantDraft ? '暂存离开' : '发布';
+        const btn = page.getByRole('button', { name: btnName, exact: true }).first();
         const clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
         if (!clicked) {
-          this.log?.warn?.('stroll dy post', { step: 'no-button' });
-          return { ok: false, code: 'NO_PUBLISH_BUTTON', error: '没点到发布按钮。' };
+          this.log?.warn?.('stroll dy post', { step: 'no-button', wantDraft });
+          return { ok: false, code: wantDraft ? 'NO_DRAFT_BUTTON' : 'NO_PUBLISH_BUTTON', error: `没点到「${btnName}」按钮。` };
         }
-        await page.waitForTimeout(6000);
+        await page.waitForTimeout(4000);
+        // 草稿模式：点「暂存离开」常会再问一句「确定离开吗 / 保存草稿」，确认掉
+        if (wantDraft) {
+          const sure = page.getByRole('button', { name: /确定|保存草稿|离开/ }).first();
+          if (await sure.count().catch(() => 0)) await sure.click({ timeout: 4000 }).catch(() => {});
+          await page.waitForTimeout(2500);
+          const dsh = path.join(this.dataDir ?? '', '..', 'stroll', 'debug', `dy-draft-${Date.now()}.png`);
+          await page.screenshot({ path: dsh }).catch(() => {});
+          this.log?.info?.('stroll dy post', { step: 'draft-saved', url: page.url(), shot: dsh });
+          return { ok: true, draft: true, url: page.url(), images: list.length };
+        }
         // 点完可能弹二次确认（作品声明、活动、审核提示），把这一刻的页面记下来
         const afterText = await page.evaluate(() => document.body.innerText.slice(0, 500).replace(/\n{2,}/g, '\n')).catch(() => '');
         const dialogs = await page.evaluate(() => Array.from(document.querySelectorAll('[role=dialog], .semi-modal, .modal')).map((d) => (d.innerText || '').slice(0, 120)).slice(0, 3)).catch(() => []);

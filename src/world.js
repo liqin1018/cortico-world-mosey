@@ -6586,6 +6586,7 @@ export class StrollWorld {
           const picked = this.resolveWorkshopImage(img);
           if (!picked.ok) return { ok: false, code: 'IMAGE_NOT_FOUND', error: `配图找不到：${img}` };
           result = await this.douyin.postImage([picked.path], {
+            mode: String(this.cfg.douyinPostMode ?? 'draft'),
             title: plan.postTitle || (String(text).split(/\n+/).map((x) => x.trim()).filter(Boolean)[0] ?? '').slice(0, 20),
             text,
           });
@@ -6756,6 +6757,9 @@ export class StrollWorld {
        */
       if (platform === 'douyin') {
         if (result?.ok === false) return `抖音图文没发出去：${result.error ?? result.code ?? '未知原因'}`;
+        if (result?.draft) {
+          return `抖音图文已经写好暂存在草稿箱（${result.images ?? 1} 张图）。去 creator.douyin.com → 内容管理 → 草稿，看一眼点发布就行。`;
+        }
         const n = Number(result?.images ?? 0);
         return `抖音图文发出去了${n ? `（${n} 张图）` : ''}${result?.confirmed === false ? '，但没等到「发布成功」的回执，可能还在审核' : ''}`;
       }

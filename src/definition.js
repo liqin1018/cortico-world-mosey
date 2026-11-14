@@ -33,6 +33,12 @@ export const STROLL = {
         { value: 'text_image', label: zh ? '图文（图 + 一句话）' : 'Image + text' },
       ];
     }
+    if (kind === 'stroll-douyin-post-mode') {
+      return [
+        { value: 'draft', label: zh ? '写好暂存，我手动点发布（推荐）' : 'Save as draft, I publish' },
+        { value: 'publish', label: zh ? '让她自己发（全自动）' : 'Let her publish it' },
+      ];
+    }
     if (kind === 'stroll-open-mode') {
       return [
         { value: 'text', label: zh ? '只看文字（字幕为主，省 token）' : 'Text only' },

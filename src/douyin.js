@@ -987,8 +987,17 @@ export class DouyinBrowser {
             const box = page.locator(sel).first();
             const n = await box.count().catch(() => 0);
             if (!n) continue;
+            /**
+             * 点击可能被遮挡层挡住（contenteditable 编辑器外面常常套着遮罩/占位层），
+             * 点不到就直接 focus——insertText 只要求元素获得焦点，不需要鼠标点中它。
+             * 2026-11-14：标题框（input）点击正常，正文框（contenteditable）点了没反应，
+             * 焦点还在标题框，后面 insertText 全打进了标题。
+             */
             const ok = await box.click({ timeout: 4000 }).then(() => true).catch(() => false);
-            if (!ok) continue;
+            if (!ok) {
+              const focused = await box.evaluate((el) => { el.focus(); return document.activeElement === el; }).catch(() => false);
+              if (!focused) continue;
+            }
             // 用 insertText 而不是 type：不依赖键盘布局，也不会漏字符
             await page.keyboard.press('Control+A').catch(() => {});
             await page.keyboard.insertText(v).catch(() => {});

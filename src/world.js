@@ -5612,7 +5612,12 @@ export class StrollWorld {
   /** 允许发图的目录：工坊 + 收件箱 + 额外指定的。 */
   imageAllowedDirs() {
     const out = [];
-    for (const dir of [this.workshopDir(), this.mediaInbox()]) {
+    /**
+     * 出图接口的输出目录也要算白名单。
+     * 2026-11-14：她当场画了一张（存到 postImageSaveDir），随即拿去发抖音，
+     * resolveWorkshopImage 判它「不在允许目录」直接拒了——自己刚画的图自己发不出去。
+     */
+    for (const dir of [this.workshopDir(), this.mediaInbox(), this.postImageSaveDir()]) {
       try {
         const real = fs.realpathSync(dir);
         if (!out.some((d) => d.toLowerCase() === real.toLowerCase())) out.push(real);

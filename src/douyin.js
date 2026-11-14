@@ -960,6 +960,26 @@ export class DouyinBrowser {
          *
          * 现在：先按更宽的选择器找框，点完读一次焦点/内容确认，填完再读回来验证。
          */
+        /**
+         * 先把页面上所有可编辑元素列出来再填。
+         * 2026-11-14：四个选择器全没匹配上（div[placeholder*=作品描述]、textarea[...] 、
+         * div[contenteditable=true] 都空），说明这个编辑器不是这几种。不猜了，直接看 DOM。
+         */
+        const fields = await page
+          .evaluate(() =>
+            Array.from(document.querySelectorAll('input, textarea, [contenteditable]')).map((el, i) => ({
+              i,
+              tag: el.tagName.toLowerCase(),
+              type: el.getAttribute('type') ?? '',
+              ph: el.getAttribute('placeholder') ?? el.getAttribute('data-placeholder') ?? '',
+              ce: el.getAttribute('contenteditable') ?? '',
+              w: el.offsetWidth,
+              h: el.offsetHeight,
+              cls: String(el.className ?? '').slice(0, 30),
+            })),
+          )
+          .catch(() => []);
+        this.log?.info?.('stroll dy post', { step: 'fields', count: fields.length, list: JSON.stringify(fields).slice(0, 600) });
         const fillBox = async (selectors, value, maxLen) => {
           const v = [...String(value)].slice(0, maxLen).join('');
           if (!v) return false;

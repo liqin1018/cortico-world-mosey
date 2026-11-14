@@ -1072,8 +1072,29 @@ export class DouyinBrowser {
           // 抽屉底部是「取消 / 确定」，选完要按确定才生效（Esc 只会关掉面板，选择不落）
           const okBtn = page.getByRole('button', { name: '确定', exact: true }).first();
           if (await okBtn.count().catch(() => 0)) await okBtn.click({ timeout: 4000 }).catch(() => {});
-          await page.waitForTimeout(900);
-          this.log?.info?.('stroll dy post', { step: 'declaration-picked' });
+          await page.waitForTimeout(1200);
+          /**
+           * 抽屉必须真的关掉，否则它的遮罩会盖住下面的「暂存离开 / 发布」。
+           * 2026-11-14 实测：点完确定后抽屉还在（按钮清单里仍能看到它的「取消 / 确定」），
+           * 接着点「暂存离开」全被遮罩吃掉，报 NO_DRAFT_BUTTON。
+           * 这里轮询等它消失，实在不消失就 Esc 兜一下。
+           */
+          let dlgOpen = true;
+          for (let i = 0; i < 8; i += 1) {
+            dlgOpen = await page
+              .evaluate(() => {
+                const nodes = Array.from(document.querySelectorAll('[role=dialog], .semi-sidesheet-inner, .semi-modal-content'));
+                return nodes.some((n) => n.offsetParent !== null && /自主声明/.test(n.innerText || ''));
+              })
+              .catch(() => false);
+            if (!dlgOpen) break;
+            await page.waitForTimeout(400);
+          }
+          if (dlgOpen) {
+            await page.keyboard.press('Escape').catch(() => {});
+            await page.waitForTimeout(800);
+          }
+          this.log?.info?.('stroll dy post', { step: 'declaration-picked', dlgStillOpen: dlgOpen });
         }
 
         const titles = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role=button]')).map((b) => (b.innerText || '').trim()).filter(Boolean).slice(0, 30)).catch(() => []);
@@ -1086,7 +1107,14 @@ export class DouyinBrowser {
         const wantDraft = mode === 'draft';
         const btnName = wantDraft ? '暂存离开' : '发布';
         const btn = page.getByRole('button', { name: btnName, exact: true }).first();
-        const clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
+        let clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
+        if (!clicked) {
+          // 兜底：可能有残留遮罩挡住，先 Esc 再点一次
+          await page.keyboard.press('Escape').catch(() => {});
+          await page.waitForTimeout(800);
+          clicked = await btn.click({ timeout: 6000 }).then(() => true).catch(() => false);
+          this.log?.info?.('stroll dy post', { step: 'retry-click', btnName, clicked });
+        }
         if (!clicked) {
           this.log?.warn?.('stroll dy post', { step: 'no-button', wantDraft });
           return { ok: false, code: wantDraft ? 'NO_DRAFT_BUTTON' : 'NO_PUBLISH_BUTTON', error: `没点到「${btnName}」按钮。` };

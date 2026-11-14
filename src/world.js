@@ -4297,10 +4297,18 @@ export class StrollWorld {
           // 注意：这个字段是「有没有看到登录页」，true = 需要登录（名字起反过，2026-11-14）
           needLogin: /扫码登录|登录即代表同意/.test(document.body.innerText.slice(0, 400)),
           text: document.body.innerText.slice(0, 900).replace(/\n{2,}/g, '\n'),
-          buttons: Array.from(document.querySelectorAll('button, [role=button], [class*=tab]'))
-            .map((b) => (b.innerText || '').trim())
-            .filter((t) => t && t.length < 20)
-            .slice(0, 24),
+          // 编辑页的按钮分散在顶部/底部/右侧，全部收上来，别只取前 24 个
+          buttons: Array.from(document.querySelectorAll('button, [role=button], a[role=button]'))
+            .map((b) => (b.innerText || '').trim().replace(/\s+/g, ' '))
+            .filter((t) => t && t.length < 20),
+          // 发布按钮常常在需要滚动才看得到的位置
+          publishHits: Array.from(document.querySelectorAll('button, [role=button], div, span'))
+            .filter((el) => /^(发布|立即发布|发布作品)$/.test((el.innerText || '').trim()))
+            .map((el) => {
+              const r = el.getBoundingClientRect();
+              return { text: (el.innerText || '').trim(), x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), visible: r.width > 0 && r.height > 0 };
+            })
+            .slice(0, 6),
         }))
         .catch(() => ({ error: 'evaluate failed' }));
       const file = path.join(this.dataDir, 'debug', `creator-${Date.now()}.png`);
@@ -4318,6 +4326,8 @@ export class StrollWorld {
         pick: pickIdx,
         accept: fileInputs.map((x) => x.accept).join(' | '),
         textHead: String(info.text ?? '').slice(0, 120).replace(/\n/g, ' '),
+        buttons: (info.buttons ?? []).join(' / ').slice(0, 200),
+        publishHits: JSON.stringify(info.publishHits ?? []).slice(0, 200),
         shot: file,
       });
       return { ok: true, ...info, fileInputs, uploaded, clicked, chooserOk, inputTried, dataDir: this.dataDir, mediaDirOk: !!mediaDir, testFile: test, shot: file };

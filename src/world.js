@@ -5718,6 +5718,12 @@ export class StrollWorld {
     const targetRaw = await this.expandBiliLink(String(args.target ?? args.url ?? '').trim());
     const text = String(args.text ?? '').trim();
     const mentionOwner = args.mention_owner === true;
+    /**
+     * 评论区要 @ 的人（昵称）。mention_owner 只管主人，这个是任意账号。
+     * 抖音的 @ 必须先敲 @昵称、再从候选面板点人，所以只能走 mentionInComment，
+     * 不能像 B站 那样往正文里塞 @（2026-11-14 用户要 @豆包）。
+     */
+    const mentionName = String(args.mention ?? '').replace(/^@+/, '').trim();
     // 对话里点单的动作只防连点，不套她自己出门的 20 秒节奏。
     // 这一点以前漏了：回完私信紧接着评论，永远撞 90 秒的 TOO_FAST，
     // 表现就是「每次让她评论都要等一两分钟」。
@@ -5813,7 +5819,7 @@ export class StrollWorld {
         if (!target) return { ok: false, error: '给个抖音视频链接/ID。' };
         const check = this.policy.check(action, platform, target, { quotaAction: 'comment', userInitiated: asked });
         if (!check.ok) return check;
-        return { ok: true, action, platform, target, text, mentionOwner };
+        return { ok: true, action, platform, target, text, mentionOwner, mentionName };
       }
 
       let kind = 'video';
@@ -5895,7 +5901,7 @@ export class StrollWorld {
       }
       const check = this.policy.check(action, platform, target, { quotaAction: 'comment', dedupeKey, userInitiated: asked });
       if (!check.ok) return check;
-      return { ok: true, action, platform, target, text, mentionOwner, root, parent, kind, dynamicId, articleId, oid, commentType, dedupeKey };
+      return { ok: true, action, platform, target, text, mentionOwner, mentionName, root, parent, kind, dynamicId, articleId, oid, commentType, dedupeKey };
     }
 
     if (action === 'post') {
@@ -6298,7 +6304,8 @@ export class StrollWorld {
             })
           : await this.douyin.comment(target, text, {
               // 抖音 @ 人要用昵称（sec_uid 不行）；没存昵称就现读一次
-              mention: plan.mentionOwner ? await this.douyinOwnerName() : '',
+              // 优先用调用方指定的那个（@豆包 这种），没指定才 @ 主人
+              mention: plan.mentionName || (plan.mentionOwner ? await this.douyinOwnerName() : ''),
             });
       } else if (action === 'post') {
         /**

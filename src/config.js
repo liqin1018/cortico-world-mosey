@@ -41,6 +41,8 @@ export const DEFAULTS = {
   dailyGroups: 20,
   dailyFollows: 3,
   dailyPosts: 2,
+  /** 抖音动态单独一个额度，和 B站 分开算 */
+  dailyPostsDouyin: 2,
   dailySaves: 8,
   /** 勾上=这项是「每天必须完成」的目标，而不只是上限 */
   mustLike: false,
@@ -391,7 +393,16 @@ const QUOTA = {
       },
       [P + 'dailyPosts']: {
         type: 'integer',
-        title: '每天最多发动态',
+        title: '每天最多发几条 B站动态',
+        description: '只算 B站。抖音动态在下面「必做」之后单独设。',
+        minimum: 0,
+        maximum: 30,
+        'x-suffix': ' 条',
+      },
+      [P + 'dailyPostsDouyin']: {
+        type: 'integer',
+        title: '每天最多发几条抖音动态',
+        description: '只算抖音。和 B站分开计数、分开限流。',
         minimum: 0,
         maximum: 30,
         'x-suffix': ' 条',
@@ -962,6 +973,7 @@ export const POLICY_FIELDS = {
   dailyGroups: { type: 'int', min: 0, max: 9999 },
   dailyFollows: { type: 'int', min: 0, max: 100 },
   dailyPosts: { type: 'int', min: 0, max: 30 },
+  dailyPostsDouyin: { type: 'int', min: 0, max: 30 },
   dailySaves: { type: 'int', min: 0, max: 100 },
   mustLike: { type: 'boolean' },
   mustComment: { type: 'boolean' },

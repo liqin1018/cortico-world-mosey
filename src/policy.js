@@ -20,7 +20,14 @@ const ACTION_CAPS = {
   dm: { daily: 'dailyDms', weeklyFactor: 7, label: '私信', short: '私' },
   group: { daily: 'dailyGroups', weeklyFactor: 7, label: '群聊', short: '群' },
   follow: { daily: 'dailyFollows', weeklyFactor: 7, label: '关注', short: '关' },
-  post: { daily: 'dailyPosts', weeklyFactor: 7, label: '发动态', short: '发' },
+  // 发动态按平台分开算额度：B站和抖音各一个数，用量也分开记（post:bilibili / post:douyin）
+  post: {
+    daily: 'dailyPosts',
+    byPlatform: { bilibili: 'dailyPosts', douyin: 'dailyPostsDouyin' },
+    weeklyFactor: 7,
+    label: '发动态',
+    short: '发',
+  },
   save: { daily: 'dailySaves', weeklyFactor: 7, label: '稍后再看', short: '存' },
 };
 
@@ -44,9 +51,12 @@ export class Policy {
   }
 
   cap(action) {
-    const meta = ACTION_CAPS[action];
+    // 允许把平台编码在动作里（post:bilibili），用来把发动态的额度按平台拆开
+    const [base, platform = ''] = String(action).split(':');
+    const meta = ACTION_CAPS[base];
     if (!meta) return 0;
-    const raw = Number(this.cfg[meta.daily] ?? 0);
+    const field = (platform && meta.byPlatform?.[platform]) || meta.daily;
+    const raw = Number(this.cfg[field] ?? 0);
     const factor = this.rampFactor();
     const daily = raw > 0 ? Math.max(1, Math.floor(raw * factor)) : 0;
     const weekly = raw > 0 ? Math.max(daily, Math.floor(raw * meta.weeklyFactor * factor)) : 0;
@@ -142,7 +152,7 @@ export class Policy {
     }
 
     // 安静时段只拦「自己出门」，不拦主人当场让它做的事。
-    const meta = ACTION_CAPS[quotaAction];
+    const meta = ACTION_CAPS[String(quotaAction).split(':')[0]];
     if (!meta) return { ok: false, code: 'UNKNOWN_ACTION', message: '不认识这个动作。' };
 
     // free：只发给主人的私信不限额，也不做去重（不然一天只能发一条）

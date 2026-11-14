@@ -139,10 +139,10 @@ const METER_ACTIONS = {
 
 /** 活跃度档位：一键改额度 + 自己出门次数 + 出门间隔，省得一项项调。 */
 const ACTIVITY_PRESETS = {
-  quiet: { label: '安静', dailyLikes: 4, dailyComments: 1, dailyFollows: 0, dailyPosts: 0, dailySaves: 2, autoSessionsPerDay: 1, autoGapMinutes: 300, tokenDailyBudget: 3000 },
-  normal: { label: '日常', dailyLikes: 10, dailyComments: 4, dailyFollows: 2, dailyPosts: 1, dailySaves: 5, autoSessionsPerDay: 3, autoGapMinutes: 150, tokenDailyBudget: 6000 },
-  lively: { label: '活跃', dailyLikes: 16, dailyComments: 6, dailyFollows: 3, dailyPosts: 2, dailySaves: 8, autoSessionsPerDay: 5, autoGapMinutes: 90, tokenDailyBudget: 9000 },
-  chatty: { label: '话痨', dailyLikes: 24, dailyComments: 10, dailyFollows: 5, dailyPosts: 3, dailySaves: 10, autoSessionsPerDay: 8, autoGapMinutes: 60, tokenDailyBudget: 15000 },
+  quiet: { label: '安静', dailyLikes: 4, dailyComments: 1, dailyFollows: 0, dailyPosts: 0, dailyPostsDouyin: 0, dailySaves: 2, autoSessionsPerDay: 1, autoGapMinutes: 300, tokenDailyBudget: 3000 },
+  normal: { label: '日常', dailyLikes: 10, dailyComments: 4, dailyFollows: 2, dailyPosts: 1, dailyPostsDouyin: 1, dailySaves: 5, autoSessionsPerDay: 3, autoGapMinutes: 150, tokenDailyBudget: 6000 },
+  lively: { label: '活跃', dailyLikes: 16, dailyComments: 6, dailyFollows: 3, dailyPosts: 2, dailyPostsDouyin: 2, dailySaves: 8, autoSessionsPerDay: 5, autoGapMinutes: 90, tokenDailyBudget: 9000 },
+  chatty: { label: '话痨', dailyLikes: 24, dailyComments: 10, dailyFollows: 5, dailyPosts: 3, dailyPostsDouyin: 3, dailySaves: 10, autoSessionsPerDay: 8, autoGapMinutes: 60, tokenDailyBudget: 15000 },
 };
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
@@ -5618,7 +5618,8 @@ export class StrollWorld {
        * 动态本来每条内容都不一样，防刷屏交给日额度就够了。
        */
       const check = this.policy.check('post', platform, 'dynamic', {
-        quotaAction: 'post',
+        // 额度按平台分开：post:bilibili / post:douyin，各读各的配置、各记各的用量
+        quotaAction: `post:${platform}`,
         userInitiated: asked,
         noDedupe: true,
       });
@@ -6882,6 +6883,7 @@ export class StrollWorld {
         dailyGroups: Number(this.cfg.dailyGroups ?? 0),
         dailyFollows: Number(this.cfg.dailyFollows ?? 0),
         dailyPosts: Number(this.cfg.dailyPosts ?? 0),
+        dailyPostsDouyin: Number(this.cfg.dailyPostsDouyin ?? 0),
         dailySaves: Number(this.cfg.dailySaves ?? 0),
         watchSpeakSec: Number(this.cfg.watchSpeakSec ?? 60),
         tokenDailyBudget: Number(this.cfg.tokenDailyBudget ?? DEFAULTS.tokenDailyBudget),

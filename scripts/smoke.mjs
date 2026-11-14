@@ -971,7 +971,9 @@ check(
       keys.indexOf('mustLike') === keys.indexOf('dailyLikes') + 1 &&
       keys.indexOf('mustComment') === keys.indexOf('dailyComments') + 1 &&
       keys.indexOf('mustFollow') === keys.indexOf('dailyFollows') + 1 &&
-      keys.indexOf('mustPost') === keys.indexOf('dailyPosts') + 1
+      // 动态的额度按平台拆成两个，抖音那条夹在中间，所以「必做」隔两位
+      keys.indexOf('dailyPostsDouyin') === keys.indexOf('dailyPosts') + 1 &&
+      keys.indexOf('mustPost') === keys.indexOf('dailyPosts') + 2
     );
   })(),
 );

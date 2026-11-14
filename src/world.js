@@ -633,6 +633,17 @@ export class StrollWorld {
     return items
       .filter(([, , flag]) => this.cfg[flag] === true)
       .map(([action, label, , quotaKey, unit]) => {
+        /**
+         * 动态按平台分了额度（dailyPosts / dailyPostsDouyin，用量记在 post:bilibili / post:douyin）。
+         * 面板上要的是「两个平台加起来」的总数，所以这一项单独算：
+         * 目标 = 两个额度之和，已完成 = 两个计数器之和（2026-11-14 用户要求）。
+         */
+        if (action === 'post') {
+          const need = Math.max(0, Number(this.cfg.dailyPosts ?? 0)) + Math.max(0, Number(this.cfg.dailyPostsDouyin ?? 0));
+          const done =
+            Number(usage['post:bilibili'] ?? 0) + Number(usage['post:douyin'] ?? 0) + Number(usage.post ?? 0);
+          return { action, label, unit, need, done, left: Math.max(0, need - done) };
+        }
         const need = Math.max(0, Number(this.cfg[quotaKey] ?? 0));
         const done = Number(usage[action] ?? 0);
         return { action, label, unit, need, done, left: Math.max(0, need - done) };
@@ -5652,6 +5663,12 @@ export class StrollWorld {
         mentionOwner,
         postKind: kind,
         imagePath,
+        /**
+         * 必须把 quotaAction 一路带到 consume。
+         * 不带的话：check 读的是 post:bilibili（永远是 0，额度永远用不完），
+         * consume 记的是 post（旧键）——检查和记账用的是两个计数器（2026-11-14 踩到）。
+         */
+        quotaAction: `post:${platform}`,
         ...(kind !== 'text' && !imagePath && String(this.cfg.postImageFrom ?? '') !== 'generate'
           ? { note: '配图没找到（图片工坊目录空、或本地目录没填对），这次只发文字。' }
           : {}),

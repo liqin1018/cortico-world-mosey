@@ -3876,45 +3876,14 @@ export class StrollWorld {
     if (from === 'local') dir = String(this.cfg.postImageDir ?? '').trim();
     else if (from === 'workshop') dir = path.join(this.dataDir, 'workspace', 'media');
     /**
-     * 「自己生成」：**优先用十分钟内刚画过的那张**。
+     * 「自己生成」不在挑选阶段返回任何东西——交给执行阶段现画。
      *
-     * 否则她刚画了一张满意的，发动态时又现画一张不一样的——
-     * 她说「发出去用的是哪张我没法核对」（2026-11-14 反馈），体验很怪，还白花一次钱。
+     * 之前这里会复用「十分钟内同风格的图」，本意是让「她画完立刻发」用同一张。
+     * 但副作用是：用户说「再发一个动态」，它发现十分钟内有图就不画了，
+     * 又发了一遍同一张（2026-11-14 用户抓到）。
+     * 现在改成：想用某张图就明确传 file 参数，不传就每次现画。
      */
-    if (from === 'generate') {
-      const genDir = this.postImageSaveDir();
-      /**
-       * 只复用**当前风格**画过的图。
-       * 不看风格的话，用户把「宫崎骏」改成「科幻」，发出去还是旧风格那张
-       * （2026-11-14 用户实测到）。
-       */
-      const wantHash = crypto
-        .createHash('md5')
-        .update(String(this.cfg.postImageStyle ?? '').trim())
-        .digest('hex')
-        .slice(0, 6);
-      try {
-        const recent = fs
-          .readdirSync(genDir)
-          .filter((f) => /^gen-.*\.(jpe?g|png|webp)$/i.test(f) && f.includes(`-${wantHash}.`))
-          .map((f) => {
-            try {
-              return { f, t: fs.statSync(path.join(genDir, f)).mtimeMs };
-            } catch {
-              return { f, t: 0 };
-            }
-          })
-          .filter((x) => Date.now() - x.t < 10 * 60 * 1000)
-          .sort((a, b) => b.t - a.t);
-        if (recent.length) {
-          this.log?.info?.('stroll post reuse recent image', { file: recent[0].f });
-          return path.join(genDir, recent[0].f);
-        }
-      } catch {
-        // 目录不存在就往下走，交给执行阶段现画
-      }
-      return '';
-    }
+    if (from === 'generate') return '';
     if (!dir) return '';
     try {
       const files = fs
@@ -5734,7 +5703,13 @@ export class StrollWorld {
        * 没配到图就退回纯文字，并在 note 里说清楚——总比整个动作失败好。
        */
       const kind = String(this.cfg.postKind ?? 'text');
-      const imagePath = kind === 'text' ? '' : this.pickPostImage();
+      /**
+       * 配图优先级：明确传了 file 就用它，否则按「配图从哪来」挑。
+       * file 由她在画完图后拿到（test_image 会回路径），这样「用刚画的那张」是显式的，
+       * 不会像之前那样靠时间窗口猜（猜错就重复发同一张）。
+       */
+      const wantImage = String(args.file ?? '').trim();
+      const imagePath = kind === 'text' ? '' : wantImage || this.pickPostImage();
       this.log?.info?.('stroll post plan', {
         kind,
         imageFrom: String(this.cfg.postImageFrom ?? ''),

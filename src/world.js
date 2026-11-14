@@ -4064,17 +4064,16 @@ export class StrollWorld {
    */
   pickPostImage() {
     const from = String(this.cfg.postImageFrom ?? 'generate');
-    let dir = '';
-    if (from === 'local') dir = String(this.cfg.postImageDir ?? '').trim();
     /**
-     * 「自己生成」不在挑选阶段返回任何东西——交给执行阶段现画。
-     *
-     * 之前这里会复用「十分钟内同风格的图」，本意是让「她画完立刻发」用同一张。
-     * 但副作用是：用户说「再发一个动态」，它发现十分钟内有图就不画了，
-     * 又发了一遍同一张（2026-11-14 用户抓到）。
-     * 现在改成：想用某张图就明确传 file 参数，不传就每次现画。
+     * 图片来源严格跟着「配图从哪来」走，绝不跨目录：
+     *   自己生成 → 生图目录（postImageSaveDir，就是出图接口存图的地方）
+     *   本地目录 → 主人填的那个目录（postImageDir）
+     * 2026-11-15 用户明确要求：选了生成就只能从生图目录找，选本地就只能从本地目录找。
      */
-    if (from === 'generate') return '';
+    const dir =
+      from === 'generate'
+        ? this.postImageSaveDir()
+        : String(this.cfg.postImageDir ?? '').trim();
     if (!dir) return '';
     /**
      * 递归找图（最多两层子目录、最多 300 个）。
@@ -6577,12 +6576,13 @@ export class StrollWorld {
           planImage: img ? path.basename(img) : '',
           wantGen,
         });
+        /**
+         * 不再「没图就现画」。
+         * 2026-11-15 用户定规矩：配图来源选了哪个，就只能从那个目录取图，不许跨目录、
+         * 也不许自作主张现画。想现画就先画（test_image），拿到路径再 file= 传进来。
+         */
         if (wantGen) {
-          img = await this.generatePostImage({ prompt: String(text).slice(0, 200) }).catch((error) => {
-            this.log?.warn?.('stroll generate post image failed', { message: error?.message });
-            return '';
-          });
-          if (img) plan.generatedImage = true;
+          this.log?.info?.('stroll post exec', { note: '目录里没找到图，按新规则不现画', imageFrom: String(this.cfg.postImageFrom ?? '') });
         }
         if (platform === 'douyin') {
           if (!img) return { ok: false, code: 'DOUYIN_NEEDS_IMAGE', error: '抖音图文必须带图。先在「动态」组把配图来源配好，或者用 file 指定一张。' };

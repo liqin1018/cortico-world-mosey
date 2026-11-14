@@ -1913,10 +1913,18 @@ export class Bilibili {
       cacheMs: 0,
       referer: 'https://t.bilibili.com/',
     });
+    const dynId = String(data?.dynamic_id_str ?? data?.dynamic_id ?? data?.dyn_id ?? '');
+    if (!dynId) {
+      // 一直拿不到 id 就查不出是哪条：把真实结构打出来，下次照着改
+      this.log?.warn?.('stroll post id missing', {
+        keys: Object.keys(data ?? {}),
+        sample: JSON.stringify(data ?? null).slice(0, 240),
+      });
+    }
     return {
       ok: true,
-      dynamicId: String(data.dynamic_id_str ?? data.dynamic_id ?? ''),
-      url: data.dynamic_id_str ? `https://t.bilibili.com/${data.dynamic_id_str}` : 'https://t.bilibili.com/',
+      dynamicId: dynId,
+      url: dynId ? `https://t.bilibili.com/${dynId}` : 'https://t.bilibili.com/',
     };
   }
 

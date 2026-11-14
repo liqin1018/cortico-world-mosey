@@ -3912,13 +3912,23 @@ export class StrollWorld {
    */
   async expandBiliLink(raw) {
     const text = String(raw ?? '');
-    const m = /https?:\/\/b23\.tv\/[A-Za-z0-9]+/.exec(text);
+    /**
+     * 先把收到的原文打出来。
+     *
+     * 2026-11-14：日志里一条 expand short link 都没有，说明这里压根没匹配上——
+     * 但桌宠一直在说「b23.tv 过不去」。到底她手里拿到的是什么字符串，
+     * 必须看原文才知道（可能没有协议头、可能被包在中文里、可能就是占位文字）。
+     */
+    this.log?.info?.('stroll link probe', { raw: text.slice(0, 160) });
+    // 允许没有 https:// 前缀（App 复制出来常常是 b23.tv/xxxx）
+    const m = /(?:https?:\/\/)?b23\.tv\/[A-Za-z0-9]+/i.exec(text);
     if (!m) return text;
+    const url = /^https?:/i.test(m[0]) ? m[0] : `https://${m[0]}`;
     try {
-      const res = await fetch(m[0], { redirect: 'follow', signal: AbortSignal.timeout(8000) });
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) });
       const real = String(res.url ?? '');
-      if (!real || real === m[0]) return text;
-      this.log?.info?.('stroll expand short link', { from: m[0], to: real.slice(0, 80) });
+      if (!real || real === url) return text;
+      this.log?.info?.('stroll expand short link', { from: url, to: real.slice(0, 80) });
       return text.replace(m[0], real);
     } catch {
       return text;

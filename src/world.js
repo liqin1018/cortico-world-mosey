@@ -6766,7 +6766,13 @@ export class StrollWorld {
       if (platform === 'douyin') {
         if (result?.ok === false) return `抖音图文没发出去：${result.error ?? result.code ?? '未知原因'}`;
         if (result?.draft) {
-          return `抖音图文已经写好暂存在草稿箱（${result.images ?? 1} 张图）。去 creator.douyin.com → 内容管理 → 草稿，看一眼点发布就行。`;
+          /**
+           * 抖音图文**没有独立的草稿箱**。点「暂存离开」之后，打开发布页时顶部会出现
+           * 「你还有上次未发布的图文，是否继续编辑？ [继续编辑] [放弃]」——
+           * 那就是草稿，点「继续编辑」才回到编辑页。
+           * 以前回执写「内容管理 → 草稿」，用户按那个路径找不到（2026-11-15 反馈）。
+           */
+          return `抖音图文写好了（${result.images ?? 1} 张图），存在「上次未发布的图文」里。去哪找：打开 creator.douyin.com 的「发布图文」，页面顶部会提示「你还有上次未发布的图文，是否继续编辑？」，点「继续编辑」就是刚才那条，确认后点发布。`;
         }
         const n = Number(result?.images ?? 0);
         return `抖音图文发出去了${n ? `（${n} 张图）` : ''}${result?.confirmed === false ? '，但没等到「发布成功」的回执，可能还在审核' : ''}`;

@@ -2609,8 +2609,14 @@ export class StrollWorld {
      * 旧版本存的是 { fp, at }（单个对象）——靠「有没有 fp 字段」区分，读到就丢弃重来。
      */
     const rawSeen = this.store.data.dmSeen?.douyin;
+    /**
+     * 旧版本存的是 { fp, at }（单个对象，不分会话）。
+     * 迁移时把它当成「当前这个会话」的基线用一次——这样升级后不会因为基线丢失
+     * 把最后那句话再推一遍（丢基线的代价是重复推送，比漏推一次更烦）。
+     */
+    const legacy = rawSeen && 'fp' in rawSeen ? { fp: rawSeen.fp, at: rawSeen.at } : null;
     const seenMap = rawSeen && !('fp' in rawSeen) ? { ...rawSeen } : {};
-    const seen = seenMap[name] ?? null;
+    const seen = seenMap[name] ?? legacy;
     const put = (v) => {
       this.store.data.dmSeen = { ...(this.store.data.dmSeen ?? {}), douyin: { ...seenMap, [name]: v } };
       this.store.save();

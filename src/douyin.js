@@ -5661,7 +5661,35 @@ export class DouyinBrowser {
       .evaluate(async ([n, withSender, self]) => {
         // 「是不是我发的」：抖音把语义拼在块名后面（messageMessageBoxisFromMe /
         // MessageBoxContentisFromMe），用「包含」匹配才对得上。
-        const isMine = (el) => !!(el.closest && el.closest('[class*="isFromMe"]'));
+        /**
+         * 「这条是不是我发的」。
+         *
+         * 主判据仍是 class 里带 isFromMe，但抖音改过类名——改完就全判成对方说的，
+         * 于是「她把自己发的私信当成对方来消息」推给主人（2026-11-15 用户抓到：
+         * 推送说「海底月给我发了『你把我说的原样抄回来了』」，其实那句是她自己发的）。
+         *
+         * 兜底用**位置**：自己的气泡靠右，对方的靠左。这个不依赖任何类名。
+         */
+        const isMine = (el) => {
+          if (el.closest && el.closest('[class*="isFromMe"]')) return true;
+          try {
+            const r = el.getBoundingClientRect();
+            if (!r.width) return false;
+            // 往上找到整块消息列表，用它当参考系
+            let box = el.parentElement;
+            for (let i = 0; i < 8 && box?.parentElement; i += 1) {
+              const rr = box.getBoundingClientRect();
+              if (rr.width > 320) break;
+              box = box.parentElement;
+            }
+            const cr = box.getBoundingClientRect();
+            if (!cr.width) return false;
+            // 气泡中心明显偏右 → 自己发的（留 8% 容差，避免居中的系统提示被误判）
+            return (r.left + r.width / 2 - cr.left) / cr.width > 0.58;
+          } catch {
+            return false;
+          }
+        };
         /**
          * 这一条消息自己的容器：从内容往上爬，**爬到「再上一层就会包住两条消息」为止**。
          * 不能直接用 `closest('[class*=messageMessageBox]')`：有些版本那个类会套住一整段消息，

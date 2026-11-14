@@ -777,7 +777,7 @@ export class StrollWorld {
      */
     this.mentionTimer = setInterval(() => {
       this.mentionBeat().catch(() => {});
-    }, 60 * 1000);
+    }, 20 * 1000);
     // 刚启动别抢登录/初始化，等十几秒再开始看
     setTimeout(() => this.dmBeat().catch(() => {}), 8 * 1000);
   }
@@ -1377,7 +1377,16 @@ export class StrollWorld {
   async pushReplies() {
     if (!this.cfg.bilibili) return;
     const items = await this.bili.inbox(8).catch(() => []);
-    const fresh = items.filter((x) => x && x.kind === 'reply' && x.id && !this.store.seenAt(`msg:${x.id}`));
+    /**
+     * reply 和 at 一起走这条快通道（5 秒一轮）。
+     *
+     * 单独的 mentionBeat 是 90 秒节流，加上 B站 @ 通知本身有几分钟延迟，
+     * 用户实测「@ 她之后她当场说没收到，得自己去翻」（2026-11-15）。
+     * 这里用 seenAt 去重，两条通道谁先看到算谁的，不会重复推。
+     */
+    const fresh = items.filter(
+      (x) => x && (x.kind === 'reply' || x.kind === 'at') && x.id && !this.store.seenAt(`msg:${x.id}`),
+    );
     if (!fresh.length) return;
     for (const x of fresh) this.store.markSeen(`msg:${x.id}`);
     this.store.save();
@@ -1392,7 +1401,7 @@ export class StrollWorld {
       const replyTo = cand.find((v) => v && v !== '0') || '';
       const rootArg = x.rootRpid && x.rootRpid !== '0' ? ` root=${x.rootRpid}` : '';
       return (
-        `${i + 1}. ${x.user || '有人'} 回复了你的评论（${whenOf(stampOf(x)) || '时间不明'}）\n` +
+        `${i + 1}. ${x.user || '有人'} ${x.kind === 'at' ? '在评论里 @ 了你' : '回复了你的评论'}（${whenOf(stampOf(x)) || '时间不明'}）\n` +
         `   视频：${x.where || '（没读到标题）'}\n` +
         `   他说：${x.text}${x.quote ? `\n   他在回的那条：${x.quote}` : ''}\n` +
         `   链接：${x.url}\n` +
@@ -1416,7 +1425,7 @@ export class StrollWorld {
           : '\n对方如果是在挑衅，一句话带过就行，不用解释自己。';
     await this.push(
       'stroll.reply',
-      `（B站）有人在评论区回复你了：\n${lines.join('\n')}${toneHint}`,
+      `（B站）评论区有新动静：\n${lines.join('\n')}${toneHint}`,
       { kind: 'reply', platform: 'bilibili', n: fresh.length },
       // 评论回复是对话，不是通知：用 interrupt 立刻打断，别走 debounce 攒批
       'interrupt',
@@ -1447,7 +1456,8 @@ export class StrollWorld {
     const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
     if (paused.paused && !soft) return;
     // 90 秒一次：以前 5 分钟，主人 @ 完在评论里问「收到没」，她当场答「没收到」，很尴尬
-    if (Date.now() - Number(this.mentionAt ?? 0) < 90 * 1000) return;
+    // 30 秒（原 90 秒）：@ 是对话，不该等一分半；平台侧延迟只能靠这个补
+    if (Date.now() - Number(this.mentionAt ?? 0) < 30 * 1000) return;
     this.mentionAt = Date.now();
     const [biliItems, douyinItems, biliReplies] = await Promise.all([
       biliOn ? this.bili.mentions(6).catch(() => []) : [],

@@ -3904,6 +3904,28 @@ export class StrollWorld {
   }
 
   /**
+   * 展开 B站短链。
+   *
+   * APP 分享出来的默认是 b23.tv/xxxx，里面没有 BV 号，parseBvid 认不出来，
+   * 会被判成「不是有效的 B站链接」（2026-11-14 用户反馈）。
+   * 这里跟一次跳转拿到真实地址，再交给下游解析。
+   */
+  async expandBiliLink(raw) {
+    const text = String(raw ?? '');
+    const m = /https?:\/\/b23\.tv\/[A-Za-z0-9]+/.exec(text);
+    if (!m) return text;
+    try {
+      const res = await fetch(m[0], { redirect: 'follow', signal: AbortSignal.timeout(8000) });
+      const real = String(res.url ?? '');
+      if (!real || real === m[0]) return text;
+      this.log?.info?.('stroll expand short link', { from: m[0], to: real.slice(0, 80) });
+      return text.replace(m[0], real);
+    } catch {
+      return text;
+    }
+  }
+
+  /**
    * 生成的图存到哪个目录。
    * 配置里填了就存那里（方便主人用资源管理器直接翻），没填就用插件默认的 data/stroll/media。
    */
@@ -5437,7 +5459,7 @@ export class StrollWorld {
     const pick = this.resolveWorkshopImage(args.file ?? args.path ?? args.id ?? '');
     if (!pick.ok) return pick;
     const caption = String(args.text ?? '').trim().slice(0, 100);
-    const targetRaw = String(args.target ?? '').trim();
+    const targetRaw = await this.expandBiliLink(String(args.target ?? '').trim());
     const where = String(args.where ?? '').trim().toLowerCase();
     const isComment =
       where === 'comment' || where === '评论区' || /douyin\.com\/(video|note)|^\d{15,}$/i.test(targetRaw);
@@ -5620,7 +5642,7 @@ export class StrollWorld {
 
   async buildPlan(action, args, { byOwner = false } = {}) {
     const platform = this.inferPlatform(args.target ?? args.url ?? '', args.platform);
-    const targetRaw = String(args.target ?? args.url ?? '').trim();
+    const targetRaw = await this.expandBiliLink(String(args.target ?? args.url ?? '').trim());
     const text = String(args.text ?? '').trim();
     const mentionOwner = args.mention_owner === true;
     // 对话里点单的动作只防连点，不套她自己出门的 20 秒节奏。

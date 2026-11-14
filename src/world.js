@@ -1360,9 +1360,54 @@ export class StrollWorld {
         fresh.push(...(await this.newDouyinDm().catch(() => [])));
       }
       await this.pushDm(fresh);
+      // 顺带看一眼「谁回复了我的评论」：这一路以前完全没推送（2026-11-15）
+      await this.pushReplies().catch(() => {});
     } finally {
       this.dmBusy = false;
     }
+  }
+
+  /**
+   * 评论区有人回复了她的评论：推给她。
+   *
+   * 2026-11-15 用户指出：B站楼中楼里的新留言她收不到推送。
+   * 轮询里原本只有 pushDm（私信）和 pushMentions（@），
+   * 「谁回复了我的评论」这一路从来没接过——她只能自己调 inbox 去查，自然不会一直查。
+   */
+  async pushReplies() {
+    if (!this.cfg.bilibili) return;
+    const items = await this.bili.inbox(8).catch(() => []);
+    const fresh = items.filter((x) => x && x.kind === 'reply' && x.id && !this.store.seenAt(`msg:${x.id}`));
+    if (!fresh.length) return;
+    for (const x of fresh) this.store.markSeen(`msg:${x.id}`);
+    this.store.save();
+    const lines = fresh.slice(0, 3).map((x, i) => {
+      const target = x.bvid
+        ? `https://www.bilibili.com/video/${x.bvid}`
+        : x.dynamicId
+          ? `https://t.bilibili.com/${x.dynamicId}`
+          : x.url;
+      // '0' 是真值，必须显式排除，否则她拿到的 reply_to 是 0（2026-11-15）
+      const cand = [x.replyTo, x.rpid, x.rootRpid].map((v) => String(v ?? '').trim());
+      const replyTo = cand.find((v) => v && v !== '0') || '';
+      const rootArg = x.rootRpid && x.rootRpid !== '0' ? ` root=${x.rootRpid}` : '';
+      return (
+        `${i + 1}. ${x.user || '有人'} 回复了你的评论（${whenOf(stampOf(x)) || '时间不明'}）\n` +
+        `   视频：${x.where || '（没读到标题）'}\n` +
+        `   他说：${x.text}${x.quote ? `\n   他在回的那条：${x.quote}` : ''}\n` +
+        `   链接：${x.url}\n` +
+        `   回他：stroll_act action=reply target=${target} reply_to=${replyTo}${rootArg} text=…\n` +
+        '   正文里不用再写 @他，B站会自动带上。'
+      );
+    });
+    this.log?.info?.('stroll reply push', { n: fresh.length, ids: fresh.map((x) => x.id) });
+    await this.push(
+      'stroll.reply',
+      `（B站）有人在评论区回复你了：\n${lines.join('\n')}`
+      ,
+      { kind: 'reply', platform: 'bilibili', n: fresh.length },
+      'debounce',
+    );
   }
 
   /**

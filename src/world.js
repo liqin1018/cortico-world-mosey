@@ -4163,7 +4163,26 @@ export class StrollWorld {
       await page.getByText('发布图文', { exact: true }).first().click({ timeout: 8000 }).catch(() => {});
       await page.waitForTimeout(1500);
       let uploaded = '';
-      const fileInput = await page.$('input[type=file]').catch(() => null);
+      /**
+       * 先把页面上所有 input[type=file] 都列出来。
+       * 2026-11-14 第一次跑：塞了文件但页面没反应、截图还是上传前的样子——
+       * 多半是拿到了「发布视频」那个 tab 的 input，或者这个区只认拖拽。
+       * 不猜，把每个 input 的 accept / 位置 / 周围文字都记下来。
+       */
+      const fileInputs = await page
+        .evaluate(() =>
+          Array.from(document.querySelectorAll('input[type=file]')).map((el, i) => ({
+            i,
+            accept: el.getAttribute('accept') ?? '',
+            multiple: !!el.multiple,
+            hidden: el.offsetParent === null,
+            near: (el.closest('div')?.parentElement?.innerText ?? '').slice(0, 60).replace(/\s+/g, ' '),
+          })),
+        )
+        .catch(() => []);
+      // 优先挑 accept 里带 image 的那个（图文区），没有就退回第一个
+      const pickIdx = Math.max(0, fileInputs.findIndex((x) => /image/i.test(x.accept)));
+      const fileInput = (await page.$('input[type=file]').catch(() => []))[pickIdx] ?? null;
       if (fileInput) {
         const mediaDir = path.join(this.dataDir, 'media');
         const test = fs.existsSync(mediaDir)
@@ -4180,7 +4199,8 @@ export class StrollWorld {
         .evaluate(() => ({
           url: location.href,
           title: document.title,
-          login: /扫码登录|登录即代表同意/.test(document.body.innerText.slice(0, 400)),
+          // 注意：这个字段是「有没有看到登录页」，true = 需要登录（名字起反过，2026-11-14）
+          needLogin: /扫码登录|登录即代表同意/.test(document.body.innerText.slice(0, 400)),
           text: document.body.innerText.slice(0, 900).replace(/\n{2,}/g, '\n'),
           buttons: Array.from(document.querySelectorAll('button, [role=button], [class*=tab]'))
             .map((b) => (b.innerText || '').trim())
@@ -4192,8 +4212,15 @@ export class StrollWorld {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       await page.screenshot({ path: file }).catch(() => {});
       await page.close().catch(() => {});
-      this.log?.info?.('stroll creator probe', { url: info.url, login: info.login, uploaded, shot: file });
-      return { ok: true, ...info, uploaded, shot: file };
+      this.log?.info?.('stroll creator probe', {
+        url: info.url,
+        needLogin: info.needLogin,
+        uploaded,
+        inputs: fileInputs.length,
+        pick: pickIdx,
+        shot: file,
+      });
+      return { ok: true, ...info, fileInputs, uploaded, shot: file };
     } catch (error) {
       await page.close().catch(() => {});
       return { ok: false, error: error?.message ?? String(error) };

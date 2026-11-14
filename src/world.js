@@ -4294,8 +4294,13 @@ export class StrollWorld {
         url: info.url,
         needLogin: info.needLogin,
         uploaded,
+        clicked,
+        chooserOk,
+        inputTried,
         inputs: fileInputs.length,
         pick: pickIdx,
+        accept: fileInputs.map((x) => x.accept).join(' | '),
+        textHead: String(info.text ?? '').slice(0, 120).replace(/\n/g, ' '),
         shot: file,
       });
       return { ok: true, ...info, fileInputs, uploaded, clicked, chooserOk, inputTried, dataDir: this.dataDir, mediaDirOk: !!mediaDir, testFile: test, shot: file };

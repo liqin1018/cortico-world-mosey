@@ -3752,6 +3752,56 @@ export class StrollWorld {
   }
 
   /**
+   * 现生成一张配图，存到本地，返回文件路径。
+   *
+   * 兼容三种返回：`data[0].b64_json`（实测走的就是这个）、`data[0].url`、`images[0]`。
+   * b64 直接落盘；url 再下一次——有些兼容层只给链接。
+   */
+  async generatePostImage({ prompt = '', style = '' } = {}) {
+    const base = String(this.cfg.postImageApiBase ?? '').trim().replace(/\/+$/, '');
+    const key = String(this.cfg.postImageApiKey ?? '').trim();
+    const model = String(this.cfg.postImageModel ?? '').trim() || 'gpt-image-1';
+    if (!base || !key) throw new Error('出图接口还没配好（地址或密钥缺一个）。');
+    const styleText = String(style ?? this.cfg.postImageStyle ?? '').trim();
+    const full = [String(prompt || ''), styleText].filter(Boolean).join('，') || '日常一角，随手拍的感觉';
+
+    const res = await fetch(`${base}/images/generations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model, prompt: full, n: 1, size: '1024x1024' }),
+      signal: AbortSignal.timeout(120000),
+    });
+    const raw = await res.text().catch(() => '');
+    let json = null;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      // 非 JSON
+    }
+    if (!res.ok) {
+      throw new Error(`出图失败 ${res.status}：${json?.error?.message ?? raw.slice(0, 160)}`);
+    }
+    const item = json?.data?.[0] ?? json?.images?.[0] ?? null;
+    const b64 = item?.b64_json ?? item?.b64 ?? (typeof item === 'string' ? item : '');
+    const url = item?.url ?? '';
+
+    let bytes = null;
+    if (b64) bytes = Buffer.from(String(b64), 'base64');
+    else if (url) {
+      const got = await fetch(url, { signal: AbortSignal.timeout(60000) }).catch(() => null);
+      if (got?.ok) bytes = Buffer.from(await got.arrayBuffer());
+    }
+    if (!bytes?.length) throw new Error(`出图接口没返回图。原始返回：${raw.slice(0, 200)}`);
+
+    const dir = path.join(this.dataDir, 'stroll', 'media');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `gen-${Date.now()}.jpg`);
+    fs.writeFileSync(file, bytes);
+    this.log?.info?.('stroll post image generated', { model, bytes: bytes.length, file });
+    return file;
+  }
+
+  /**
    * 按配置挑一张配图。
    * workshop = 图片工坊的产出目录（挑最新一张）；local = 用户指定目录；generate = 还没做，返回空。
    */
@@ -5588,7 +5638,7 @@ export class StrollWorld {
         mentionOwner,
         postKind: kind,
         imagePath,
-        ...(kind !== 'text' && !imagePath
+        ...(kind !== 'text' && !imagePath && String(this.cfg.postImageFrom ?? '') !== 'generate'
           ? { note: '配图没找到（图片工坊目录空、或本地目录没填对），这次只发文字。' }
           : {}),
       };
@@ -5939,9 +5989,22 @@ export class StrollWorld {
               mention: plan.mentionOwner ? await this.douyinOwnerName() : '',
             });
       } else if (action === 'post') {
-        // 有配图就走网页 UI 发（上传 API 走不通，见 bili.postDyn 的注释）
-        result = plan.imagePath
-          ? await this.bili.postDyn({ text, imagePath: plan.imagePath, mentionOwner: plan.mentionOwner })
+        /**
+         * 配图三选一：
+         *   workshop / local → plan 阶段已经挑好（同步、快）
+         *   generate         → 这里现画（8 秒左右），画完再发
+         * 画失败就退回纯文字，别让整条动态发不出去。
+         */
+        let img = String(plan.imagePath ?? '');
+        if (!img && String(plan.postKind ?? 'text') !== 'text' && String(this.cfg.postImageFrom ?? '') === 'generate') {
+          img = await this.generatePostImage({ prompt: text }).catch((error) => {
+            this.log?.warn?.('stroll generate post image failed', { message: error?.message });
+            return '';
+          });
+          if (img) plan.generatedImage = true;
+        }
+        result = img
+          ? await this.bili.postDyn({ text, imagePath: img, mentionOwner: plan.mentionOwner })
           : await this.bili.post({ text, mentionOwner: plan.mentionOwner });
       } else if (action === 'dm') {
         result =

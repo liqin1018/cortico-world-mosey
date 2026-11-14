@@ -27,8 +27,6 @@ export const DEFAULTS = {
   postImageApiBase: '',
   postImageApiKey: '',
   postImageModel: '',
-  postAuto: false,
-  postAt: 20,
 
   /** 主人（人类）的账号；@ 和私信要用。留空时只能站内告诉主人。 */
   ownerUid: '',
@@ -312,20 +310,6 @@ const POSTING = {
         title: '出图模型',
         description: '例如 gpt-image-1、flux-schnell、seedream-3。',
       },
-      [P + 'postAuto']: {
-        type: 'boolean',
-        title: '每天自动发',
-        description: '**自动发还没接上**，现在开不开都一样，只能她手动发或你在对话里让她发。这个开关先留着。',
-        'x-hot': true,
-      },
-      [P + 'postAt']: {
-        type: 'integer',
-        title: '几点发',
-        description: '自动发用的时间（自动发还没接上，先留着）。0-23 点，挑她自己在线的时候。',
-        minimum: 0,
-        maximum: 23,
-        'x-suffix': ' 点',
-      },
     },
   },
 };
@@ -423,7 +407,9 @@ const QUOTA = {
       [P + 'mustPost']: {
         type: 'boolean',
         title: '必做：发动态',
-        description: '勾上后，今天要发够「每天最多发动态」的条数。审批不是 auto 时会进草稿，批准后才算完成。',
+        description:
+          '勾上后，今天要发够上面的条数（B站+抖音合计）。**这就是自动发**：她自己出门时看到这项没做满，会自己写文案发出去——不用另设定时器。' +
+          '审批不是 auto 时会进草稿，批准后才算完成。',
       },
       [P + 'dailySaves']: {
         type: 'integer',
@@ -975,8 +961,6 @@ export const POLICY_FIELDS = {
   postImageApiBase: { type: 'string', max: 300 },
   postImageApiKey: { type: 'string', max: 300 },
   postImageModel: { type: 'string', max: 120 },
-  postAuto: { type: 'boolean' },
-  postAt: { type: 'int', min: 0, max: 23 },
   douyinFollowMode: { type: 'enum', values: ['browser', 'off'] },
   allowDm: { type: 'boolean' },
   allowPost: { type: 'boolean' },

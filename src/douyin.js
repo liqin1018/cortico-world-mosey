@@ -7449,10 +7449,10 @@ export class DouyinBrowser {
   touchShareWindow() {
     if (this.shareIdleTimer) clearTimeout(this.shareIdleTimer);
     /**
-     * 空闲多久关窗口。默认 300 秒（复用同一窗口，省掉每次 2.5~3.5 秒的冷启动）。
-     * 配成 0 = 每次分享完立刻关——适合内存紧张、或者不想看到后台挂着一个浏览器。
+     * 空闲多久关窗口。默认 0 = 每次分享完立刻关（后台不留浏览器）。
+     * 配成 300 之类就是复用同一窗口，省掉每次 2.5~3.5 秒的冷启动。
      */
-    const idle = Math.max(0, Number(this.cfg.shareWindowIdleSec ?? 300) || 0);
+    const idle = Math.max(0, Number(this.cfg.shareWindowIdleSec ?? 0) || 0);
     if (!idle) {
       this.closeShareWindow().catch(() => {});
       return;

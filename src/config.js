@@ -116,7 +116,7 @@ export const DEFAULTS = {
   douyinPostMode: 'draft',
   hostileReply: 'cold',
   mentionOwnerOnComment: false,
-  shareWindowIdleSec: 300,
+  shareWindowIdleSec: 0,
   creatorAutoProbe: true,
   creatorAutoProbe: true,
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
@@ -281,9 +281,9 @@ const POSTING = {
         type: 'number',
         title: '分享窗口空闲多久关（秒）',
         description:
-          '抖音分享视频卡片要单独开一个浏览器窗口。默认留 300 秒（5 分钟）复用——' +
-          '连续分享好几个视频时不用每次重启浏览器，快 2~3 秒。' +
-          '**填 0 = 每次分享完立刻关**，内存紧张或者不想看到后台挂着浏览器就选这个。',
+          '抖音分享视频卡片要单独开一个浏览器窗口。' +
+          '**默认 0 = 用完立刻关**（不占内存、后台不会挂着浏览器）。' +
+          '填 300 之类就是留着复用——连续分享好几个视频时能省掉每次 2~3 秒的冷启动。',
         minimum: 0,
         maximum: 3600,
       },

@@ -6949,7 +6949,24 @@ export class StrollWorld {
             : String(plan.target ?? '');
         return `${p} 私信回给「${truncate(nm, 16)}」了（陌生人会话）`;
       }
-      if (!plan.group) return `${p} 私信发给主人了（不是群）`;
+      /**
+       * 抖音私信主人可能走两种形态，回执要说清楚是哪种。
+       * 2026-11-15 用户要「分享成功或失败有反馈」：
+       * 以前一律写「私信发给主人了」，分不出是真卡片还是降级成了缩略图，
+       * 也看不出卡片那次是不是点了但没等到确认。
+       */
+      if (!plan.group) {
+        const via = String(result?.via ?? '');
+        const how =
+          via === 'card'
+            ? '（原生视频卡片）'
+            : via === 'card-unconfirmed'
+              ? '（卡片点了但没等到确认，大概率已经发出去了）'
+              : platform === 'douyin'
+                ? '（视频画面 + 标题 + 链接）'
+                : '';
+        return `${p} 私信发给主人了${how}（不是群）`;
+      }
       const name = truncate(String(plan.target ?? ''), 16);
       if (plan.mention) {
         // 群里 @ 只有在插成 chip 时才真的会通知对方；插不上就如实说，别让主人以为提到了

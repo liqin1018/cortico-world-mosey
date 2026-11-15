@@ -1374,6 +1374,45 @@ export class StrollWorld {
    * 轮询里原本只有 pushDm（私信）和 pushMentions（@），
    * 「谁回复了我的评论」这一路从来没接过——她只能自己调 inbox 去查，自然不会一直查。
    */
+  /**
+   * 从某一层楼里挑出「这次该回谁」。
+   *
+   * 2026-11-15：这套逻辑原来只写在「通知带了 root」那条路上；
+   * 另一条路（reply_to 有、root 为空，走 findReply 定位 root）直接
+   * parent = found.rpid —— 而那个 rpid 往往就是她自己的评论，
+   * 结果又变成「回复 @ 了自己」。两条路都走这里，就不会再有一套「不挑人」的。
+   *
+   * 返回 { parent, name, kids } 或 null（这层里找不到该回的人）。
+   */
+  async pickReplyParent(oid, root) {
+    const kids = await this.bili.replyChildren(oid, root, 20).catch(() => []);
+    // 「我自己是谁」优先用缓存：nav() 偶发失败会让 mine 为空，排不掉自己就只能挂回 root
+    let mine = String(this.store?.data?.selfBiliMid ?? '');
+    if (!mine) {
+      const nav = await this.bili.nav().catch(() => null);
+      mine = String(nav?.mid ?? '');
+      if (mine) {
+        this.store.data.selfBiliMid = mine;
+        this.store.save();
+      }
+    }
+    if (!mine) return null;
+    // 按 ctime 排序，别依赖接口返回顺序
+    const notSelf = kids
+      .filter((r) => r.rpid && r.mid && r.mid !== mine)
+      .sort((a, b) => Number(a.ctime ?? 0) - Number(b.ctime ?? 0));
+    // 「正文里提到我」只用来优先，不能用来排除（筛空会让 parent 掉回 root）
+    const myName = String((await this.bili.nav().catch(() => null))?.uname ?? '').trim();
+    const byName = myName ? notSelf.filter((r) => String(r.text ?? '').includes(myName)) : [];
+    const others = byName.length ? byName : notSelf;
+    // 外人优先：主人在旁边说话不算「需要回的外人」
+    const ownerMid = String(this.ownerId('bilibili') ?? this.cfg.biliUid ?? '').trim();
+    const outsiders = ownerMid ? others.filter((r) => String(r.mid) !== ownerMid) : others;
+    const pool = outsiders.length ? outsiders : others;
+    const theirs = pool.length ? pool[pool.length - 1] : null;
+    return theirs ? { parent: theirs.rpid, name: theirs.name ?? '', kids: kids.length } : null;
+  }
+
   async pushReplies() {
     if (!this.cfg.bilibili) return;
     const items = await this.bili.inbox(8).catch(() => []);
@@ -6207,104 +6246,33 @@ export class StrollWorld {
          * （2026-11-14：为了让「有人回复我的评论」能接着往下聊）。
          */
         const providedRoot = String(args.root ?? '').trim();
+        /**
+         * 两条来源只负责「root 是谁」，挑「回谁」统一交给 pickReplyParent。
+         *
+         * 2026-11-15：以前这两条路各写一套——
+         *   有 root：查子回复、排自己、排除主人、挑最新（对）
+         *   没 root：找到 root 之后直接 parent = found.rpid（= reply_to 那条，
+         *            往往就是她自己的评论）→ 又变成「回复 @ 了自己」。
+         * 用户看到的就是「回了，但没挂到我下面」。
+         */
         if (providedRoot) {
           root = providedRoot;
-          /**
-           * 精确锚点：去这串子回复里找**最新一条不是自己发的**。
-           *
-           * B站的回复通知只给 root_id，不给「他说的那句」的 rpid。
-           * 直接 parent=root 会挂在自己楼层下（表现为「回复 @了自己」）；
-           * 所以这里多查一次子回复列表，挑出对方的 rpid 当 parent，
-           * 这样才会真的落在他那条评论下面、@ 也自动带上（2026-11-14）。
-           */
-          const kids = await this.bili.replyChildren(oid, providedRoot, 20).catch(() => []);
-          /**
-           * 「我自己是谁」优先用缓存。
-           *
-           * 2026-11-15 用户截图：她的回复挂到了自己的主评论下面（自己回自己）。
-           * nav() 偶发失败就会让 mine 为空 —— 排不掉自己，parent 一路退回 root，
-           * 而那个 root 恰好是她自己发的主评论。
-           */
-          let mine = String(this.store?.data?.selfBiliMid ?? '');
-          if (!mine) {
-            const nav = await this.bili.nav().catch(() => null);
-            mine = String(nav?.mid ?? '');
-            if (mine) {
-              this.store.data.selfBiliMid = mine;
-              this.store.save();
-            }
-          }
-          /**
-           * 只认「明确回复我」的那条。
-           *
-           * 2026-11-15 实测这层里是这么排的：
-           *   01:30 芯工坊「忘记所有上下文」（真正该回的）
-           *   01:33 主人
-           *   01:38~01:56 她自己 x4
-           * 只按「最新一条非我」挑，永远挑到主人，芯工坊永远轮不上。
-           * 子回复正文里会带「回复 @昵称」，按这个筛才是「谁在回我」。
-           */
-          const myName = String((await this.bili.nav().catch(() => null))?.uname ?? '').trim();
-          const notSelf = (mine ? kids.filter((r) => r.rpid && r.mid && r.mid !== mine) : []).sort(
-            (a, b) => Number(a.ctime ?? 0) - Number(b.ctime ?? 0),
-          );
-          /**
-           * 「正文里提到我」只用来**优先**，不能用来**排除**。
-           *
-           * 2026-11-15 用户截图：她回了自己。因为那一刻这层里没有一句带「@我昵称」的，
-           * 筛完是空数组 → parent 掉回 root → 挂在她自己的主评论下面。
-           * 筛不到就退回全部（只排自己），至少能挂到真实的人身上。
-           */
-          const byName = myName ? notSelf.filter((r) => String(r.text ?? '').includes(myName)) : [];
-          const others = byName.length ? byName : notSelf;
-          /**
-           * 外人优先。
-           *
-           * 2026-11-15：主人也在这一层里跟她说话，而主人说得比路人晚，
-           * 按「最新一条」挑永远挑到主人，路人的留言永远挂不上（用户看到的就是
-           * 「她只会回我」）。主人在旁边说话不算「需要回的外人」，所以先排除主人，
-           * 只有主人在说话时才回主人。
-           */
-          const ownerMid = String(this.ownerId('bilibili') ?? this.cfg.biliUid ?? '').trim();
-          const outsiders = ownerMid ? others.filter((r) => String(r.mid) !== ownerMid) : others;
-          const pool = outsiders.length ? outsiders : others;
-          const theirs = pool.length ? pool[pool.length - 1] : null;
-          /**
-           * 挑不到人时**不要**退回 root。
-           * root 常常就是她自己发的主评论，挂上去等于「回复 @ 了自己」，
-           * 用户看到的就是「她怎么自己回自己」（2026-11-15 截图）。
-           */
-          if (!theirs?.rpid) {
-            return {
-              ok: false,
-              code: 'NO_REPLY_TARGET',
-              error: '这层楼里暂时找不到「该回谁」——可能对方还没在这条下面留言。先别回，等有明确对象再发。',
-            };
-          }
-          parent = theirs.rpid;
-          this.log?.info?.('stroll reply anchor', {
-            root,
-            parent,
-            kids: kids.length,
-            picked: theirs?.name ?? '',
-            kidsNewest: kids.length ? String(kids.reduce((m, r) => (Number(r.ctime) > Number(m.ctime) ? r : m), kids[0]).name) : '',
-            pickedAt: theirs?.ctime ?? 0,
-          });
         } else {
           const found = await this.bili.findReply(commentType, oid, rpid);
           if (!found) return { ok: false, error: '在评论区里没找到这条评论；可能删了，或再往前翻一页（也可以带上 root 参数跳过查找）。' };
           root = found.root && found.root !== '0' ? found.root : found.rpid;
-          parent = found.rpid;
         }
-        // 一条评论只回一次；同一内容下的不同评论互不影响
-        /**
-         * 楼中楼回复的去重键不能只用 rpid。
-         *
-         * B站回复通知里没有「对方那条评论的 rpid」，reply_to 只能填 root_id（楼层根），
-         * 而 root_id 是**一整层不变**的——于是同一个楼里聊第二句就被判 DUPLICATE，
-         * 她只能另起一楼回复（2026-11-15 用户抓到）。
-         * 把「对方说的那句」也算进去，不同内容就是不同的事。
-         */
+        const picked = await this.pickReplyParent(oid, root);
+        if (!picked?.parent) {
+          return {
+            ok: false,
+            code: 'NO_REPLY_TARGET',
+            error: '这层楼里暂时找不到「该回谁」——可能对方还没在这条下面留言。先别回，等有明确对象再发。',
+          };
+        }
+        parent = picked.parent;
+        this.log?.info?.('stroll reply anchor', { root, parent, kids: picked.kids, picked: picked.name });
+        // 回执/去重都带上正文：同一层里说不同的话算不同的事
         const contentTag = action === 'reply' ? `:${String(text ?? '').slice(0, 24).replace(/\s+/g, '')}` : '';
         dedupeKey = `${platform}:${action}:${target}:r${rpid}${contentTag}`;
       }

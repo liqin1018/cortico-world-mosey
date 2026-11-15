@@ -7593,7 +7593,7 @@ export class DouyinBrowser {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       const ok = await page
-        .evaluate(() => String(document.body?.innerText ?? '').includes('分享给朋友'))
+        .evaluate(() => /分享给朋友|发送给朋友|最近聊天|捎句话/.test(String(document.body?.innerText ?? '')))
         .catch(() => false);
       if (ok) return true;
       await page.waitForTimeout(300).catch(() => {});
@@ -7613,21 +7613,37 @@ export class DouyinBrowser {
         const bare = (t) =>
           t
             .split(' ')
-            .filter((x) => x && !/^(在线|分享|捎句话|已分享)$/.test(x))
+            .filter((x) => x && !/^(在线|分享|捎句话|已分享|发送|最近聊天)$/.test(x))
             .join(' ');
         const rows = [];
+        /**
+         * 2026-11-15：新版分享面板不再以「分享/捎句话」结尾了。
+         * 用户截图卡在选人界面，日志是 no-row，快照里连「分享给朋友」都没有——
+         * 说明抖音把这套 UI 改了，旧的正则把每一行都过滤掉了。
+         *
+         * 现在不靠尾部关键字，改成看**形状 + 名字**：
+         * 列表项那一档尺寸（宽 200~520、高 36~110），文本去掉状态词后含这个名字。
+         * 名字仍然要求「开头或整串相等」，不做纯 contains，免得点错人。
+         */
         const collect = (match) => {
           document.querySelectorAll('div').forEach((el) => {
             const t = clean(el.innerText);
-            if (!t || !/(分享|捎句话|已分享)$/.test(t)) return;
+            if (!t || t.length > 60) return;
             const r = el.getBoundingClientRect();
-            if (r.width < 240 || r.width > 440 || r.height < 36 || r.height > 100) return;
+            if (r.width < 200 || r.width > 520 || r.height < 36 || r.height > 110) return;
             if (!match(t)) return;
             rows.push(el);
           });
         };
         // 第一轮：整串严格相等（人名走这条，差一个字都不点）
         collect((t) => bare(t) === name);
+        if (!rows.length) {
+          // 第二轮（新版）：去掉状态词后以名字开头，比如「小鹿 最近聊天」「小鹿 在线」
+          collect((t) => {
+            const b = bare(t);
+            return b === name || b.startsWith(name + ' ') || b.startsWith(name + '\n');
+          });
+        }
         if (!rows.length) {
           /**
            * 第二轮：群名归一化后再比。
@@ -7641,10 +7657,14 @@ export class DouyinBrowser {
         }
         if (!rows.length) return { ok: false, step: 'no-row' };
         const row = rows[rows.length - 1];
-        const btn = Array.from(row.querySelectorAll('div,span,button'))
-          .filter((b) => clean(b.innerText) === '分享')
-          .pop();
-        if (!btn) return { ok: false, step: 'no-btn' };
+        /**
+         * 优先点行里那个「分享」按钮；新版没有这个字样时，直接点整行。
+         * 以前没有按钮就返回 no-btn 放弃——现在这条路已经不通了。
+         */
+        const btn =
+          Array.from(row.querySelectorAll('div,span,button'))
+            .filter((b) => /^(分享|发送)$/.test(clean(b.innerText)))
+            .pop() ?? row;
         const r = btn.getBoundingClientRect();
         btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         return { ok: true, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };

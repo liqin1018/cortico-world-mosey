@@ -7367,7 +7367,16 @@ export class DouyinBrowser {
    * `no-trigger`（2026-11-12 13:25 实例）。常驻之后这两件事一起消失。
    * 空闲 5 分钟自动关，不常占内存。
    */
-  async ensureShareWindow() {
+  async ensureShareWindow(modeOverride = '') {
+    const wantMode =
+      modeOverride || (String(this.cfg.shareWindowMode ?? 'headless') !== 'offscreen' ? 'headless' : 'offscreen');
+    /**
+     * 缓存的窗口模式和这次要的不一样：先关掉重开。
+     * 隐身模式渲染不出浮层时要退回有头，两个模式不能共用同一个 context。
+     */
+    if (this.shareCtx && this.shareMode && this.shareMode !== wantMode) {
+      await this.closeShareWindow().catch(() => {});
+    }
     const alive = this.shareCtx && (typeof this.shareCtx.isClosed !== 'function' || !this.shareCtx.isClosed());
     if (alive) {
       let page = this.sharePage && !this.sharePage.isClosed() ? this.sharePage : null;
@@ -7397,7 +7406,7 @@ export class DouyinBrowser {
      *
      * 2026-11-15 用户反馈「每次分享任务栏都出现 Edge，能不能不让人看见」。
      */
-    const hidden = String(this.cfg.shareWindowMode ?? 'headless') !== 'offscreen';
+    const hidden = wantMode === 'headless';
     const args = [
       '--disable-blink-features=AutomationControlled',
       '--autoplay-policy=no-user-gesture-required',
@@ -7428,6 +7437,7 @@ export class DouyinBrowser {
     const page = await ctx.newPage();
     this.shareCtx = ctx;
     this.sharePage = page;
+    this.shareMode = wantMode;
     ctx.on?.('close', () => {
       if (this.shareCtx === ctx) {
         this.shareCtx = null;
@@ -7442,6 +7452,7 @@ export class DouyinBrowser {
     if (this.shareIdleTimer) clearTimeout(this.shareIdleTimer);
     this.shareIdleTimer = null;
     this.sharePage = null;
+    this.shareMode = '';
     const ctx = this.shareCtx;
     this.shareCtx = null;
     if (ctx) {
@@ -7530,6 +7541,19 @@ export class DouyinBrowser {
         this.log?.info?.('stroll share retry', { who, id, step: result.step });
         await page.waitForTimeout(900);
         result = await this.shareOnPage(page, who, id);
+      }
+      /**
+       * 隐身（--headless=new）下抖音的分享浮层经常不渲染，表现就是 no-trigger。
+       * 这时自动换成有头（挪屏幕外）再走一遍——任务栏会闪一下 Edge 图标，
+       * 但总比卡片发不出去强（2026-11-15 实测：隐身有时成功、有时 no-trigger）。
+       */
+      if (!result.ok && this.shareMode === 'headless') {
+        this.log?.info?.('stroll share fallback to offscreen', { who, id, step: result.step });
+        await this.closeShareWindow().catch(() => {});
+        const again = await this.ensureShareWindow('offscreen').catch(() => null);
+        if (again?.page) {
+          result = await this.shareOnPage(again.page, who, id);
+        }
       }
       // 还是不通：留一份现场（截图 + 页面状态），下次不用靠猜
       if (!result.ok) await this.captureShareFailure(page, who, id, result.step);

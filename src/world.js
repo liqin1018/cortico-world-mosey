@@ -1385,11 +1385,15 @@ export class StrollWorld {
      * 这里用 seenAt 去重，两条通道谁先看到算谁的，不会重复推。
      */
     const fresh = items.filter(
-      (x) => x && (x.kind === 'reply' || x.kind === 'at') && x.id && !this.store.seenAt(`pushed:${x.id}`),
+      (x) => x && (x.kind === 'reply' || x.kind === 'at') && x.id && !this.store.seenAt(`atpush:${x.id}`),
     );
     if (!fresh.length) return;
-    // 独立标记：这条「推过」了，但「读过」是另一回事（见下）
-    for (const x of fresh) this.store.markSeen(`pushed:${x.id}`);
+    /**
+     * 标记必须和 pushMentions 用同一个名字（atpush:<id>），否则两条通道谁也拦不住谁：
+     * 同一条通知被各推一次，她第一次回了、第二次撞去重报「七天内已经回过了」，
+     * 用户看到的就是「楼中楼没发出去」（2026-11-15 网友反馈）。
+     */
+    for (const x of fresh) this.store.markSeen(`atpush:${x.id}`);
     this.store.save();
     const lines = fresh.slice(0, 3).map((x, i) => {
       const target = x.bvid

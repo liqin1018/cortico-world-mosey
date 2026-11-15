@@ -6218,11 +6218,21 @@ export class StrollWorld {
            * 这样才会真的落在他那条评论下面、@ 也自动带上（2026-11-14）。
            */
           const kids = await this.bili.replyChildren(oid, providedRoot, 20).catch(() => []);
-          let mine = '';
-          try {
-            mine = String((await this.bili.nav())?.mid ?? '');
-          } catch {
-            // 拿不到自己的 mid 就不挑，回退到 root
+          /**
+           * 「我自己是谁」优先用缓存。
+           *
+           * 2026-11-15 用户截图：她的回复挂到了自己的主评论下面（自己回自己）。
+           * nav() 偶发失败就会让 mine 为空 —— 排不掉自己，parent 一路退回 root，
+           * 而那个 root 恰好是她自己发的主评论。
+           */
+          let mine = String(this.store?.data?.selfBiliMid ?? '');
+          if (!mine) {
+            const nav = await this.bili.nav().catch(() => null);
+            mine = String(nav?.mid ?? '');
+            if (mine) {
+              this.store.data.selfBiliMid = mine;
+              this.store.save();
+            }
           }
           /**
            * 要「最新一条不是自己发的」，不是「第一条不是自己的」。
@@ -6247,12 +6257,18 @@ export class StrollWorld {
            * 子回复正文里会带「回复 @昵称」，按这个筛才是「谁在回我」。
            */
           const myName = String((await this.bili.nav().catch(() => null))?.uname ?? '').trim();
-          const others = (mine ? kids.filter((r) => r.rpid && r.mid && r.mid !== mine) : [])
-            .filter((r) => {
-              if (!myName) return true; // 拿不到自己昵称就不筛，退回全量
-              return String(r.text ?? '').includes(myName);
-            })
-            .sort((a, b) => Number(a.ctime ?? 0) - Number(b.ctime ?? 0));
+          const notSelf = (mine ? kids.filter((r) => r.rpid && r.mid && r.mid !== mine) : []).sort(
+            (a, b) => Number(a.ctime ?? 0) - Number(b.ctime ?? 0),
+          );
+          /**
+           * 「正文里提到我」只用来**优先**，不能用来**排除**。
+           *
+           * 2026-11-15 用户截图：她回了自己。因为那一刻这层里没有一句带「@我昵称」的，
+           * 筛完是空数组 → parent 掉回 root → 挂在她自己的主评论下面。
+           * 筛不到就退回全部（只排自己），至少能挂到真实的人身上。
+           */
+          const byName = myName ? notSelf.filter((r) => String(r.text ?? '').includes(myName)) : [];
+          const others = byName.length ? byName : notSelf;
           /**
            * 外人优先。
            *
@@ -6265,7 +6281,19 @@ export class StrollWorld {
           const outsiders = ownerMid ? others.filter((r) => String(r.mid) !== ownerMid) : others;
           const pool = outsiders.length ? outsiders : others;
           const theirs = pool.length ? pool[pool.length - 1] : null;
-          parent = theirs?.rpid || providedRoot;
+          /**
+           * 挑不到人时**不要**退回 root。
+           * root 常常就是她自己发的主评论，挂上去等于「回复 @ 了自己」，
+           * 用户看到的就是「她怎么自己回自己」（2026-11-15 截图）。
+           */
+          if (!theirs?.rpid) {
+            return {
+              ok: false,
+              code: 'NO_REPLY_TARGET',
+              error: '这层楼里暂时找不到「该回谁」——可能对方还没在这条下面留言。先别回，等有明确对象再发。',
+            };
+          }
+          parent = theirs.rpid;
           this.log?.info?.('stroll reply anchor', {
             root,
             parent,

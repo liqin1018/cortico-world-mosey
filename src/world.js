@@ -6098,7 +6098,18 @@ export class StrollWorld {
     const platform = this.inferPlatform(args.target ?? args.url ?? '', args.platform);
     const targetRaw = await this.expandBiliLink(String(args.target ?? args.url ?? '').trim());
     const text = String(args.text ?? '').trim();
-    const mentionOwner = args.mention_owner === true;
+    /**
+     * 「评论时 @ 主人」。
+     *
+     * 两种来源：
+     *   1. 她自己要 @（args.mention_owner=true）—— 一直都有
+     *   2. 配置里开着「评论时 @ 主人」—— 只对**新评论**生效，楼中楼不加
+     *
+     * 楼中楼为什么不加：B站/抖音在子回复里会自动带「回复 @某某」，
+     * 再手写一个就成了 @ 两次（2.x 踩过）。
+     */
+    const ownerAtByConfig = action === 'comment' && this.cfg.mentionOwnerOnComment === true;
+    const mentionOwner = args.mention_owner === true || ownerAtByConfig;
     /**
      * 评论区要 @ 的人（昵称）。mention_owner 只管主人，这个是任意账号。
      * 抖音的 @ 必须先敲 @昵称、再从候选面板点人，所以只能走 mentionInComment，

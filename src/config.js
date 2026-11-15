@@ -115,6 +115,7 @@ export const DEFAULTS = {
   openMode: 'both',
   douyinPostMode: 'draft',
   hostileReply: 'cold',
+  mentionOwnerOnComment: false,
   creatorAutoProbe: true,
   creatorAutoProbe: true,
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
@@ -462,6 +463,16 @@ const INTERACT = {
     title: '公开动作',
     description: '关掉的动作用不了；额度仍然生效。',
     properties: {
+      [P + 'mentionOwnerOnComment']: {
+        type: 'boolean',
+        title: '评论时 @ 主人',
+        description:
+          '开着的话，她在评论区发**新评论**时会在开头 @ 你一句（B站会变成真 @ 并发通知，抖音会从候选面板点你）。' +
+          '适合想跟她有点互动感的：她刷到一个视频觉得好看，会这么说「@你 这个好好看，什么时候带我去看」。' +
+          '**楼中楼回复不生效**——那边的 @ 由平台自动带上，再加一个是重复。' +
+          '她也可以自己决定这条 @ 不 @（传 mention_owner=false 就不 @）。',
+        'x-hot': true,
+      },
       [P + 'hostileReply']: {
         type: 'string',
         title: '有人挑衅时怎么回',
@@ -1068,6 +1079,7 @@ export const POLICY_FIELDS = {
   openMode: { type: 'enum', values: ['text', 'both', 'frames'] },
   douyinPostMode: { type: 'enum', values: ['draft', 'publish'] },
   hostileReply: { type: 'enum', values: ['cold', 'ignore', 'sharp'] },
+  mentionOwnerOnComment: { type: 'boolean' },
   creatorAutoProbe: { type: 'boolean' },
   creatorAutoProbe: { type: 'boolean' },
   keepWindowSeconds: { type: 'int', min: 0, max: 600 },

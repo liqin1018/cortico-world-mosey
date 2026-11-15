@@ -116,7 +116,6 @@ export const DEFAULTS = {
   douyinPostMode: 'draft',
   hostileReply: 'cold',
   mentionOwnerOnComment: false,
-  shareWindowMode: 'headless',
   shareWindowIdleSec: 0,
   creatorAutoProbe: true,
   creatorAutoProbe: true,
@@ -277,16 +276,6 @@ const POSTING = {
           '选后两种要先配好下面的「配图从哪来」，否则会退回纯文字。',
         'x-options': 'stroll-post-kind',
         'x-hot': true,
-      },
-      [P + 'shareWindowMode']: {
-        type: 'string',
-        title: '分享窗口要不要露出来',
-        description:
-          '抖音分享视频卡片必须开一个浏览器窗口。' +
-          '**后台隐身**（默认）= 用新版无头模式，任务栏不会出现 Edge 图标，别人看不见；' +
-          '**挪到屏幕外** = 有头窗口但移到屏幕外，渲染最稳，缺点是任务栏会留一个 Edge 图标。' +
-          '如果发现卡片分享总是失败（日志里 step=no-trigger），把这项切成「挪到屏幕外」再试。',
-        'x-options': 'stroll-share-window-mode',
       },
       [P + 'shareWindowIdleSec']: {
         type: 'number',
@@ -1102,7 +1091,6 @@ export const POLICY_FIELDS = {
   douyinPostMode: { type: 'enum', values: ['draft', 'publish'] },
   hostileReply: { type: 'enum', values: ['cold', 'ignore', 'sharp'] },
   mentionOwnerOnComment: { type: 'boolean' },
-  shareWindowMode: { type: 'enum', values: ['headless', 'offscreen'] },
   shareWindowIdleSec: { type: 'number' },
   creatorAutoProbe: { type: 'boolean' },
   creatorAutoProbe: { type: 'boolean' },

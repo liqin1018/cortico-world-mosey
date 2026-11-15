@@ -7387,40 +7387,28 @@ export class DouyinBrowser {
     const chromium = mod.chromium ?? mod.default?.chromium;
     const dir = path.join(this.dataDir, 'stroll', 'share-profile');
     fs.mkdirSync(dir, { recursive: true });
-    /**
-     * 分享窗口用哪种形态。
-     *
-     * headless（默认）：用 --headless=new（完整渲染器），任务栏**不会出现 Edge 图标**——
-     *   主人不想让人看见后台开着浏览器时用这个。抖音的分享面板在 new headless 里
-     *   通常能正常渲染；万一渲染不出来，日志里能看到 no-trigger，可以切 offscreen 试。
-     * offscreen：老做法，有头但挪到屏幕外。渲染最稳，缺点是任务栏留一个图标。
-     *
-     * 2026-11-15 用户反馈「每次分享任务栏都出现 Edge，能不能不让人看见」。
-     */
-    const hidden = String(this.cfg.shareWindowMode ?? 'headless') !== 'offscreen';
-    const args = [
-      '--disable-blink-features=AutomationControlled',
-      '--autoplay-policy=no-user-gesture-required',
-      /**
-       * 必须静音。视频是**真播**的——不静音的话主人会在电脑后台听见一段
-       * 不明来历的声音（2026-11-12 反馈）。分享只需要点按钮，不用真听声音。
-       */
-      '--mute-audio',
-      '--window-size=1420,940',
-      '--disable-features=CalculateNativeWinOcclusion',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-    ];
-    // new headless 不占屏幕也不进任务栏；offscreen 需要把窗口挪出可视区
-    if (hidden) args.push('--headless=new');
-    else args.push('--window-position=-2400,-2400');
     const ctx = await chromium.launchPersistentContext(dir, {
       headless: false,
       channel: this.channel ?? 'msedge',
       viewport: { width: 1400, height: 900 },
       locale: 'zh-CN',
       timezoneId: 'Asia/Shanghai',
-      args,
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--autoplay-policy=no-user-gesture-required',
+        /**
+         * 必须静音。这个窗口虽然有头且挪到了屏幕外，但视频是**真播**的——
+         * 不静音的话主人会在电脑后台听见一段不明来历的声音（2026-11-12 反馈）。
+         * 分享只需要点按钮，不需要真的听声音。
+         */
+        '--mute-audio',
+        // 挪到屏幕外：看得见就打扰人了，但必须真渲染，所以不能 headless
+        '--window-position=-2400,-2400',
+        '--window-size=1420,940',
+        '--disable-features=CalculateNativeWinOcclusion',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+      ],
       ignoreDefaultArgs: ['--enable-automation'],
     });
     const cookies = await this.shareCookies();

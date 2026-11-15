@@ -33,12 +33,6 @@ export const STROLL = {
         { value: 'text_image', label: zh ? '图文（图 + 一句话）' : 'Image + text' },
       ];
     }
-    if (kind === 'stroll-share-window-mode') {
-      return [
-        { value: 'headless', label: zh ? '后台隐身（任务栏不出现）' : 'Hidden' },
-        { value: 'offscreen', label: zh ? '挪到屏幕外（渲染最稳）' : 'Offscreen' },
-      ];
-    }
     if (kind === 'stroll-hostile-reply') {
       return [
         { value: 'cold', label: zh ? '冷处理（一句话带过）' : 'Stay cool' },

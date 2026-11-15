@@ -7432,15 +7432,34 @@ export class DouyinBrowser {
     this.sharePage = null;
     const ctx = this.shareCtx;
     this.shareCtx = null;
-    if (ctx) await ctx.close().catch(() => {});
+    if (ctx) {
+      /**
+       * 关闭失败以前被 catch 吞掉，谁都不知道窗口还挂着——
+       * 现场表现就是「分享完后台一直有个 Edge 不退」（2026-11-15 用户反馈）。
+       * 关不掉多半是页面还有弹窗/文件选择器挂着，记一条带错误信息的日志，
+       * 顺手把进程组也一并关掉。
+       */
+      await ctx.close().catch((error) => {
+        this.log?.warn?.('stroll share window close failed', { message: String(error?.message ?? error).slice(0, 120) });
+      });
+    }
   }
 
   /** 每次用完续一次空闲计时：5 分钟没人用就关掉，别一直占着 200~300MB 内存。 */
   touchShareWindow() {
     if (this.shareIdleTimer) clearTimeout(this.shareIdleTimer);
+    /**
+     * 空闲多久关窗口。默认 300 秒（复用同一窗口，省掉每次 2.5~3.5 秒的冷启动）。
+     * 配成 0 = 每次分享完立刻关——适合内存紧张、或者不想看到后台挂着一个浏览器。
+     */
+    const idle = Math.max(0, Number(this.cfg.shareWindowIdleSec ?? 300) || 0);
+    if (!idle) {
+      this.closeShareWindow().catch(() => {});
+      return;
+    }
     this.shareIdleTimer = setTimeout(() => {
       this.closeShareWindow().catch(() => {});
-    }, 5 * 60 * 1000);
+    }, idle * 1000);
     this.shareIdleTimer.unref?.();
   }
 

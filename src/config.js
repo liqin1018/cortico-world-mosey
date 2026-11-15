@@ -116,6 +116,7 @@ export const DEFAULTS = {
   douyinPostMode: 'draft',
   hostileReply: 'cold',
   mentionOwnerOnComment: false,
+  shareWindowIdleSec: 300,
   creatorAutoProbe: true,
   creatorAutoProbe: true,
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
@@ -275,6 +276,16 @@ const POSTING = {
           '选后两种要先配好下面的「配图从哪来」，否则会退回纯文字。',
         'x-options': 'stroll-post-kind',
         'x-hot': true,
+      },
+      [P + 'shareWindowIdleSec']: {
+        type: 'number',
+        title: '分享窗口空闲多久关（秒）',
+        description:
+          '抖音分享视频卡片要单独开一个浏览器窗口。默认留 300 秒（5 分钟）复用——' +
+          '连续分享好几个视频时不用每次重启浏览器，快 2~3 秒。' +
+          '**填 0 = 每次分享完立刻关**，内存紧张或者不想看到后台挂着浏览器就选这个。',
+        minimum: 0,
+        maximum: 3600,
       },
       [P + 'douyinPostMode']: {
         type: 'string',
@@ -1080,6 +1091,7 @@ export const POLICY_FIELDS = {
   douyinPostMode: { type: 'enum', values: ['draft', 'publish'] },
   hostileReply: { type: 'enum', values: ['cold', 'ignore', 'sharp'] },
   mentionOwnerOnComment: { type: 'boolean' },
+  shareWindowIdleSec: { type: 'number' },
   creatorAutoProbe: { type: 'boolean' },
   creatorAutoProbe: { type: 'boolean' },
   keepWindowSeconds: { type: 'int', min: 0, max: 600 },

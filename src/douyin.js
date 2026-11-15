@@ -4819,10 +4819,27 @@ export class DouyinBrowser {
    * 900ms 经常读到的还是上一条的状态 → 误报 unconfirmed → 她又重发一遍，
    * 用户看到的就是「同一条私信发了两条文字」。这里放宽到 2500ms；
    * 它是后台任务，不阻塞发送，所以把等待拉长不影响她说话的速度。
+   *
+   * 但只加等待还不够：抖音私信列表是**虚拟滚动**，
+   * 新气泡在可视区外就不会进 DOM——日志里两次读到的 tail 一模一样
+   * （'再给我分享个视频' 等旧消息），说明列表根本没往下走。
+   * 所以读之前先把容器滚到底。
    */
   async verifySentSoon(page, stamp, meta = {}) {
     await new Promise((done) => setTimeout(done, 2500));
     if (!page || page.isClosed()) return;
+    await page
+      .evaluate(() => {
+        // 容器选择器会变，先按已知的几个找；找不到就退化成整页滚动
+        const box =
+          document.querySelector('[data-e2e="msg-list"]') ??
+          document.querySelector('.message-list') ??
+          document.querySelector('[class*="messageList"]');
+        if (box) box.scrollTop = box.scrollHeight;
+        window.scrollTo(0, document.body.scrollHeight);
+      })
+      .catch(() => {});
+    await new Promise((done) => setTimeout(done, 350));
     const texts = await page
       .evaluate(() =>
         Array.from(document.querySelectorAll('[data-e2e="msg-item-content"]'))

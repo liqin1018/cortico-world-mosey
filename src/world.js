@@ -6235,18 +6235,6 @@ export class StrollWorld {
             }
           }
           /**
-           * 要「最新一条不是自己发的」，不是「第一条不是自己的」。
-           *
-           * 2026-11-15 实测：日志里 picked 连刷 7 次全是同一个人（主人），
-           * 因为 find 拿的是列表第一条，而主人在这层里发得最多，永远被逮住，
-           * 路人（穹和黑助等）的回复永远轮不上。B站子回复列表是正序，取最后一条才是最新的。
-           */
-          /**
-           * 按 ctime 取最新，别依赖数组顺序。
-           * 2026-11-15：靠「取最后一条」修过一次，日志里 picked 仍然永远是同一个人，
-           * 说明 B站 返回的子回复顺序不是我以为的正序。有 ctime 就按时间排。
-           */
-          /**
            * 只认「明确回复我」的那条。
            *
            * 2026-11-15 实测这层里是这么排的：
@@ -6319,6 +6307,17 @@ export class StrollWorld {
          */
         const contentTag = action === 'reply' ? `:${String(text ?? '').slice(0, 24).replace(/\s+/g, '')}` : '';
         dedupeKey = `${platform}:${action}:${target}:r${rpid}${contentTag}`;
+      }
+      /**
+       * 发新评论没有 rpid，键里必须带上内容。
+       *
+       * 2026-11-15 用户反馈：同一条视频 7 天只能评一次，说什么都不行。
+       * 因为 comment 从没设过 dedupeKey，policy 那边退化成
+       * `${platform}:comment:${target}` —— 跟内容毫无关系，
+       * 同一个视频永远算出同一个键。带上正文前 24 字，不同内容就是不同的事。
+       */
+      if (!dedupeKey && action === 'comment') {
+        dedupeKey = `${platform}:comment:${target}:${String(text ?? '').slice(0, 24).replace(/\s+/g, '')}`;
       }
       const check = this.policy.check(action, platform, target, { quotaAction: 'comment', dedupeKey, userInitiated: asked });
       if (!check.ok) return check;

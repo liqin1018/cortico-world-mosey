@@ -4852,9 +4852,16 @@ export class DouyinBrowser {
       return;
     }
     if (texts.some((t) => t.includes(stamp))) return;
-    // 误报排查用：把最后几条的原文一起记下来，下次一眼看出是「渲染慢」还是「真被吞了」
-    this.log?.info?.('stroll send unconfirmed', { stamp, ...meta, tail: texts.slice(-3) });
-    await this.onSendUnconfirmed?.(stamp, meta).catch(() => {});
+    /**
+     * 读不到就**不再报「被吞了」**。
+     *
+     * 2026-11-15 追查了三轮：气泡可能在另一个视图、也可能是虚拟列表没跟上，
+     * 回读本身并不可靠。而误报的代价是她在收到「大概率被吞了」的提醒后**重发一遍**——
+     * 用户看到的就是同一条私信发两次。漏报只是「真被吞了不知道」，比重复发出去轻。
+     *
+     * 所以这里只记日志（带 tail，方便出问题时人工核对），不再回调上层推送提醒。
+     */
+    this.log?.info?.('stroll send unconfirmed', { stamp, ...meta, tail: texts.slice(-3), notify: false });
   }
 
   /* ---------------- 表情面板 / 发图 / 出问题留证 ---------------- */

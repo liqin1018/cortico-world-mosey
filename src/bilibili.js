@@ -1436,6 +1436,13 @@ export class Bilibili {
       root: String(r.root ?? 0),
       parent: String(r.parent ?? 0),
       at: Number(r.ctime ?? 0),
+      /**
+       * 评论的审核状态。0 = 正常；非 0（常见 17）= 仅自己可见 / 审核中。
+       * 2026-11-15 网友反馈：回执说成功、拿到 rpid，但匿名视角看不到，
+       * 面板还挂蓝点——根子就是这里从来没读过 state。
+       */
+      state: Number(r.state ?? 0),
+      invisible: r.invisible === true,
       // 评论里真正 @ 到的人（不是正文里那个 @ 字符）
       mentions: (r.content?.members ?? []).map((m) => String(m.mid ?? '')),
       // 带图评论：B站把图片放在 content.pictures[].img_src
@@ -1719,6 +1726,8 @@ export class Bilibili {
       name: stripTags(r.member?.uname ?? ''),
       ctime: Number(r.ctime ?? 0),
       text: String(r.content?.message ?? ''),
+      state: Number(r.state ?? 0),
+      invisible: r.invisible === true,
     }));
   }
 
@@ -1925,20 +1934,45 @@ export class Bilibili {
       mentioned = members.some((m) => String(m.mid ?? '') === ownerUid) ? true : null;
     }
     /**
-     * 以前这里固定 sleep(1200) 再回查可见性——评论慢 1.2 秒全耗在这。
-     * 现在：只有「@ 了主人、但响应里看不出有没有 @ 上」才回查一次；
-     * 其它情况拿到 rpid 就算发出去了，可见性交给面板的 inbox/comments 后看。
+     * 可见性回查：**每条评论都查**，并且读 state。
+     *
+     * 2026-11-15 网友反馈（附匿名视角实测）：评论/回复拿到 rpid 就算成功、挂蓝点，
+     * 但公开列表里根本看不到——被压成「仅自己可见」（state=17）或审核中。
+     * 以前这里只在「@ 了主人且响应看不出 @ 没 @ 上」时才查，而且只看「在不在列表」，
+     * 不看 state，所以这种被压的情况一律记成成功。
+     *
+     * 代价：一次额外的列表请求（顶层查 /x/v2/reply，子回复查 /x/v2/reply/reply）。
+     * 查不到时再等 400ms 补一次（新评论有时还没进索引），仍然查不到记 unknown——
+     * 但**不报成功**，这次仍然记 unknown，让上层能说「不确定」。
      */
     let visibility = 'unchecked';
-    if (rpid && mentionOwner && mentioned === null) {
-      try {
-        const pub = await this.replyList(target.type, target.oid, 20, 0, 0);
-        const mine = pub.find((r) => r.rpid === rpid);
-        visibility = mine ? 'public' : 'unknown';
-        if (mine) mentioned = (mine.mentions ?? []).includes(ownerUid);
-      } catch {
-        visibility = 'unknown';
+    if (rpid) {
+      const probe = async () => {
+        try {
+          if (parent) {
+            const kids = await this.replyChildren(target.oid, root || parent, 20).catch(() => []);
+            return kids.find((r) => r.rpid === rpid) ?? null;
+          }
+          const pub = await this.replyList(target.type, target.oid, 30, 0, 0);
+          return pub.find((r) => r.rpid === rpid) ?? null;
+        } catch {
+          return null;
+        }
+      };
+      let mine = await probe();
+      if (!mine) {
+        await new Promise((done) => setTimeout(done, 400));
+        mine = await probe();
       }
+      if (!mine) {
+        // 自己的列表里也查不到：多半是被压了，但也可能是索引延迟——按「不确定」处理，别报成功
+        visibility = 'unknown';
+      } else if (Number(mine.state ?? 0) === 0 && mine.invisible !== true) {
+        visibility = 'public';
+      } else {
+        visibility = 'hidden';
+      }
+      if (mine) mentioned = (mine.mentions ?? []).includes(ownerUid);
     }
     return {
       ok: true,

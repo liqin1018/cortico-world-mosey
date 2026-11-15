@@ -6834,7 +6834,13 @@ export class StrollWorld {
         this.policy.consume(action, platform, target, {
           quotaAction: plan.quotaAction || this.capAction(action),
           // 群聊 / 回陌生人都要占额度（群聊走「群聊」，私信走「私信」）；只有回主人私信不占
-          countQuota: (plan.countQuota ?? !plan.free) && !uncertain && action !== 'unfollow' && action !== 'unlike',
+          // 被压成「仅自己可见」的评论不扣额度：这次互动对别人根本没发生（2026-11-15 网友反馈）
+          countQuota:
+            (plan.countQuota ?? !plan.free) &&
+            !uncertain &&
+            result?.visibility !== 'hidden' &&
+            action !== 'unfollow' &&
+            action !== 'unlike',
           dedupeKey: plan.free || plan.chat || uncertain ? '' : plan.dedupeKey,
           // free / chat：都只算「聊天」，不动公开动作的 20 秒节奏
           free: !!plan.free || !!plan.chat,
@@ -6912,7 +6918,15 @@ export class StrollWorld {
       if (result.confirmed === false) bits.push('没拿到发布回执，可能没发出去');
       if (result.mentioned === true) bits.push('@ 已生效');
       if (result.mentioned === false) bits.push('@ 没生效');
+      /**
+       * 可见性三态。
+       *
+       * 2026-11-15 网友反馈：被压成「仅自己可见」的评论，回执还是「发出去了」，
+       * 面板挂蓝点，主人以为互动完了，其实谁都没看到。
+       * 现在 hidden 会明说，并且带上「别当成已经发出去了」的提醒。
+       */
       if (result.visibility === 'public') bits.push('公开可见');
+      if (result.visibility === 'hidden') bits.push('但**只有你自己能看到**（state 非 0，被压/审核中）——别当成已经发出去了，换个说法或切前台再试');
       if (result.visibility === 'unknown') bits.push('公开列表暂未看到，可能审核中');
       return bits.join('，');
     }

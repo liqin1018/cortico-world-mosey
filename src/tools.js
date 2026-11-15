@@ -91,6 +91,11 @@ export const TOOL_DECLS = [
           description: 'image 用：chat 发到私信/群（默认），comment 发到评论区（这时 target 要给视频链接）。',
         },
         reply_to: { type: 'string', description: '回复评论时，被回复的评论 ID（rpid）。' },
+        root: {
+          type: 'string',
+          description:
+            'B站楼中楼专用：这条楼中楼所属的**主评论** rpid。推送里会带 `root=...`，照着传就行——带了它就不用去评论区翻页找楼层，深层楼中楼也能定位。不传的话插件会自己翻评论区找，楼很深时会失败。只在 reply 时有意义。',
+        },
         mention_owner: {
           type: 'boolean',
           description:

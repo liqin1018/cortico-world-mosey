@@ -4812,11 +4812,16 @@ export class DouyinBrowser {
   }
 
   /**
-   * 发完事后核实：等 900ms 读**一次**会话（不轮询），看刚发的那句在不在。
+   * 发完事后核实：等一会儿读**一次**会话（不轮询），看刚发的那句在不在。
    * 读不到任何消息节点时按「不知道」处理，不乱报。
+   *
+   * 2026-11-15：原来只等 900ms。实测后台模式（无头）下消息气泡渲染更慢，
+   * 900ms 经常读到的还是上一条的状态 → 误报 unconfirmed → 她又重发一遍，
+   * 用户看到的就是「同一条私信发了两条文字」。这里放宽到 2500ms；
+   * 它是后台任务，不阻塞发送，所以把等待拉长不影响她说话的速度。
    */
   async verifySentSoon(page, stamp, meta = {}) {
-    await new Promise((done) => setTimeout(done, 900));
+    await new Promise((done) => setTimeout(done, 2500));
     if (!page || page.isClosed()) return;
     const texts = await page
       .evaluate(() =>
@@ -4825,9 +4830,13 @@ export class DouyinBrowser {
           .map((n) => String(n.innerText ?? '').replace(/\s+/g, ' ').trim()),
       )
       .catch(() => null);
-    if (texts === null || !texts.length) return;
+    if (texts === null || !texts.length) {
+      this.log?.info?.('stroll send verify skipped', { stamp, reason: 'no-nodes' });
+      return;
+    }
     if (texts.some((t) => t.includes(stamp))) return;
-    this.log?.info?.('stroll send unconfirmed', { stamp, ...meta });
+    // 误报排查用：把最后几条的原文一起记下来，下次一眼看出是「渲染慢」还是「真被吞了」
+    this.log?.info?.('stroll send unconfirmed', { stamp, ...meta, tail: texts.slice(-3) });
     await this.onSendUnconfirmed?.(stamp, meta).catch(() => {});
   }
 

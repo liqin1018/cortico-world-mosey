@@ -115,6 +115,7 @@ export const DEFAULTS = {
   openMode: 'both',
   douyinPostMode: 'draft',
   hostileReply: 'cold',
+  commentBlockedDm: true,
   mentionOwnerOnComment: false,
   shareWindowIdleSec: 0,
   creatorAutoProbe: true,
@@ -474,6 +475,16 @@ const INTERACT = {
     title: '公开动作',
     description: '关掉的动作用不了；额度仍然生效。',
     properties: {
+      [P + 'commentBlockedDm']: {
+        type: 'boolean',
+        title: '评论被压时私信告我',
+        description:
+          '抖音经常把评论判成「只有自己可见」（限流）或「审核中」，这两种别人都收不到通知。' +
+          '开着的话，她在评论区 **@ 了你** 但那条被压时，会私信把内容复述给你，免得你不知道她说了什么。' +
+          '**每条被压都发一条**——如果觉得吵（尤其是号还没养起来、评论频繁被压的时候），把这个关掉。' +
+          '关掉后评论照常发，只是不再私信告诉你。',
+        'x-hot': true,
+      },
       [P + 'mentionOwnerOnComment']: {
         type: 'boolean',
         title: '评论时 @ 主人',
@@ -1090,6 +1101,7 @@ export const POLICY_FIELDS = {
   openMode: { type: 'enum', values: ['text', 'both', 'frames'] },
   douyinPostMode: { type: 'enum', values: ['draft', 'publish'] },
   hostileReply: { type: 'enum', values: ['cold', 'ignore', 'sharp'] },
+  commentBlockedDm: { type: 'boolean' },
   mentionOwnerOnComment: { type: 'boolean' },
   shareWindowIdleSec: { type: 'number' },
   creatorAutoProbe: { type: 'boolean' },

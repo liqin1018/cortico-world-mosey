@@ -6799,6 +6799,8 @@ export class StrollWorld {
       if (
         platform === 'douyin' &&
         (action === 'comment' || action === 'reply') &&
+        // 「评论被压时私信告我」可以关：每条被压都发一条，号没养起来时会很吵
+        this.cfg.commentBlockedDm !== false &&
         plan.mentionOwner &&
         result &&
         result.ok !== false &&

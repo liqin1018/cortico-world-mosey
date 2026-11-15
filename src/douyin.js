@@ -7498,9 +7498,16 @@ export class DouyinBrowser {
   async shareInTempWindow(who, id) {
     try {
       const { page, reused } = await this.ensureShareWindow();
-      this.touchShareWindow();
+      /**
+       * 这里不能调 touchShareWindow。
+       *
+       * 「分享窗口空闲多久关」默认是 0（用完立刻关），而 touchShareWindow 在 idle=0 时会**马上关窗**——
+       * 但真正要操作窗口的 shareOnPage 还没开始，于是每次都抛 temp-browser。
+       * 2026-11-15 用户反馈「卡片分享不成功」就是这条：前一版 idle=300 时不会立刻关，所以没暴露。
+       *
+       * 关窗统一放在最后（下面 shareOnPage 之后那次 touchShareWindow）。
+       */
       let result = await this.shareOnPage(page, who, id);
-      this.touchShareWindow();
       /**
        * `no-trigger` 基本都不是「视频不能分享」，而是浮层没渲染出来：
        * 连续开关同一个 share-profile（上一轮的锁还没放干净）、抖音自己抽风、
@@ -7514,6 +7521,7 @@ export class DouyinBrowser {
       }
       // 还是不通：留一份现场（截图 + 页面状态），下次不用靠猜
       if (!result.ok) await this.captureShareFailure(page, who, id, result.step);
+      // 整个流程结束才「用完」：retry 和失败快照都还要用这个 page
       this.touchShareWindow();
       this.log?.info?.('stroll share temp window', { ok: result.ok, step: result.step ?? '', reused });
       return result;

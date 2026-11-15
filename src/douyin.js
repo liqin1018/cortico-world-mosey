@@ -4791,7 +4791,20 @@ export class DouyinBrowser {
      * 所以：立刻返回成功，另起一个后台任务在 900ms 后读一次会话；
      * 真没看到就回调 `onSendUnconfirmed`，由上层补一条提醒。发送延迟一分不加。
      */
-    const stamp = cutChars(String(body || text || '').replace(/\s+/g, ' ').trim(), 10);
+    /**
+     * 校验用的标记：**不能包含链接**。
+     *
+     * 2026-11-15 用户看到同一条私信发了两遍文字：卡片成功后补发的正文是「去掉链接」的，
+     * 而这里取的是原文前 10 字（含 https），页面里当然搜不到 → 判成 unconfirmed →
+     * 她收到「大概率被吞了」的提醒，又重发一次。
+     */
+    const stamp = cutChars(
+      String(body || text || '')
+        .replace(/https?:\/\/\S+/g, '')
+        .replace(/\s+/g, ' ')
+        .trim(),
+      10,
+    );
     if (stamp.length >= 4) {
       this.verifySentSoon(page, stamp, { where: 'dm', at: Date.now() }).catch(() => {});
     }

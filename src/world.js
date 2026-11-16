@@ -531,6 +531,8 @@ export class StrollWorld {
     // 勾了「必做」但今天还没做够的项：按额度模式下决定要不要出门，按次数模式下只决定先补哪个
     const pending = this.mustDoList().filter((x) => x.left > 0);
     await this.maybeMustNudge(pending, hour, day);
+    // 每天一条「今天干了什么」（幂等、纯聚合、不阻塞）
+    this.maybeDailyDigest(hour, day);
     const mode = this.outingMode();
     if (mode === 'off') return;
     // 刚被 -509/429 挡过：她先歇几分钟再出门（主人当场点的事不受影响）
@@ -3723,6 +3725,8 @@ export class StrollWorld {
       feed: feed.map(({ _score, ...rest }) => rest),
       inbox,
       errors: errors.length ? errors : undefined,
+      // 最近聊过的人：让她有「上次说到哪儿」的连续性，而不是每次都是初见
+      people: this.recentPeople(3),
       hint: '一次 brief 就够；挑 0-2 条真的有意思的。大多数时候什么都不做也可以。',
     };
   }
@@ -3859,6 +3863,15 @@ export class StrollWorld {
         title: detail.title,
         author: detail.author,
         dur: detail.dur ?? '',
+        url: detail.url,
+      });
+      // 主动分享的机会（内部限频 + 不阻塞）
+      this.maybeShareWithOwner({
+        platform: 'bilibili',
+        kind: detail.kind,
+        id: detail.id,
+        title: detail.title,
+        author: detail.author,
         url: detail.url,
       });
       // 视频才读字幕/弹幕；专栏、动态没有。条数由「看视频」设置控制，0 = 不带
@@ -6911,6 +6924,8 @@ export class StrollWorld {
         result,
         receipt: this.receiptText(action, platform, result, plan),
       };
+      // 跟这个人聊过一笔（同步改内存，落盘走 saveSoon，不加延迟）
+      this.notePersonTurn(plan, text);
       // 群里的这句已经回掉了：上下文清掉，别让她下一条（可能是私信主人）被当成回群
       if (plan.group) this.lastGroupPoke = null;
       if (source === 'operator') {
@@ -6923,6 +6938,144 @@ export class StrollWorld {
         await this.push('stroll.risk', `平台风控：${error.message}。已经停手，不要重试。`, { code, action, platform }, 'flush');
       }
       return { ok: false, code, action, platform, target, error: error?.message ?? String(error) };
+    }
+  }
+
+  /**
+   * 记一笔「跟这个人聊过」。
+   *
+   * 2026-11-17：她以前对谁都是初见——state 里只有 dmSeen 的指纹和最后一句，
+   * 同一个人聊过五轮，下次再来还是全新认识。
+   *
+   * **纯同步、只改内存**（几十微秒），落盘交给 saveSoon（800ms 攒一次），
+   * 所以回复私信的主链路一分延迟都不加。
+   */
+  /**
+   * 看到好东西，给她一个「主动分享」的机会。
+   *
+   * 2026-11-17：以前她所有主动行为都来自 tick（到点催出门），
+   * 看到喜欢的视频不会告诉任何人——像个执行任务的工具，不是有分享欲的伙伴。
+   *
+   * 两个约束：
+   * 1. **不阻塞**：push 不 await，open 该多快还多快
+   * 2. **限频**：一天最多 1 次（默认），而且只对「她真的喜欢」的作者触发
+   *    （interests 里看过 3 个以上），否则变成骚扰
+   */
+  /**
+   * 最近聊过的几个人（给 brief 用）。
+   *
+   * 让「人物记忆」真正被用上：她出门前能看到「最近跟谁聊过、聊了什么」，
+   * 而不是只知道有未读消息。只取 3 个、每个一句话，控制 token。
+   */
+  /**
+   * 每天一条「今天干了什么」。
+   *
+   * 纯聚合（读 actions），零新成本。发到 push 里让主人一眼看到，
+   * 也让她在 22 点之后有「今天」这个概念。
+   * 一天只发一次（digestDay 幂等），没动作的日子不发。
+   */
+  maybeDailyDigest(hour, day) {
+    try {
+      if (hour < 22) return;
+      if (this.store.data.digestDay === day) return;
+      this.store.data.digestDay = day;
+      this.store.saveSoon();
+      const acts = (this.store.data.actions ?? []).filter(
+        (a) => dayKey(new Date(a.at), this.timeZone) === day,
+      );
+      if (acts.length < 2) return;
+      const n = (k) => acts.filter((a) => a.action === k).length;
+      const bits = [
+        n('like') ? `点赞 ${n('like')}` : '',
+        n('comment') + n('reply') ? `评论 ${n('comment') + n('reply')}` : '',
+        n('dm') ? `私信 ${n('dm')}` : '',
+        n('follow') ? `关注 ${n('follow')}` : '',
+        n('post') ? `发布 ${n('post')}` : '',
+        n('save') ? `稍后再看 ${n('save')}` : '',
+      ].filter(Boolean);
+      if (!bits.length) return;
+      const top = Object.entries(this.store.data.interests ?? {})
+        .sort((a, b) => Number(b[1]) - Number(a[1]))
+        .slice(0, 2)
+        .map(([k]) => k);
+      this.push(
+        'stroll.digest',
+        `今天的记录：${bits.join('、')}。${top.length ? `最常看的是 ${top.join(' 和 ')}。` : ''}`,
+        { day, n: acts.length },
+        'debounce',
+      ).catch(() => {});
+    } catch {
+      // 汇总失败不影响任何动作
+    }
+  }
+
+  recentPeople(limit = 3, withinMs = 7 * 86400000) {
+    try {
+      const list = Object.entries(this.store.data.people ?? {})
+        .map(([key, v]) => ({ key, ...v }))
+        .filter((p) => p.lastTalkAt && Date.now() - Number(p.lastTalkAt) < withinMs)
+        .sort((a, b) => Number(b.lastTalkAt) - Number(a.lastTalkAt))
+        .slice(0, limit)
+        .map((p) => ({
+          who: p.name,
+          platform: p.key.split(':')[0],
+          group: !!p.group,
+          turns: p.turns ?? 1,
+          lastTalkAt: new Date(Number(p.lastTalkAt)).toISOString().slice(0, 16).replace('T', ' '),
+          recent: (p.recent ?? []).slice(-1)[0] ?? '',
+        }));
+      return list.length ? list : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  maybeShareWithOwner({ platform, kind, id, title, author, url }) {
+    try {
+      if (!this.cfg.shareWithOwner) return;
+      if (kind && kind !== 'video') return;
+      const love = Number(this.store.data.interests?.[String(author ?? '')] ?? 0);
+      if (!author || love < 3) return;
+      const today = dayKey(new Date(), this.timeZone);
+      const used = Number(this.store.data.shareNudge?.[today] ?? 0);
+      if (used >= Number(this.cfg.shareWithOwnerPerDay ?? 1)) return;
+      this.store.data.shareNudge = { ...(this.store.data.shareNudge ?? {}), [today]: used + 1 };
+      this.store.saveSoon();
+      this.push(
+        'stroll.share',
+        `刷到一个你可能会喜欢的：\n${title ?? ''}\n${url ?? ''}\n（${author} 的，你之前看过他 ${love} 个）\n想给他看就调 stroll_act action=dm，不想就当我没说——这条不用回。`,
+        { platform, id, author },
+        'debounce',
+      ).catch(() => {});
+    } catch {
+      // 分享失败不影响看视频
+    }
+  }
+
+  notePersonTurn(plan, text) {
+    try {
+      const key0 = String(plan?.target ?? '').trim();
+      if (!key0) return;
+      const key = `${plan.platform}:${key0}`;
+      const now = Date.now();
+      const people = this.store.data.people ?? {};
+      const prev = people[key] ?? {};
+      const said = String(text ?? '').replace(/\s+/g, ' ').trim();
+      people[key] = {
+        // 名字只在这里见过一次就记下来，后面回执/面板都能用
+        name: prev.name || key0,
+        turns: Number(prev.turns ?? 0) + 1,
+        firstSeenAt: prev.firstSeenAt ?? now,
+        lastTalkAt: now,
+        group: !!plan.group,
+        stranger: !!plan.stranger,
+        // 最近三句（各截 40 字）：下次能想起「刚才聊到哪儿」
+        recent: said ? [...(prev.recent ?? []), said.slice(0, 40)].slice(-3) : (prev.recent ?? []),
+      };
+      this.store.data.people = people;
+      this.store.saveSoon();
+    } catch {
+      // 记不住不影响发消息
     }
   }
 

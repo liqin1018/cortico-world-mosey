@@ -79,6 +79,26 @@ export class Store {
     return this;
   }
 
+  /**
+   * 攒一下再写盘。
+   *
+   * save() 是同步的（JSON.stringify + writeFileSync + rename），state.json 几百 KB 时
+   * 一次要 10~50ms。回复私信的主链路上如果直接 save，等于凭空加一段延迟。
+   * 这里 debounce 800ms：多次写只落一次盘，主链路只付「改内存」的微秒级成本。
+   */
+  saveSoon(delay = 800) {
+    if (this._saveTimer) return;
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      try {
+        this.save();
+      } catch {
+        // 写盘失败下一轮还会再试，不在这里打扰主流程
+      }
+    }, delay);
+    this._saveTimer.unref?.();
+  }
+
   save() {
     this.prune();
     fs.mkdirSync(this.dir, { recursive: true });
@@ -155,7 +175,8 @@ export class Store {
     // 兴趣学习：她实际点开看了谁，就把作者记一笔（原来 interests 只在 consume 里传空数组，永远不涨）
     const who = String(entry.author ?? '').trim();
     if (who) this.noteInterest([who]);
-    this.save();
+    // 延迟落盘：这个函数在「打开视频」的路径上，同步 save 会白加 10~50ms
+    this.saveSoon();
   }
 
   viewedList(n = 6) {

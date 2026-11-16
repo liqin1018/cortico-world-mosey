@@ -116,6 +116,8 @@ export const DEFAULTS = {
   openMode: 'both',
   douyinPostMode: 'draft',
   hostileReply: 'cold',
+  shareWithOwner: true,
+  shareWithOwnerPerDay: 1,
   commentBlockedDm: true,
   mentionOwnerOnComment: false,
   shareWindowIdleSec: 0,
@@ -475,6 +477,22 @@ const INTERACT = {
     title: '公开动作',
     description: '关掉的动作用不了；额度仍然生效。',
     properties: {
+      [P + 'shareWithOwner']: {
+        type: 'boolean',
+        title: '看到好东西会跟你提一句',
+        description:
+          '开着的话，她刷到一个**你可能会喜欢**的视频（她关注过的作者，看过 3 个以上）会主动提一句，' +
+          '问你要不要发给你看。**一天最多一次**（下面可以改），而且你回不回都行。' +
+          '关掉的话她只在被问的时候才说，不会主动开口。',
+        'x-hot': true,
+      },
+      [P + 'shareWithOwnerPerDay']: {
+        type: 'int',
+        min: 0,
+        max: 5,
+        title: '每天最多主动提几次',
+        description: '怕吵就填 0（等于关掉）或 1。填 2 以上她可能会一天提好几次。',
+      },
       [P + 'commentBlockedDm']: {
         type: 'boolean',
         title: '评论被压时私信告我',
@@ -1112,6 +1130,8 @@ export const POLICY_FIELDS = {
   openMode: { type: 'enum', values: ['text', 'both', 'frames'] },
   douyinPostMode: { type: 'enum', values: ['draft', 'publish'] },
   hostileReply: { type: 'enum', values: ['cold', 'ignore', 'sharp'] },
+  shareWithOwner: { type: 'boolean' },
+  shareWithOwnerPerDay: { type: 'int', min: 0, max: 5 },
   commentBlockedDm: { type: 'boolean' },
   mentionOwnerOnComment: { type: 'boolean' },
   shareWindowIdleSec: { type: 'number' },

@@ -2362,8 +2362,9 @@ export default {
           msgSet('拉手刹…');
           try {
             const result = await ctx.invoke('pause', [hours]);
-            msgSet(result?.ok ? `已暂停 ${hours} 小时。` : result?.error || '没成功', !result?.ok);
+            // 先刷新再写提示：refresh() 里有一句 msgSet('') 会把提示清掉
             await refresh();
+            msgSet(result?.ok ? `已暂停 ${hours} 小时。` : result?.error || '没成功', !result?.ok);
           } catch (error) {
             msgSet(error.message || String(error), true);
           }
@@ -2373,8 +2374,8 @@ export default {
           msgSet('解除中…');
           try {
             const result = await ctx.invoke('resume');
-            msgSet(result?.ok ? '手刹解除了。' : result?.error || '没成功', !result?.ok);
             await refresh();
+            msgSet(result?.ok ? '手刹解除了。' : result?.error || '没成功', !result?.ok);
           } catch (error) {
             msgSet(error.message || String(error), true);
           }
@@ -2446,8 +2447,18 @@ export default {
           msgSet('正在清零今天的计数…');
           try {
             const result = await ctx.invoke('reset_usage');
-            msgSet(result?.ok ? `今天（${result.day}）的计数已清零。` : result?.error || '没成功', result?.ok === false);
+            /**
+             * 顺序必须是这样：先 refresh，再写提示。
+             *
+             * refresh() 内部是 `render(data); msgSet('')` —— 它会把提示清空。
+             * 以前是先 msgSet 再 refresh，于是「已清零」只存在几毫秒就被抹掉，
+             * 用户看到的就是「点了没反应」（2026-11-16 反馈）。
+             */
             await refresh();
+            msgSet(
+              result?.ok ? `今天（${result.day}）的计数已清零。` : result?.error || '没成功',
+              result?.ok === false,
+            );
           } catch (error) {
             msgSet(error.message || String(error), true);
           }

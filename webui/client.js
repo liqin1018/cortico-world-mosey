@@ -679,6 +679,15 @@ export default {
         historySec.append(historyHead, historyList);
         root.append(historySec);
 
+        /* ---------------- 今天 ---------------- */
+        const digestSec = el('section', undefined, 'stroll-sec');
+        const digestHint = el('span', undefined, 'stroll-sec-hint');
+        const digestHead = sectionHead('今天');
+        digestHead.append(digestHint);
+        const digestCard = el('div', undefined, 'stroll-digest');
+        digestSec.append(digestHead, digestCard);
+        root.append(digestSec);
+
         /* ---------------- 最近 / 维护 ---------------- */
         const split = el('div', undefined, 'stroll-split');
 
@@ -774,6 +783,32 @@ export default {
           const caps = p.caps ?? {};
           const bili = s.bili ?? {};
           const dy = s.douyin ?? {};
+          // 「今天」卡片：今天做了什么 + 最近跟谁聊过（都是纯聚合，不走网络）
+          {
+            const dg = s.digest ?? {};
+            const bits = [
+              dg.like ? `点赞 ${dg.like}` : '',
+              dg.comment ? `评论 ${dg.comment}` : '',
+              dg.dm ? `私信 ${dg.dm}` : '',
+              dg.follow ? `关注 ${dg.follow}` : '',
+              dg.post ? `发布 ${dg.post}` : '',
+              dg.save ? `稍后再看 ${dg.save}` : '',
+            ].filter(Boolean);
+            digestCard.textContent = '';
+            if (!dg.total) {
+              digestCard.append(el('p', '今天还没有动作。', 'stroll-muted'));
+            } else {
+              digestCard.append(el('p', `今天做了 ${dg.total} 件事：${bits.join('、') || '（都是聊天）'}`, 'stroll-digest-line'));
+              if (dg.top?.length) digestCard.append(el('p', `最常看的是 ${dg.top.join(' 和 ')}`, 'stroll-muted'));
+            }
+            const ppl = s.people ?? [];
+            digestHint.textContent = ppl.length ? `最近聊过 ${ppl.length} 个人` : '';
+            for (const who of ppl.slice(0, 3)) {
+              digestCard.append(
+                el('p', `${who.who}${who.group ? '（群）' : ''} · 聊过 ${who.turns} 次 · ${who.recent}`, 'stroll-muted'),
+              );
+            }
+          }
           const paused = p.paused?.paused === true;
           const left = (key) => Math.max(0, Number(caps[key] ?? 0) - Number(usage[key] ?? 0));
           // 哪些项被主人勾成了「每天必做」

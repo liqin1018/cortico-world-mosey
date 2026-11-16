@@ -2127,3 +2127,27 @@
   gap: 16px;
 }
 .stroll-life-stats .stroll-stat strong { font-size: 17px; }
+
+/* 「今天」卡片：今天做了什么 + 最近聊过的人 */
+.stroll-digest {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--stroll-card, #fff);
+  border: 1px solid var(--stroll-line, #e6e8ec);
+}
+.stroll-digest p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--stroll-ink, #1c2330);
+}
+.stroll-digest .stroll-digest-line {
+  font-weight: 600;
+}
+.stroll-digest .stroll-muted {
+  color: var(--stroll-sub, #6b7280);
+  font-weight: 400;
+}

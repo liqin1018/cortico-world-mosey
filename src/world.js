@@ -6974,6 +6974,33 @@ export class StrollWorld {
    * 也让她在 22 点之后有「今天」这个概念。
    * 一天只发一次（digestDay 幂等），没动作的日子不发。
    */
+  /** 今天的动作统计（面板「今天」卡片用，纯聚合）。 */
+  digestToday() {
+    try {
+      const day = dayKey(new Date(), this.timeZone);
+      const acts = (this.store.data.actions ?? []).filter(
+        (a) => a.platform !== 'system' && dayKey(new Date(a.at), this.timeZone) === day,
+      );
+      const n = (k) => acts.filter((a) => a.action === k).length;
+      return {
+        day,
+        total: acts.length,
+        like: n('like'),
+        comment: n('comment') + n('reply'),
+        dm: n('dm'),
+        follow: n('follow'),
+        post: n('post'),
+        save: n('save'),
+        top: Object.entries(this.store.data.interests ?? {})
+          .sort((a, b) => Number(b[1]) - Number(a[1]))
+          .slice(0, 2)
+          .map(([k]) => k),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   maybeDailyDigest(hour, day) {
     try {
       if (hour < 22) return;
@@ -7883,6 +7910,8 @@ export class StrollWorld {
       inboxCount: (this.inboxCache ?? []).length,
       todayReads: this.store.readsToday(),
       viewed: this.store.viewedList(6),
+      digest: this.digestToday(),
+      people: this.recentPeople(4),
       following: this.followFeedView(4),
       weekly: this.weeklyReport(7),
       books: this.bookView(),

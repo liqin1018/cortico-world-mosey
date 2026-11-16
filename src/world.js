@@ -502,8 +502,27 @@ export class StrollWorld {
     this.store.save();
   }
 
+  /**
+   * 真的出门了才记一次。
+   *
+   * 判据很简单：当天「催过」的次数比「已出门」多，说明这一趟是回应催促的。
+   * 主人自己点单查东西时 nudged 不会大于 used，所以不会被算成自动出门。
+   */
+  noteRealOuting() {
+    const day = dayKey(new Date(), this.timeZone);
+    const used = Number(this.store.data.autoSessions?.[day] ?? 0);
+    const nudged = Number(this.store.data.autoNudged?.[day] ?? 0);
+    if (nudged <= used) return false;
+    this.store.data.autoSessions = { ...(this.store.data.autoSessions ?? {}), [day]: used + 1 };
+    this.store.save();
+    this.log?.info?.('stroll outing counted', { day, used: used + 1, nudged });
+    return true;
+  }
+
   async tick(now = Date.now()) {
     if (!this.running || !this.cfg.enabled) return;
+    // 「自动出门」总开关：关掉就彻底不催（主人手动点单不受影响）
+    if (this.cfg.autoOuting === false) return;
     const hour = hourOf(new Date(now), this.timeZone);
     // 出门时段可配（默认 9-23）：只在这个窗口里自己出门，省流量也少打扰
     if (!this.inOutingWindow(hour)) return;
@@ -517,6 +536,12 @@ export class StrollWorld {
     // 刚被 -509/429 挡过：她先歇几分钟再出门（主人当场点的事不受影响）
     if (this.policy.rateWait().waiting) return;
     const used = Number(this.store.data.autoSessions[day] ?? 0);
+    const nudged = Number(this.store.data.autoNudged?.[day] ?? 0);
+    /**
+     * 催了几次都没动静就别一直催了：最多催到目标次数的两倍。
+     * 没有这道闸，A 的改动会变成「一天催到晚」。
+     */
+    if (nudged >= Math.max(2, Number(this.cfg.autoSessionsPerDay ?? 0) * 2)) return;
     // token 预算是两种模式共用的天花板：每出门一次大约 1500 token
     const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? DEFAULTS.tokenDailyBudget) / 1500));
     if (used >= budgetCap) return;
@@ -546,7 +571,15 @@ export class StrollWorld {
     // 按次数保留 40% 跳过（像人一样不是每次都去）；按额度是「有活就干」，不掷骰子
     if (mode === 'sessions' && Math.random() > 0.6) return;
     this.store.data.lastAutoAt = Date.now();
-    this.store.data.autoSessions[day] = used + 1;
+    /**
+     * 这里只记「催过几次」，**不占出门次数**。
+     *
+     * 2026-11-16 群友反馈：他当天实际只出门两次，次数却已经 6/7。
+     * 因为推送一发出就 autoSessions +1，而她可能回「今天不逛」——
+     * 次数被「催了但没去」的几趟吃光了，后面想出去也出不去。
+     * 现在真出门了才记账（见 noteRealOuting）。
+     */
+    this.store.data.autoNudged = { ...(this.store.data.autoNudged ?? {}), [day]: nudged + 1 };
     // 记住「这是一次自己出门」：出门窗口内她连续做动作要按 20 秒节奏，
     // 不能拿主人点单的 1.5 秒去连发（那会招 -509）。
     this.autoWalkAt = Date.now();
@@ -3627,6 +3660,8 @@ export class StrollWorld {
   }
 
   async brief(platform) {
+    // 真的开始刷了才算这一趟出门（回应催促的才记账，主人点单不算）
+    this.noteRealOuting();
     const status = await this.compactStatus();
     const chosen = platform === 'douyin' || platform === 'bilibili' ? platform : this.pickPlatform();
     let feed = [];
@@ -3701,6 +3736,7 @@ export class StrollWorld {
   }
 
   async feed(platform, n) {
+    this.noteRealOuting();
     const p = platform === 'douyin' || platform === 'bilibili' ? platform : this.pickPlatform();
     if (p === 'bilibili') {
       if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };

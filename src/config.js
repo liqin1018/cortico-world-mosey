@@ -97,6 +97,7 @@ export const DEFAULTS = {
    */
   outingMode: 'sessions',
   /** 0 = 不自己出门（等同于 outingMode=off）；按次数模式时一天出门几次。 */
+  autoOuting: true,
   autoSessionsPerDay: 5,
   /** 两次自动出门之间至少隔多少分钟；和主人手动互动无关。 */
   autoGapMinutes: 90,
@@ -553,6 +554,16 @@ const OUTING = {
     description:
       '她什么时候出去、一天出去几次、被什么挡住。按次数＝出去几次就收工；按额度＝把勾了必做的项做满才收工。',
     properties: {
+      [P + 'autoOuting']: {
+        type: 'boolean',
+        title: '自动出门',
+        description:
+          '关掉之后，**完全不会**自己按时点出门（连「该出门溜达了」的催促也不发）。' +
+          '适合主人在用电脑、跑下载、或者单纯不想被打扰的时候。' +
+          '手动让她看东西、回私信这些不受影响——只停「自己出门」。' +
+          '打开时按下面的「出门方式」和「每天自己出门」执行。',
+        'x-hot': true,
+      },
       [P + 'outingMode']: {
         type: 'string',
         title: '出门方式',
@@ -1089,6 +1100,7 @@ export const POLICY_FIELDS = {
   quietTo: { type: 'int', min: 0, max: 23 },
   minGapSeconds: { type: 'int', min: 10, max: 600 },
   riskGuard: { type: 'enum', values: ['off', 'light', 'strict'] },
+  autoOuting: { type: 'boolean' },
   autoSessionsPerDay: { type: 'int', min: 0, max: 10 },
   outingMode: { type: 'enum', values: ['off', 'sessions', 'quota'] },
   autoGapMinutes: { type: 'int', min: 30, max: 360 },

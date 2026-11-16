@@ -937,7 +937,10 @@ world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
 for (let i = 0; i < 12 && !mustPushes.length; i += 1) await world.tick(mustNoon.getTime());
 check(
   '按次数模式：到点出门时仍提示先补必做',
-  mustPushes.some((p) => p.type === 'stroll.due' && /必做日/.test(p.text)) && Number(world.store.data.autoSessions[mustDay]) === 1,
+  // 2026-11-16：推送只记「催过」，不再是「出门一次」——真出门才加 autoSessions
+  mustPushes.some((p) => p.type === 'stroll.due' && /必做日/.test(p.text)) &&
+    Number(world.store.data.autoNudged?.[mustDay] ?? 0) === 1 &&
+    Number(world.store.data.autoSessions[mustDay]) === 0,
   JSON.stringify(mustPushes).slice(0, 160),
 );
 
@@ -994,7 +997,7 @@ mustPushes.length = 0;
 await world.tick(mustNoon.getTime());
 check(
   '按额度：次数用完还能出门',
-  Number(world.store.data.autoSessions[mustDay]) === 4 && /按额度/.test(mustPushes.at(-1)?.text ?? ''),
+  Number(world.store.data.autoNudged?.[mustDay] ?? 0) === 2 && /按额度/.test(mustPushes.at(-1)?.text ?? ''),
   JSON.stringify(mustPushes.at(-1) ?? {}).slice(0, 200),
 );
 const quotaNext = world.autoNextView();

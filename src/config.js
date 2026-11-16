@@ -487,11 +487,14 @@ const INTERACT = {
         'x-hot': true,
       },
       [P + 'shareWithOwnerPerDay']: {
-        type: 'int',
-        min: 0,
-        max: 5,
+        // 宿主按 JSON Schema 渲染：必须是 integer + minimum/maximum，
+        // 写成 int/min/max 不会报错，但面板上不给输入框（2026-11-17 用户反馈「填不了」）
+        type: 'integer',
+        minimum: 0,
+        maximum: 5,
         title: '每天最多主动提几次',
         description: '怕吵就填 0（等于关掉）或 1。填 2 以上她可能会一天提好几次。',
+        'x-suffix': ' 次',
       },
       [P + 'commentBlockedDm']: {
         type: 'boolean',

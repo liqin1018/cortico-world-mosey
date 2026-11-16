@@ -7160,6 +7160,7 @@ export class StrollWorld {
         return { ok: true };
       }
       if (method === 'reset_usage') return this.resetToday();
+      if (method === 'restore_defaults') return this.restoreDefaults();
       if (method === 'set_background') {
         const on = args[0] === true || args[0] === 'true' || args[0] === 1 || args[0] === 'on';
         this.persist({ background: on });
@@ -7628,6 +7629,29 @@ export class StrollWorld {
   }
 
   /** 主人手动清零今天的计数（测试/误操作后不用等第二天）。 */
+  /**
+   * 把所有设置恢复成默认值。
+   *
+   * **账号信息不重置**：主人 UID / 昵称 / 抖音主页这些重填一遍很烦，
+   * 而且跟「参数」没关系。开关状态（enabled）也保留——恢复默认不该顺手把插件关掉。
+   *
+   * 默认值本身按「大多数人通用」调过（日常档：10 赞 / 4 评 / 3 次出门 / 150 分钟间隔）。
+   */
+  restoreDefaults() {
+    const keep = {
+      ownerUid: String(this.cfg.ownerUid ?? ''),
+      ownerName: String(this.cfg.ownerName ?? ''),
+      ownerDouyin: String(this.cfg.ownerDouyin ?? ''),
+      enabled: this.cfg.enabled !== false,
+    };
+    const next = { ...DEFAULTS, ...keep };
+    this.persist(next);
+    // 内存里也同步一份：面板立刻能看到新值，不用等宿主热更新
+    Object.assign(this.cfg, next);
+    this.log?.info?.('stroll restore defaults', { kept: Object.keys(keep) });
+    return { ok: true, kept: Object.keys(keep).filter((k) => k !== 'enabled') };
+  }
+
   resetToday() {
     const day = dayKey(new Date(), this.timeZone);
     this.store.data.usage[day] = {};

@@ -714,6 +714,7 @@ export default {
           button('暂停 24 小时', () => brake(24)),
           button('解除手刹', () => resume()),
           button('重置今日计数', () => resetUsage()),
+          button('恢复默认参数', () => restoreParams()),
         );
         const toolHint = el('p', '手刹只停「自己出门」，不影响你现在让她做的事。', 'stroll-muted');
         toolCard.append(toolGrid, toolHint);
@@ -2459,6 +2460,28 @@ export default {
               result?.ok ? `今天（${result.day}）的计数已清零。` : result?.error || '没成功',
               result?.ok === false,
             );
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+          }
+        }
+
+        /**
+         * 恢复默认参数：二次点击确认（宿主面板里没有 window.confirm）。
+         * 5 秒内点两下才算数，避免手滑把设置全清了。
+         */
+        let restoreArmed = 0;
+        async function restoreParams() {
+          if (Date.now() - restoreArmed > 5000) {
+            restoreArmed = Date.now();
+            msgSet('再点一次「恢复默认参数」确认：所有设置回到默认值（主人账号信息保留）。', true);
+            return;
+          }
+          restoreArmed = 0;
+          msgSet('正在恢复默认参数…');
+          try {
+            const result = await ctx.invoke('restore_defaults');
+            await refresh();
+            msgSet(result?.ok ? '已恢复默认参数（账号信息没动）。' : result?.error || '没成功', result?.ok === false);
           } catch (error) {
             msgSet(error.message || String(error), true);
           }

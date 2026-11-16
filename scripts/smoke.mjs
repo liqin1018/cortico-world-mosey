@@ -922,6 +922,8 @@ const wasRunning = world.running;
 world.running = true;
 world.cfg.autoSessionsPerDay = 3;
 world.store.data.autoSessions[mustDay] = 0;
+// 催促次数也要清零：新加的「催太多次就停」会读到前面用例留下的计数
+world.store.data.autoNudged = {};
 world.store.data.lastAutoAt = Date.now() - 31 * 60 * 1000;
 world.store.data.mustNudge = { day: mustDay, n: 0, at: 0 };
 const mustNoon = new Date();
@@ -933,7 +935,7 @@ check(
   JSON.stringify(mustPushes).slice(0, 160),
 );
 // 正常间隔到了照样出门，推送里仍然告诉她先补差距大的
-world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+world.store.data.lastAutoAt = Date.now() - 151 * 60 * 1000;
 for (let i = 0; i < 12 && !mustPushes.length; i += 1) await world.tick(mustNoon.getTime());
 check(
   '按次数模式：到点出门时仍提示先补必做',
@@ -992,7 +994,7 @@ check('按次数：次数用完就不再出门', Number(world.store.data.autoSes
 
 // 按额度：次数用完照样出门，直到主动额度做满（按额度不压缩间隔，等满 90 分钟）
 world.cfg.outingMode = 'quota';
-world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+world.store.data.lastAutoAt = Date.now() - 151 * 60 * 1000;
 mustPushes.length = 0;
 await world.tick(mustNoon.getTime());
 check(
@@ -1008,13 +1010,14 @@ const usageSnap = { ...(world.store.data.usage[mustDay] ?? {}) };
 const full = {};
 for (const key of ['like', 'comment', 'follow', 'post', 'save']) full[key] = world.policy.cap(key).daily;
 world.store.data.usage[mustDay] = { ...usageSnap, ...full };
-world.store.data.autoSessions[mustDay] = 4;
-world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+// 按额度模式不看出门次数；这里从 4 改成 1，避免撞上 token 预算分支（6000/1500=4）
+world.store.data.autoSessions[mustDay] = 1;
+world.store.data.lastAutoAt = Date.now() - 151 * 60 * 1000;
 mustPushes.length = 0;
 await world.tick(mustNoon.getTime());
 check(
   '按额度：主动额度做满就收工',
-  Number(world.store.data.autoSessions[mustDay]) === 4 && mustPushes.length === 0 && world.quotaLeftForOuting() === 0,
+  Number(world.store.data.autoSessions[mustDay]) === 1 && mustPushes.length === 0 && world.quotaLeftForOuting() === 0,
 );
 check('私信/群聊不算进「额度做满」', world.policy.cap('dm').daily > 0 && world.policy.remaining('dm').daily > 0);
 check('面板：做满显示收工', world.autoNextView().done === true && world.autoNextView().reason === 'quota');
@@ -1057,7 +1060,7 @@ world.store.clearRisk();
 world.cfg.approval = 'dry_run';
 world.store.data.usage[mustDay] = usageSnap;
 world.store.data.autoSessions[mustDay] = 0;
-world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+world.store.data.lastAutoAt = Date.now() - 151 * 60 * 1000;
 mustPushes.length = 0;
 await world.tick(mustNoon.getTime());
 check('只读模式不会自己出门', mustPushes.length === 0 && world.autoNextView()?.reason === 'none');
@@ -1076,7 +1079,7 @@ world.store.data.drafts = Array.from({ length: 8 }, (_, i) => ({
   createdAt: new Date().toISOString(),
 }));
 world.store.data.autoSessions[mustDay] = 0;
-world.store.data.lastAutoAt = Date.now() - 91 * 60 * 1000;
+world.store.data.lastAutoAt = Date.now() - 151 * 60 * 1000;
 mustPushes.length = 0;
 await world.tick(mustNoon.getTime());
 check('草稿堆着就不出门', mustPushes.length === 0 && world.autoNextView()?.reason === 'drafts');

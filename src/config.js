@@ -33,17 +33,17 @@ export const DEFAULTS = {
   ownerName: '',
   ownerDouyin: '',
 
-  dailyLikes: 16,
-  dailyComments: 6,
+  dailyLikes: 10,
+  dailyComments: 4,
   /** 私信（发给别人）：B站和抖音共用一个池子；抖音群聊不算私信，走下面 dailyGroups */
   dailyDms: 10,
   /** 抖音群聊（群里说话） */
   dailyGroups: 20,
-  dailyFollows: 3,
-  dailyPosts: 2,
+  dailyFollows: 2,
+  dailyPosts: 1,
   /** 抖音动态单独一个额度，和 B站 分开算 */
-  dailyPostsDouyin: 2,
-  dailySaves: 8,
+  dailyPostsDouyin: 1,
+  dailySaves: 5,
   /** 每天最多看几次（brief/feed/open 这类只读调用，不管谁叫都算） */
   browseDailyCap: 60,
   /** 勾上=这项是「每天必须完成」的目标，而不只是上限 */
@@ -98,9 +98,9 @@ export const DEFAULTS = {
   outingMode: 'sessions',
   /** 0 = 不自己出门（等同于 outingMode=off）；按次数模式时一天出门几次。 */
   autoOuting: true,
-  autoSessionsPerDay: 5,
+  autoSessionsPerDay: 3,
   /** 两次自动出门之间至少隔多少分钟；和主人手动互动无关。 */
-  autoGapMinutes: 90,
+  autoGapMinutes: 150,
   /** 只在几点到几点自己出门。from===to 视为全天；from>to 支持跨天（22 到 6）。 */
   outingFrom: 9,
   outingTo: 23,
@@ -119,7 +119,6 @@ export const DEFAULTS = {
   commentBlockedDm: true,
   mentionOwnerOnComment: false,
   shareWindowIdleSec: 0,
-  creatorAutoProbe: true,
   creatorAutoProbe: true,
   /** 打开视频后窗口留多久（秒）；0 = 看完就关。后台模式不弹窗。 */
   keepWindowSeconds: 90,
@@ -158,7 +157,7 @@ export const DEFAULTS = {
   /** 复用应用里已有的 B站登录资料（通常是小号/桌宠号）。 */
   sharedBiliCookie: true,
   /** 每天给这个小家伙的模型预算，超了就只读不主动出门。 */
-  tokenDailyBudget: 9000,
+  tokenDailyBudget: 6000,
   commentMaxChars: 120,
   newAccountRamp: false,
   /** 她开始看东西时怎么提醒你：off / panel（面板浮条）/ chat（顺便在对话里说一句）。 */

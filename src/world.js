@@ -7632,6 +7632,17 @@ export class StrollWorld {
     const day = dayKey(new Date(), this.timeZone);
     this.store.data.usage[day] = {};
     this.store.data.lastWriteAt = 0;
+    /**
+     * 出门次数也要一起清。
+     *
+     * 2026-11-16 用户反馈：面板上是 1/8，点「重置今日计数」还是 1/8。
+     * 因为那个 1/8 是 autoSessions（今天出门几次），而这里以前只清 usage（动作额度）。
+     * 「重置今日计数」在用户眼里就是「今天的数全归零」，两个都得清。
+     */
+    this.store.data.autoSessions = { ...(this.store.data.autoSessions ?? {}), [day]: 0 };
+    this.store.data.autoNudged = { ...(this.store.data.autoNudged ?? {}), [day]: 0 };
+    // 顺手把「上次自动出门」也清掉：不然清完还要再等一个间隔才催
+    this.store.data.lastAutoAt = 0;
     // 顺带清掉「今天做过了」的去重键，不然清零后还是评不了同一条
     const keep = {};
     for (const [key, at] of Object.entries(this.store.data.seen ?? {})) {

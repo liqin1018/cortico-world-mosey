@@ -6262,9 +6262,14 @@ export class StrollWorld {
         if (action === 'reply') return { ok: false, error: '抖音楼中楼回复暂未开放；先发一条评论。' };
         target = await this.douyin.idOf(targetRaw);
         if (!target) return { ok: false, error: '给个抖音视频链接/ID。' };
-        const check = this.policy.check(action, platform, target, { quotaAction: 'comment', userInitiated: asked });
+        const isReply = action === 'reply';
+        const check = this.policy.check(action, platform, target, {
+          quotaAction: `comment:${platform}`,
+          skipQuota: isReply,
+          userInitiated: asked,
+        });
         if (!check.ok) return check;
-        return { ok: true, action, platform, target, text, mentionOwner, mentionName };
+        return { ok: true, action, platform, target, text, mentionOwner, mentionName, countQuota: !isReply };
       }
 
       let kind = 'video';
@@ -6351,9 +6356,16 @@ export class StrollWorld {
       if (!dedupeKey && action === 'comment') {
         dedupeKey = `${platform}:comment:${target}:${String(text ?? '').slice(0, 24).replace(/\s+/g, '')}`;
       }
-      const check = this.policy.check(action, platform, target, { quotaAction: 'comment', dedupeKey, userInitiated: asked });
+      const isReply = action === 'reply';
+      const check = this.policy.check(action, platform, target, {
+        // 评论按平台各算各的额度；reply 不占额度（额度是防她自己刷，不是防她回别人）
+        quotaAction: `comment:${platform}`,
+        skipQuota: isReply,
+        dedupeKey,
+        userInitiated: asked,
+      });
       if (!check.ok) return check;
-      return { ok: true, action, platform, target, text, mentionOwner, mentionName, root, parent, kind, dynamicId, articleId, oid, commentType, dedupeKey };
+      return { ok: true, action, platform, target, text, mentionOwner, mentionName, root, parent, kind, dynamicId, articleId, oid, commentType, dedupeKey, countQuota: !isReply };
     }
 
     if (action === 'post') {

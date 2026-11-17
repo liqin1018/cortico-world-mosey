@@ -16,7 +16,14 @@ const RATE_RESET_MS = 60 * 60 * 1000;
  */
 const ACTION_CAPS = {
   like: { daily: 'dailyLikes', weeklyFactor: 7, label: '点赞', short: '赞' },
-  comment: { daily: 'dailyComments', weeklyFactor: 7, label: '评论', short: '评' },
+  // 评论按平台分开：B站走 API 基本不被压、可以多；抖音连着发就判机器、必须少
+  comment: {
+    daily: 'dailyComments',
+    byPlatform: { bilibili: 'dailyComments', douyin: 'dailyCommentsDouyin' },
+    weeklyFactor: 7,
+    label: '评论',
+    short: '评',
+  },
   dm: { daily: 'dailyDms', weeklyFactor: 7, label: '私信', short: '私' },
   group: { daily: 'dailyGroups', weeklyFactor: 7, label: '群聊', short: '群' },
   follow: { daily: 'dailyFollows', weeklyFactor: 7, label: '关注', short: '关' },
@@ -183,6 +190,16 @@ export class Policy {
         until: wait.until,
       };
     }
+    /**
+     * 回别人评论（reply）不占额度。
+     *
+     * 额度是防「她自己刷太多」的，不该防「有人找她、她回一句」。
+     * 以前 reply 被 capAction 映射成 comment，B站评论额度满了就回不了评论，
+     * 别人会觉得她「已读不回」（2026-11-17 用户提出）。
+     * 节流还在（下面 minGap），只是不扣额度。
+     *
+     * 实现：调用方传 skipQuota: true（参数在函数签名里，这里不再声明）。
+     */
     const minGap = Math.max(5, Number(this.cfg.minGapSeconds ?? 20));
     const sincePlat = Date.now() - Number((this.store.data.lastWriteByPlat ?? {})[platform] ?? 0);
     const sinceAny = Date.now() - Number(this.store.data.lastWriteAt ?? 0);
@@ -211,7 +228,10 @@ export class Policy {
      * 默认 8 分钟，0 = 不限制。
      */
     if (!chatty && action === 'comment') {
-      const cm = Math.max(0, Number(this.cfg.commentGapMinutes ?? 8));
+      // 按平台各算各的：B站默认 2 分钟（API 发得快、不怕），抖音默认 8 分钟（连着发就判机器）
+      const field = platform === 'douyin' ? 'commentGapDouyin' : 'commentGapBili';
+      const fallback = platform === 'douyin' ? 8 : 2;
+      const cm = Math.max(0, Number(this.cfg[field] ?? fallback));
       if (cm > 0) {
         const sinceComment = Date.now() - Number((this.store.data.lastCommentAt ?? {})[platform] ?? 0);
         const need = cm * 60 * 1000;
@@ -220,7 +240,7 @@ export class Policy {
           return {
             ok: false,
             code: 'COMMENT_GAP',
-            message: `上一条评论才过去 ${Math.round(sinceComment / 60000)} 分钟，再等 ${waitMin} 分钟（「评论间隔」设的是 ${cm} 分钟）。连续几条评论是抖音判机器最强的信号，别急着发。`,
+            message: `上一条${platform === 'douyin' ? '抖音' : 'B站'}评论才过去 ${Math.round(sinceComment / 60000)} 分钟，再等 ${waitMin} 分钟（这条限制设的是 ${cm} 分钟）。`,
           };
         }
       }

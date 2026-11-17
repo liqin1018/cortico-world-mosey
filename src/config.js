@@ -120,7 +120,9 @@ export const DEFAULTS = {
   hostileReply: 'cold',
   shareWithOwner: true,
   shareWithOwnerPerDay: 1,
-  commentGapMinutes: 8,
+  dailyCommentsDouyin: 2,
+  commentGapBili: 2,
+  commentGapDouyin: 8,
   commentBlockedDm: true,
   mentionOwnerOnComment: false,
   shareWindowIdleSec: 0,
@@ -465,16 +467,38 @@ const QUOTA = {
         maximum: 500,
         'x-suffix': ' 次',
       },
-      [P + 'commentGapMinutes']: {
+      [P + 'dailyCommentsDouyin']: {
+        type: 'integer',
+        minimum: 0,
+        maximum: 100,
+        title: '每天最多抖音评论',
+        description:
+          '抖音单独一个数：B站可以多，抖音必须少。默认 2。\n' +
+          '**连着发几条评论是抖音判机器最强的信号**，所以这个数比 B站的小很多。' +
+          '回别人评论（reply）不占这个额度。',
+        'x-suffix': ' 条',
+        'x-hot': true,
+      },
+      [P + 'commentGapBili']: {
         type: 'integer',
         minimum: 0,
         maximum: 120,
-        title: '两条评论之间至少隔几分钟',
+        title: 'B站：两条评论之间至少隔几分钟',
         description:
-          '**这个比「每天最多评论」更影响会不会被压。** 抖音判机器最强的信号是「短时间内连续评论」，' +
+          'B站走 API 发评论，基本不会被压，所以默认只要 2 分钟。' +
+          '调大只会让她 B站评论变慢，没什么好处。0 = 不限制。',
+        'x-suffix': ' 分钟',
+      },
+      [P + 'commentGapDouyin']: {
+        type: 'integer',
+        minimum: 0,
+        maximum: 120,
+        title: '抖音：两条评论之间至少隔几分钟',
+        description:
+          '**抖音这个比「每天最多评论」更影响会不会被压。** 抖音判机器最强的信号是「短时间内连续评论」，' +
           '不是单条怎么发。默认 8 分钟；0 = 不限制（不建议）。\n' +
           '如果评论还是被压（面板「最近异常」里会显示「抖音评论没公开」），先把这个调到 15~20，' +
-          '再把「每天最多评论」降到 2~4。',
+          '再把「每天最多抖音评论」降到 1~2。',
         'x-suffix': ' 分钟',
         'x-hot': true,
       },
@@ -1179,7 +1203,9 @@ export const POLICY_FIELDS = {
   hostileReply: { type: 'enum', values: ['cold', 'ignore', 'sharp'] },
   shareWithOwner: { type: 'boolean' },
   shareWithOwnerPerDay: { type: 'int', min: 0, max: 5 },
-  commentGapMinutes: { type: 'integer', min: 0, max: 120 },
+  dailyCommentsDouyin: { type: 'integer', min: 0, max: 100 },
+  commentGapBili: { type: 'integer', min: 0, max: 120 },
+  commentGapDouyin: { type: 'integer', min: 0, max: 120 },
   commentBlockedDm: { type: 'boolean' },
   mentionOwnerOnComment: { type: 'boolean' },
   shareWindowIdleSec: { type: 'number' },

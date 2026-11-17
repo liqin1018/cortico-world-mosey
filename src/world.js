@@ -7239,7 +7239,9 @@ export class StrollWorld {
         .map(([k]) => k);
       this.push(
         'stroll.digest',
-        `今天的记录：${bits.join('、')}。${top.length ? `最常看的是 ${top.join(' 和 ')}。` : ''}`,
+        // 同一个道理（2026-11-17 群友提醒）：这是给她看的素材，不是让她转述的周报
+        `你今天的记录：${bits.join('、')}。${top.length ? `最常看的是 ${top.join(' 和 ')}。` : ''}\n` +
+          '主人问起来再说，不用主动播报，更不要逐条念这些数字。',
         { day, n: acts.length },
         'debounce',
       ).catch(() => {});

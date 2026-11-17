@@ -815,7 +815,7 @@ export default {
           const dy = s.douyin ?? {};
           // 「最近异常」：有才显示，没有就整块隐藏（不占版面）
           {
-            const list = s.anomalies ?? [];
+            const list = data?.anomalies ?? [];
             anomalyList.replaceChildren();
             anomalySec.style.display = list.length ? '' : 'none';
             anomalyHint.textContent = list.length ? `最近 ${list.length} 条` : '';
@@ -831,7 +831,7 @@ export default {
           }
           // 「今天」卡片：今天做了什么 + 最近跟谁聊过（都是纯聚合，不走网络）
           {
-            const dg = s.digest ?? {};
+            const dg = data?.digest ?? {};
             const bits = [
               dg.like ? `点赞 ${dg.like}` : '',
               dg.comment ? `评论 ${dg.comment}` : '',
@@ -847,7 +847,7 @@ export default {
               digestCard.append(el('p', `今天做了 ${dg.total} 件事：${bits.join('、') || '（都是聊天）'}`, 'stroll-digest-line'));
               if (dg.top?.length) digestCard.append(el('p', `最常看的是 ${dg.top.join(' 和 ')}`, 'stroll-muted'));
             }
-            const ppl = s.people ?? [];
+            const ppl = data?.people ?? [];
             digestHint.textContent = ppl.length ? `最近聊过 ${ppl.length} 个人` : '';
             for (const who of ppl.slice(0, 3)) {
               digestCard.append(

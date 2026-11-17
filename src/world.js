@@ -6878,6 +6878,26 @@ export class StrollWorld {
       }
 
       /**
+       * 抖音评论被压 / 还在审核：**记一条异常**（面板「最近异常」能看到）。
+       *
+       * 2026-11-17 网友反馈「评论发的出去但是看不到，我这也没记录」——
+       * 以前只有「@ 主人的评论被压」才会走下面的私信兜底，
+       * 她自己出门随手评的那条被压，主人完全不知情，面板上也没有任何痕迹。
+       * 不打扰（不发私信），但必须留痕。
+       */
+      if (
+        platform === 'douyin' &&
+        (action === 'comment' || action === 'reply') &&
+        result &&
+        result.ok !== false &&
+        result.visible === false
+      ) {
+        const st = Number(result.status ?? 0);
+        const why = st === 2 ? '只有自己看得见' : st === 7 ? '还在审核' : `状态 ${st || '未知'}`;
+        this.noteAnomaly(`抖音评论没公开（${why}）：${String(text ?? '').slice(0, 30)}`, { kind: 'COMMENT_BLOCKED' });
+      }
+
+      /**
        * 抖音评论被压住时，补一条私信告诉主人。
        *
        * 抖音会把一部分评论判成「只有自己可见」（status=2）或「审核中」（status=7），

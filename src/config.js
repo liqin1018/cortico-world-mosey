@@ -13,6 +13,7 @@ export const DEFAULTS = {
   approval: 'confirm',
   allowFollow: true,
   /** browser：她自己点；off：抖音关注改手动（网页端对部分账号不生效） */
+  douyinCommentVia: 'manual',
   douyinFollowMode: 'browser',
   allowDm: true,
   allowPost: true,
@@ -539,6 +540,19 @@ const INTERACT = {
         type: 'boolean',
         title: '可以关注别人',
         description: '每次都要按审批规则来。',
+      },
+      [P + 'douyinCommentVia']: {
+        type: 'string',
+        title: '抖音评论怎么发',
+        'x-options': 'stroll-comment-via',
+        default: 'manual',
+        description:
+          '**打字**：真的点开评论框、逐字输入（每字 22~32ms）、再按回车。和人在 App 里操作一样，' +
+          '被抖音压成「只有自己可见」的概率明显低，代价是每条多等 5~10 秒。\n' +
+          '**接口**：直接调发布接口，1 秒出结果，但实测更容易被判成 status=2 / 7（别人看不到）。\n' +
+          '抖音对新环境有单独的自动化判断，**没有哪种方式能保证 100% 不被压**；' +
+          '被打字模式压了的话，把评论频率调低（每日评论 4 → 2）再试。',
+        'x-hot': true,
       },
       [P + 'douyinFollowMode']: {
         type: 'string',
@@ -1092,6 +1106,7 @@ export const POLICY_FIELDS = {
   postImageApiBase: { type: 'string', max: 300 },
   postImageApiKey: { type: 'string', max: 300 },
   postImageModel: { type: 'string', max: 120 },
+  douyinCommentVia: { type: 'enum', values: ['manual', 'api'] },
   douyinFollowMode: { type: 'enum', values: ['browser', 'off'] },
   allowDm: { type: 'boolean' },
   allowPost: { type: 'boolean' },

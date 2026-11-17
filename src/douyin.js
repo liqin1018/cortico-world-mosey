@@ -3812,10 +3812,22 @@ export class DouyinBrowser {
       const page = await this.getPage();
       if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，发不了评论');
 
+      /**
+       * 评论走接口还是走「真的点输入框打字」，由配置决定。
+       *
+       * 2026-11-17 网友反馈 + 用户要求：接口发出去的评论容易被抖音压成
+       * status=2（只有自己可见）或 status=7（一直审核），手动在 App 里打字的却没事。
+       * 差别就在「请求特征」——逐字输入 + 点发送才是人。
+       *
+       * manual（默认）：跳过快路径，走下面「点评论框 → type(delay 22ms) → Enter」。
+       * api：原来那条 1 秒出结果的路，快但更容易被压。
+       */
+      const viaApi = String(this.cfg.douyinCommentVia ?? 'manual') === 'api';
+
       // ---- 快路径：不带 @ 直接调发布接口 ----
       // 1 秒出结果，省掉「等评论区 hydrate（约 5 秒）+ 点两下 + 打字 + 等回执」
       // 前提是页面得停在这条视频上：实测从抖音首页调会被 403 挡回来，从 /video/ 页调才通。
-      if (!mention) {
+      if (!mention && viaApi) {
         await this.ensureVideo(page, id, { note: /\/note\//.test(String(idOrUrl)), quick: true });
         const fast = await this.commentViaApi(page, id, text).catch((e) => {
           if (e?.code === 'LOGIN_REQUIRED') throw e;

@@ -26,6 +26,12 @@ export const STROLL = {
         { value: 'off', label: zh ? '不提醒' : 'Off' },
       ];
     }
+    if (kind === 'stroll-comment-via') {
+      return [
+        { value: 'manual', label: zh ? '像人一样打字（稳，慢 5~10 秒）' : 'Type like a human (stable, slower)' },
+        { value: 'api', label: zh ? '调接口（快，容易被压）' : 'Call API (fast, often hidden)' },
+      ];
+    }
     if (kind === 'stroll-post-kind') {
       return [
         { value: 'text', label: zh ? '纯文字' : 'Text only' },

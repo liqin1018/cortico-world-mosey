@@ -416,6 +416,20 @@ export class Policy {
       usage[action] = this.store.usage(action);
       caps[action] = this.remaining(action).dailyCap;
     }
+    /**
+     * 评论和动态按平台拆了额度，面板上要的是「两个平台加起来」。
+     * 以前只取 B站那个数，抖音那份不计入——表现就是 B站 30 + 抖音 4，
+     * 面板却只显示 30/30（2026-11-17 用户反馈）。
+     */
+    for (const [action, firstKey, secondKey] of [
+      ['comment', 'dailyComments', 'dailyCommentsDouyin'],
+      ['post', 'dailyPosts', 'dailyPostsDouyin'],
+    ]) {
+      caps[action] =
+        Math.max(0, Number(this.cfg[firstKey] ?? 0)) + Math.max(0, Number(this.cfg[secondKey] ?? 0));
+      usage[action] =
+        this.store.usage(`${action}:bilibili`) + this.store.usage(`${action}:douyin`) + this.store.usage(action);
+    }
     return {
       day: dayKey(this.now(), this.timeZone),
       week: weekKey(this.now(), this.timeZone),

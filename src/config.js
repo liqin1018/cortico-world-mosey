@@ -194,46 +194,29 @@ const BASIC = {
       [P + 'enabled']: {
         type: 'boolean',
         title: '启用摸鱼',
-        description:
-          '总开关。关掉后不刷、不看、不发，已有的记录和设置都留着。' +
-          '临时不想让她动就关这个，比逐个平台关要省事。',
+        description: '总开关。关掉后不刷不看也不发，记录和设置都留着。',
         'x-hot': true,
       },
       [P + 'bilibili']: {
         type: 'boolean',
         title: '去 B站',
-        description:
-          '要不要去 B站。' +
-          '用应用里已有的 B站登录态；只读（看视频、翻关注流）不需要登录，点赞评论才需要。' +
-          '关掉 = 完全不碰 B站，面板上也不显示 B站相关的块。',
+        description: '要不要去 B站。只读不用登录，点赞评论才需要登录态。',
       },
       [P + 'douyin']: {
         type: 'boolean',
         title: '去抖音',
-        description:
-          '要不要去抖音。' +
-          '抖音用独立的浏览器资料目录（不和你的日常浏览器混），**第一次要在面板里扫码登录**。' +
-          '关掉 = 完全不碰抖音，私信监听、群监听、一起刷全部停。',
+        description: '要不要去抖音。用独立浏览器资料，第一次要在面板扫码登录。',
       },
       [P + 'background']: {
         type: 'boolean',
         title: '后台逛（不弹网页）',
-        description:
-          '她做绝大多数事情时，要不要开浏览器窗口。' +
-          '**开着（默认）**：全在后台读，桌面什么都不弹，也不抢你的鼠标。' +
-          '例外只有三种：扫码登录、一起看、发抖音图文的草稿模式——这三种必须真开窗你才能操作，用完会自己关（草稿模式留 10 分钟）。' +
-          '关掉 = 全程开窗，你能看着她做什么，但会挡屏幕。',
+        description: '默认开后：全在后台读。只有扫码登录、一起看、发抖音图文会开窗，用完自己关。',
         'x-hot': true,
       },
       [P + 'approval']: {
         type: 'string',
         title: '公开动作怎么放行',
-        description:
-          '公开动作（评论、关注、发动态、私信）要不要先问你。' +
-          '**逐条确认**（默认）：全停进草稿箱，你点头才发。' +
-          '**低风险自动**：点赞、收藏、关注自己发，评论和动态仍然问你。' +
-          '**按额度自动**：额度内全自动，不问你（额度仍然是硬上限）。' +
-          '**只演练**：什么都不真发，只练流程。',
+        description: '评论/关注/发动态/私信要不要先问你。默认逐条确认。',
         'x-options': 'stroll-approval',
         'x-hot': true,
         'x-warning': true,
@@ -256,37 +239,23 @@ const OWNER = {
       [P + 'ownerUid']: {
         type: 'string',
         title: '主人 B站 UID',
-        description:
-          '你的 B站 UID（数字那串）。' +
-          '填了之后她才能在评论/动态里真 @ 你（会发通知），也才能给你发私信。' +
-          '留空 = 只能在桌面上跟你说，评论区 @ 不了（@ 了也收不到通知）。',
+        description: '你的 B站 UID。填了才能在评论里真 @ 你、给你发私信。',
         'x-hot': true,
       },
       [P + 'ownerName']: {
         type: 'string',
         title: '主人 B站昵称',
-        description:
-          '你的 B站昵称。' +
-          'B站 @ 人认的是昵称；填了 UID 之后程序会自己去查昵称，**查不到才用这里**。' +
-          '所以一般不用填；只有 UID 查不出来（改名、隐私设置）时才手动补。',
+        description: '你的 B站昵称。填了 UID 会自动查，查不到才用这里。',
       },
       [P + 'ownerDouyin']: {
         type: 'string',
         title: '主人抖音（主页链接 / sec_uid / 抖音号）',
-        description:
-          '你的抖音账号，三种填法都认，**推荐第一种**。' +
-          '**主页分享链接**（最稳）：抖音 App → 我 → 右上角分享 → 复制链接，整段粘进来（分享文案里夹着链接也行）。' +
-          '**sec_uid**：MS4w 开头那串。' +
-          '**纯抖音号**：填了也解析不了——抖音搜索页对后台浏览器是空的，这条路走不通。' +
-          '注意：抖音不能给自己发私信，所以桌宠登录的那个抖音号必须和你不是同一个。',
+        description: '粘主页分享链接最稳（App → 我 → 分享 → 复制）。纯抖音号解析不了。',
       },
       [P + 'booksDir']: {
         type: 'string',
         title: '书库文件夹',
-        description:
-          '她想读的书放在哪个文件夹（txt / md）。' +
-          '留空 = 用默认目录。可以直接粘路径，也可以在面板「在读」卡片点「选文件夹」用系统窗口挑。' +
-          '子文件夹也会扫，所以按作者/主题分目录不用另外配。',
+        description: '她想读的书放这（txt/md）。留空用默认目录。',
         'x-hot': true,
       },
     },
@@ -308,90 +277,59 @@ const POSTING = {
       [P + 'postKind']: {
         type: 'string',
         title: '发哪种动态',
-        description:
-          '发出去的东西长什么样，B站和抖音都按这个走。' +
-          '**纯文字** = 一段话；**纯图片** = 只发图；**图文** = 图 + 一段话。' +
-          '选后两种必须先配好紧接着的「配图从哪来」——**没图时不会自己现画**，会退回纯文字。',
+        description: '纯文字 / 纯图片 / 图文，B站和抖音都按这个发。选后两种要先配好「配图从哪来」。',
         'x-options': 'stroll-post-kind',
         'x-hot': true,
       },
       [P + 'shareWindowIdleSec']: {
         type: 'number',
         title: '分享窗口空闲多久关（秒）',
-        description:
-          '抖音发视频卡片要单独开一个浏览器窗口，这个值控制它空闲多久自动关。' +
-          '**默认 0 = 用完立刻关**（不占内存，后台不会挂着浏览器）。' +
-          '连着分享好几个视频时可以填 300 复用窗口，省掉每次 2~3 秒的冷启动。',
+        description: '抖音分享卡片的窗口空闲多久关。默认 0 = 用完立刻关。',
         minimum: 0,
         maximum: 3600,
       },
       [P + 'douyinPostMode']: {
         type: 'string',
         title: '抖音图文怎么发',
-        description:
-          '抖音发图文时，最后那一下你按还是她按。' +
-          '**写好暂存，你手动点发布**（默认，推荐）：她选图、填标题正文、选好自主声明，存成草稿；你在创作者中心看一眼点发布。**发布权在你手上，不会撞抖音的「本人验证」。**' +
-          '**让她自己发**（全自动）：号养熟了、发布不再要验证码再用。她会开一个**屏幕外的独立窗口**自己发，发完关掉，不打扰你；但如果弹验证码，你看不到也点不了，那次就会失败。' +
-          '新号、新设备上抖音发布时要短信验证码或扫码——那是平台的本人确认，脚本绕不过去也不该绕。',
+        description: '默认「写好暂存你点发布」。号养熟了可以换「她自己发」（开屏幕外窗口，验证码你看不到）。',
         'x-options': 'stroll-douyin-post-mode',
         'x-hot': true,
       },
       [P + 'postImageFrom']: {
         type: 'string',
         title: '配图从哪来',
-        description:
-          '配图从哪里取。**图片来源严格按这里走：不跨目录，也不会自作主张现画。**' +
-          '**自己生成** = 只用生图接口存图的目录（在下面「生成的图存到哪」那里配）。' +
-          '**本地目录** = 只用你填的那个文件夹（装了别的生图插件就选这个，把它的输出目录填到下面）。' +
-          '想现画一张新的：先让她画（test_image），拿到路径后用 file 参数指定再发。',
+        description: '配图只能从这里取：不跨目录、也不会自己现画。想现画先让她画好再发。',
         'x-options': 'stroll-post-image-from',
       },
       [P + 'postImageDir']: {
         type: 'string',
         title: '本地图片目录',
-        description:
-          '选「本地目录」时用：配图从哪个文件夹取。' +
-          '填别的生图插件的输出目录就行，会自动往下找两层子目录、挑最新的一张。' +
-          '正斜杠反斜杠都行，比如 D:/图片/我的图。',
+        description: '选「本地目录」时生效。会自动往下找两层，挑最新的一张。',
       },
       [P + 'postImageStyle']: {
         type: 'string',
         title: '出图风格',
-        description:
-          '自己生成图片时，拼进提示词的风格描述。' +
-          '比如「柔和的生活照」「胶片颗粒」「阴天冷色调」。留空就用默认的写实风。' +
-          '这一句会直接影响出图效果，建议写具体（「浴室暖光、水汽」比「好看」有用）。',
+        description: '出图风格，拼进提示词。比如「胶片颗粒」「阴天冷色调」。',
       },
       [P + 'postImageSaveDir']: {
         type: 'string',
         title: '生成的图存到哪',
-        description:
-          '生成的图存在哪。' +
-          '留空 = 存在插件数据目录下的 media。填一个目录就全存那里，方便你用资源管理器直接翻。' +
-          '注意和上面「本地图片目录」不是一回事：**那个是从哪读，这个是存到哪。**',
+        description: '生成的图存在哪。留空存插件目录。注意这是「存」，上面那个是「读」。',
       },
       [P + 'postImageApiBase']: {
         type: 'string',
         title: '出图接口地址',
-        description:
-          '出图接口的 base URL（OpenAI 兼容格式）。' +
-          '比如 https://api.openai.com/v1。只存在本地配置文件里。' +
-          '用国内的兼容服务（硅基流动、OpenRouter 之类）就填它们给的地址。',
+        description: 'OpenAI 兼容的接口地址，比如 https://api.openai.com/v1。',
       },
       [P + 'postImageApiKey']: {
         type: 'string',
         title: '出图密钥',
-        description:
-          '出图接口的密钥。只存在本地配置文件里，不会发到别处。' +
-          '填过就留空、不用重复填；要换密钥才粘贴新的覆盖。',
+        description: '出图密钥。只存本地。填过就留空，要换才重新粘贴。',
       },
       [P + 'postImageModel']: {
         type: 'string',
         title: '出图模型',
-        description:
-          '用哪个模型出图。' +
-          '比如 gpt-image-1、flux-schnell、seedream-3。' +
-          '要和上面「出图接口地址」是同一家支持的模型，否则会返回 404。',
+        description: '出图模型，比如 gpt-image-1、flux-schnell、seedream-3。',
       },
     },
   },
@@ -416,10 +354,7 @@ const QUOTA = {
       [P + 'dailyLikes']: {
         type: 'integer',
         title: '每天最多点赞',
-        description:
-          '一天最多点几个赞（B站 + 抖音合计，不分开算）。' +
-          '默认 10。想让她的存在感更强可以调到 15~20；号还新、或者刚被限流过，降到 3~5 更稳。' +
-          '0 = 完全不点赞。',
+        description: '一天最多赞几个（B站+抖音合计）。默认 10；新号建议 3~5。',
         minimum: 0,
         maximum: 200,
         'x-suffix': ' 次',
@@ -427,20 +362,12 @@ const QUOTA = {
       [P + 'mustLike']: {
         type: 'boolean',
         title: '必做：点赞',
-        description:
-          '勾上 = 今天必须做满「每天最多点赞」这个数。' +
-          '这是「还没做够就别收工」，不是「每天只做这么多」。' +
-          '按额度模式出门时它是收工条件之一；按次数模式只影响先做哪一项。' +
-          '只想给个上限、不强求做满的话，别勾。',
+        description: '勾上 = 今天必须赞满上面的数，没做够不算收工。',
       },
       [P + 'dailyComments']: {
         type: 'integer',
         title: '每天最多评论',
-        description:
-          '一天最多发几条自己的评论（只算 B站）。' +
-          '默认 4。**不包含回复别人**——别人评论她、@ 她，她回的那些不限量也不占这个数。' +
-          '想让评论区常见到她可以调到 8~10；B站其实不太会被压，被压的是抖音（抖音有单独的「每天最多抖音评论」）。' +
-          '0 = 不评论，只看。',
+        description: '一天最多几条自己的评论（只算 B站，不含回复）。默认 4。',
         minimum: 0,
         maximum: 100,
         'x-suffix': ' 条',
@@ -448,53 +375,36 @@ const QUOTA = {
       [P + 'mustComment']: {
         type: 'boolean',
         title: '必做：评论',
-        description:
-          '勾上 = 今天要发够「每天最多评论」这么多条自己的评论。' +
-          '审批方式不是「全自动」时，评论会先停在草稿箱等你点头，批准了才算做完。' +
-          '回复别人的评论不算在这里面（那个不占额度、也不用凑数）。',
+        description: '勾上 = 今天必须评论满上面的数。审批非全自动时会先停在草稿箱。',
       },
       [P + 'dailyDms']: {
         type: 'integer',
         title: '每天最多私信',
-        description:
-          '一天最多给**别人**发几条私信（B站 + 抖音合计）。' +
-          '默认 10。**给主人的私信不限量**；抖音群聊也不算私信（群聊有自己的额度）。' +
-          '这个数主要是防「她到处私聊陌生人」。0 = 不主动私信别人（回主人照样可以）。',
+        description: '一天最多给别人的私信（B站+抖音合计）。给主人发不限量。',
         minimum: 0,
         'x-suffix': ' 条',
       },
       [P + 'mustDm']: {
         type: 'boolean',
         title: '必做：私信',
-        description:
-          '勾上 = 今天要发够「每天最多私信」这么多条。晚上没做够会提醒你一次。' +
-          '**按额度模式出门时不把它当收工条件**——没人给她发消息的时候，为了凑数去私聊陌生人就是骚扰，插件不会这么干。',
+        description: '勾上 = 今天要发够私信数。没人找她时不会硬凑陌生人。',
       },
       [P + 'dailyGroups']: {
         type: 'integer',
         title: '每天最多群聊',
-        description:
-          '一天最多在抖音群里说几条话。' +
-          '默认 20（群里聊天天然比私信密）。' +
-          '只算抖音群，B站没有群聊这个概念。0 = 不在群里说话。',
+        description: '一天最多在抖音群里说几条。默认 20。',
         minimum: 0,
         'x-suffix': ' 条',
       },
       [P + 'mustGroup']: {
         type: 'boolean',
         title: '必做：群聊',
-        description:
-          '勾上 = 今天要在群里说够「每天最多群聊」这么多条。' +
-          '**任何出门模式都不拿它当收工条件**——群里可能一整天没人说话，硬插话很怪。' +
-          '没做够只会提醒你，不会催她硬凑。',
+        description: '勾上 = 今天要发够群聊数。但不会硬插话，没做够只提醒你。',
       },
       [P + 'dailyFollows']: {
         type: 'integer',
         title: '每天最多关注',
-        description:
-          '一天最多关注几个人（B站 + 抖音合计）。' +
-          '默认 2。这个数建议别调大——连续关注是平台判「机器号」最典型的特征，一天 2~3 个已经够慢慢铺开。' +
-          '0 = 不关注。',
+        description: '一天最多关注几个人。默认 2，别调大——连续关注最招风控。',
         minimum: 0,
         maximum: 100,
         'x-suffix': ' 人',
@@ -502,17 +412,12 @@ const QUOTA = {
       [P + 'mustFollow']: {
         type: 'boolean',
         title: '必做：关注',
-        description:
-          '勾上 = 今天要关注够「每天最多关注」的人数，按额度模式出门时是收工条件之一。' +
-          '**关注是最容易被判机器人的动作**，默认只 2 个；勾成必做而额度又填得高（比如 10），很容易招风控。',
+        description: '勾上 = 今天必须关注满上面的数。额度填高很危险。',
       },
       [P + 'dailyPosts']: {
         type: 'integer',
         title: '每天最多发几条 B站动态',
-        description:
-          '一天最多发几条 B站动态。' +
-          '默认 1。动态一条就够显眼，发多了像营销号。' +
-          '抖音是紧随其后的「每天最多发几条抖音动态」，两边各算各的。0 = 不发 B站动态。',
+        description: '一天最多发几条 B站动态。默认 1。',
         minimum: 0,
         maximum: 30,
         'x-suffix': ' 条',
@@ -520,10 +425,7 @@ const QUOTA = {
       [P + 'dailyPostsDouyin']: {
         type: 'integer',
         title: '每天最多发几条抖音动态',
-        description:
-          '一天最多发几条抖音动态（和 B站分开算）。' +
-          '默认 1。抖音图文发布要走创作者中心，比 B站重：草稿模式下还要你自己点一次「发布」才算真发出去。' +
-          '0 = 不发抖音动态。',
+        description: '一天最多发几条抖音动态，和 B站分开算。默认 1。',
         minimum: 0,
         maximum: 30,
         'x-suffix': ' 条',
@@ -531,17 +433,12 @@ const QUOTA = {
       [P + 'mustPost']: {
         type: 'boolean',
         title: '必做：发动态',
-        description:
-          '勾上 = 今天要发够「B站 + 抖音」一共这么多条动态（两个额度加在一起）。' +
-          '**这就是「自动发」**：她自己出门时发现这项没做满，会自己写文案发出去，不用另设定时器。' +
-          '审批方式不是「全自动」时会先进草稿箱等你点头。',
+        description: '勾上 = 今天要发够 B站+抖音合计那么多条。这就是「自动发」。',
       },
       [P + 'browseDailyCap']: {
         type: 'integer',
         title: '每天最多看几次',
-        description:
-          'brief / feed / open / comments 这类只读调用，**不管谁叫她都算**（包括别的插件定时唤醒她）。' +
-          '用完就拦，防止「每次醒来都先去刷视频」把 token 吃空。0 = 不限制。',
+        description: '一天最多看几条内容（含一起刷）。0 = 不限。',
         minimum: 0,
         maximum: 500,
         'x-suffix': ' 次',
@@ -551,10 +448,7 @@ const QUOTA = {
         minimum: 0,
         maximum: 100,
         title: '每天最多抖音评论',
-        description:
-          '抖音单独一个数：B站可以多，抖音必须少。默认 2。\n' +
-          '**连着发几条评论是抖音判机器最强的信号**，所以这个数比 B站的小很多。' +
-          '回别人评论（reply）不占这个额度。',
+        description: '一天最多几条抖音评论。默认 2——抖音连着发就判机器。',
         'x-suffix': ' 条',
         'x-hot': true,
       },
@@ -563,10 +457,7 @@ const QUOTA = {
         minimum: 0,
         maximum: 120,
         title: 'B站：两条评论之间至少隔几分钟',
-        description:
-          'B站两条评论之间至少隔几分钟。' +
-          '默认 2。B站走接口发、基本不会被压，2 分钟已经够自然；调大只会让她 B站评论变慢。' +
-          '0 = 不限制。',
+        description: 'B站两条评论至少隔几分钟。默认 2，B站基本不怕压。',
         'x-suffix': ' 分钟',
       },
       [P + 'commentGapDouyin']: {
@@ -574,20 +465,14 @@ const QUOTA = {
         minimum: 0,
         maximum: 120,
         title: '抖音：两条评论之间至少隔几分钟',
-        description:
-          '抖音两条评论之间至少隔几分钟。' +
-          '**这个比「每天最多抖音评论」更影响会不会被压**——抖音判机器最强的信号是「短时间内连续评论」，不是单条怎么发。' +
-          '默认 8。还是被压的话：先调到 15，再把「每天最多抖音评论」降到 1。0 = 不限制（不建议）。',
+        description: '抖音两条评论至少隔几分钟。默认 8。被压了先把这个调到 15。',
         'x-suffix': ' 分钟',
         'x-hot': true,
       },
       [P + 'dailySaves']: {
         type: 'integer',
         title: '每天最多稍后再看',
-        description:
-          '一天最多「稍后再看」几条。' +
-          '默认 3。相当于帮她收藏视频：纯个人收藏，不公开、不打扰任何人，所以调大没什么风险。' +
-          '0 = 不收藏。',
+        description: '一天最多加几条稍后再看。纯收藏，不公开，调大没风险。',
         minimum: 0,
         maximum: 100,
         'x-suffix': ' 条',
@@ -609,10 +494,7 @@ const INTERACT = {
       [P + 'shareWithOwner']: {
         type: 'boolean',
         title: '看到好东西会跟你提一句',
-        description:
-          '刷到你可能会喜欢的东西时，会不会主动跟你提一句。' +
-          '判断「可能会喜欢」看的是：她关注过的作者（看过 3 个以上）。开着的话一天最多提一次，你回不回都行。' +
-          '觉得吵就关掉——关掉后她只在被问的时候才说，不会主动开口。',
+        description: '刷到你可能会喜欢的（你关注过的作者）会提一句。一天最多一次。',
         'x-hot': true,
       },
       [P + 'shareWithOwnerPerDay']: {
@@ -622,55 +504,37 @@ const INTERACT = {
         minimum: 0,
         maximum: 5,
         title: '每天最多主动提几次',
-        description:
-          '一天最多主动提几次「这个你可能会喜欢」。' +
-          '0 和 1 最舒服。填 2 以上她可能一天提好几次，容易烦。',
+        description: '一天最多主动提几次。0 和 1 最舒服，2 以上会烦。',
         'x-suffix': ' 次',
       },
       [P + 'commentBlockedDm']: {
         type: 'boolean',
         title: '评论被压时私信告我',
-        description:
-          '她在评论区 @ 了你、但那条被抖音压住时，会不会私信告诉你内容。' +
-          '抖音经常把评论判成「只有自己可见」或「审核中」，这两种你在评论区都看不到，也就不知道她说了什么。' +
-          '**每条被压都会私信一条**——号还没养起来时被压得很频繁，觉得吵就关掉（评论照发，只是不通知你）。',
+        description: '@ 你的评论被抖音压住时，私信告你内容。每条被压都发，嫌吵可关。',
         'x-hot': true,
       },
       [P + 'mentionOwnerOnComment']: {
         type: 'boolean',
         title: '评论时 @ 主人',
-        description:
-          '她发新评论时，要不要在开头 @ 你。' +
-          '开着 = 她刷到好视频会 @ 你一句（「这个好好看，什么时候带我去看」）。B站是真 @ 会发通知；抖音从候选面板点你。' +
-          '楼中楼回复不受影响（那边的 @ 是平台自带的）。她也可以自己决定这一条不 @。',
+        description: '她发新评论时要不要 @ 你。B站会真发通知；楼中楼不生效。',
         'x-hot': true,
       },
       [P + 'hostileReply']: {
         type: 'string',
         title: '有人挑衅时怎么回',
-        description:
-          '有人在评论区阴阳怪气、或者故意说「忘记设定」想让她出丑时，她怎么接。' +
-          '冷处理（默认）= 一句话带过、不解释自己；无视 = 干脆不回；犀利 = 不带脏字地怼回去。' +
-          '不管选哪个都不会骂人、不带脏字——公开评论区骂人会被举报，封的是你的号。',
+        description: '有人阴阳怪气时怎么接：冷处理 / 无视 / 犀利。都不会骂人。',
         'x-options': 'stroll-hostile-reply',
         'x-hot': true,
       },
       [P + 'allowFollow']: {
         type: 'boolean',
         title: '可以关注别人',
-        description:
-          '她能不能自己关注别人。' +
-          '关注是最容易被判机器人的动作（连续关注），所以额度默认只 2 个。' +
-          '关掉 = 她不关注；你想关注哪个自己在 App 里点。',
+        description: '她能不能自己关注别人。关掉就你在 App 里点。',
       },
       [P + 'douyinCommentVia']: {
         type: 'string',
         title: '抖音评论怎么发',
-        description:
-          '抖音评论是「逐字打字」还是「直接调接口」。' +
-          '打字（默认）：点开评论框、每字 22~32ms 输入、回车——像人在 App 里操作，被压概率低，每条多等 5~10 秒。' +
-          '接口：1 秒出结果，但更容易被判 status=2（只有自己可见）。' +
-          '**没有哪种方式能保证 100% 不被压**；还压就把「抖音：两条评论之间」调到 15 分钟。',
+        description: '默认「打字」（慢 5~10 秒但不容易被压）。「接口」快，但容易被判只有自己可见。',
         'x-options': 'stroll-comment-via',
         default: 'manual',
         'x-hot': true,
@@ -678,36 +542,28 @@ const INTERACT = {
       [P + 'douyinFollowMode']: {
         type: 'string',
         title: '抖音关注方式',
-        description:
-          '抖音关注怎么点。' +
-          '网页点（默认）= 用浏览器点关注按钮。关 = 她不管，你在 App 里自己点。' +
-          '**网页点对部分账号不生效**（刷新就没了）——遇到点不上的情况就切过来。点赞评论不受影响。',
+        description: '网页点对部分账号不生效（刷新就没）。点不上就切「关」，你在 App 里点。',
         'x-options': 'stroll-douyin-follow',
       },
       [P + 'allowDm']: {
         type: 'boolean',
         title: '可以发私信',
-        description:
-          '她能不能主动给别人发私信。' +
-          '关掉后私信全停（包括回陌生人）。给主人发私信不受这个开关影响，永远能发。' +
-          '回别人占「每天最多私信」额度；回主人不占。',
+        description: '能不能主动给别人发私信。关掉后连回陌生人也停；给主人发不受影响。',
       },
       [P + 'allowPost']: {
         type: 'boolean',
         title: '可以发 B站动态',
-        description:
-          '会不会在 B站发动态。发什么由「动态」组里的「发哪种动态」决定——' +
-          '可以只发一句话，也可以带图。关掉之后完全不发。',
+        description: '会不会发动态。发什么由「发哪种动态」决定，可以文字也可以带图。',
       },
       [P + 'allowSave']: {
         type: 'boolean',
         title: '可以加稍后再看',
-        description: '相当于帮你收藏一条视频。',
+        description: '能不能加稍后再看。相当于帮你收藏一条视频。',
       },
       [P + 'sharedBiliCookie']: {
         type: 'boolean',
         title: '复用应用的 B站登录',
-        description: '关掉后只能读公开内容，写动作不可用。',
+        description: '复用应用里的 B站登录。关掉后只能读公开内容，写动作不行。',
       },
     },
   },
@@ -726,30 +582,20 @@ const OUTING = {
       [P + 'autoOuting']: {
         type: 'boolean',
         title: '自动出门',
-        description:
-          '关掉 = 完全不自己按时出门，连「该出门了」的催促都不发。' +
-          '适合你在用电脑、跑下载、或者单纯不想被打扰的时候。' +
-          '手动让她看东西、回私信不受影响——只停「自己出门」这一件事。',
+        description: '关掉就完全不自己出门，连催促都不发。手动让她看东西不受影响。',
         'x-hot': true,
       },
       [P + 'outingMode']: {
         type: 'string',
         title: '出门方式',
-        description:
-          '决定她什么时候收工。' +
-          '**按次数**：一天出去 N 次就停（N 在下面「每天自己出门」）。额度只当单个动作的上限。' +
-          '**按额度**：出门次数不限，把勾了必做的项做满才收工；一个都没勾时按全部主动额度算。' +
-          '私信和群聊不算——没人找你时这两项永远做不满，不会逼她硬凑。',
+        description: '按次数 = 出去 N 次就停；按额度 = 把必做做满才停。私信群聊不算必做。',
         'x-options': 'stroll-outing-mode',
         'x-hot': true,
       },
       [P + 'autoSessionsPerDay']: {
         type: 'integer',
         title: '每天自己出门',
-        description:
-          '一天自己出去几次（**只在按次数模式下生效**）。' +
-          '默认 3；填 0 = 不自己出门（和关掉「自动出门」效果一样）。' +
-          '按额度模式不看这个数，改看下面的「两次出门至少隔」。',
+        description: '一天自己出去几次（只在按次数模式生效）。0 = 不自己出门。',
         minimum: 0,
         maximum: 10,
         'x-suffix': ' 次/天',
@@ -758,10 +604,7 @@ const OUTING = {
       [P + 'autoGapMinutes']: {
         type: 'integer',
         title: '两次出门至少隔',
-        description:
-          '两次出门之间至少隔多久。' +
-          '默认 150 分钟。太密容易撞风控，也显得她的状态很杂；**按额度模式也按这个间隔走**——不是做满就立刻再出门。' +
-          '活跃度档位会自动改这个值：安静 240 / 日常 150 / 活跃 90 / 话痨 60。手动改过就以你填的为准。',
+        description: '两次出门至少隔多久。默认 150 分钟。活跃度档位会自动改它。',
         minimum: 30,
         maximum: 360,
         'x-suffix': ' 分钟',
@@ -770,10 +613,7 @@ const OUTING = {
       [P + 'outingFrom']: {
         type: 'integer',
         title: '出门时段：从几点',
-        description:
-          '出门时段的开始：只在「从几点到几点」之间她才会自己出门。' +
-          '默认 9 点。想让她走谷时（凌晨）可以填 1~6。' +
-          '和下面「到几点」填一样的值 = 全天都能出门。',
+        description: '只在「从几点到几点」之间自己出门。想走谷时可填 1~6。',
         minimum: 0,
         maximum: 23,
         'x-suffix': ' 点',
@@ -782,10 +622,7 @@ const OUTING = {
       [P + 'outingTo']: {
         type: 'integer',
         title: '出门时段：到几点',
-        description:
-          '出门时段的结束。填 24 = 到当日结束。' +
-          '跨天也支持：比如 22 到 6 = 只在夜里出门。' +
-          '和上面「从几点」填一样 = 全天。',
+        description: '出门时段结束。填 24 = 到当天结束。填 22~6 就是只在夜里。',
         minimum: 0,
         maximum: 24,
         'x-suffix': ' 点',
@@ -794,9 +631,7 @@ const OUTING = {
       [P + 'quietFrom']: {
         type: 'integer',
         title: '安静时段开始',
-        description:
-          '安静时段的开始：这段时间她既**不自己出门**，也**不主动说话**。' +
-          '默认 23 点。只挡住「她自己行动」；你在对话里找她、让她做事不受影响。',
+        description: '安静时段开始：不自己出门、也不主动说话。默认 23 点。',
         minimum: 0,
         maximum: 23,
         'x-suffix': ' 点',
@@ -804,9 +639,7 @@ const OUTING = {
       [P + 'quietTo']: {
         type: 'integer',
         title: '安静时段结束',
-        description:
-          '安静时段的结束（默认 7 点）。' +
-          '和上面配成一段：23 到 7 = 夜里 8 小时安静。两个填一样的值 = 没有安静时段。',
+        description: '安静时段结束，默认 7 点。和上面填一样 = 没有安静时段。',
         minimum: 0,
         maximum: 23,
         'x-suffix': ' 点',
@@ -814,10 +647,7 @@ const OUTING = {
       [P + 'minGapSeconds']: {
         type: 'integer',
         title: '她自己多久能动一次',
-        description:
-          '她自己行动时，两次动作之间至少隔几秒。' +
-          '默认 20 秒。**只约束她自己出门逛的时候**；你在对话里让她做的事只防连点（1.5 秒），不受这个限制。' +
-          '调大 = 更慢、更像人；调小 = 更容易被平台看出是自动化。',
+        description: '她自己逛时两次动作至少隔几秒。默认 20。你让她做的事不受这个限制。',
         minimum: 10,
         maximum: 600,
         'x-suffix': ' 秒',
@@ -826,10 +656,7 @@ const OUTING = {
       [P + 'sessionMaxItems']: {
         type: 'integer',
         title: '每次出门最多看几条',
-        description:
-          '一次出门最多看几条内容。' +
-          '默认 8。看完就回来，不无限刷；她拿到 brief 后会自己按这个数收手。' +
-          '调大 = 一次逛得更久、更容易看到有意思的；但单次 token 消耗也跟着涨。',
+        description: '一次出门最多看几条。默认 8，看完就回来。',
         minimum: 3,
         maximum: 12,
         'x-suffix': ' 条',
@@ -837,10 +664,7 @@ const OUTING = {
       [P + 'tokenDailyBudget']: {
         type: 'integer',
         title: '每天模型预算',
-        description:
-          '每天给她留多少模型预算。' +
-          '按「每出门一次约 1500 token」折算成「今天最多还能出去几次」，两种出门方式都受它限制。' +
-          '默认值按日常档设的。跑本地模型、或者不在乎成本，可以调大。',
+        description: '每天模型预算，折算成「今天最多还能出去几次」。',
         minimum: 1000,
         maximum: 50000,
         'x-suffix': ' token',
@@ -862,10 +686,7 @@ const ADVANCED = {
       [P + 'commentMaxChars']: {
         type: 'integer',
         title: '评论最多几个字',
-        description:
-          '一条评论最多几个字。' +
-          '默认 100。**短一点更像人**——真人评论很少超过两行。' +
-          '调到 200 以上她会开始写小作文，评论区一眼看出不正常。',
+        description: '一条评论最多几个字。默认 100，短一点更像人。',
         minimum: 20,
         maximum: 300,
         'x-suffix': ' 字',
@@ -873,45 +694,29 @@ const ADVANCED = {
       [P + 'interests']: {
         type: 'string',
         title: '兴趣词',
-        description:
-          '她的兴趣词，逗号分隔（比如：猫, 历史, 编程, 美食）。' +
-          '只在本地给候选视频打分排序，不花模型 token。留空就按平台的推荐走。' +
-          '写得越具体越好：「猫」比「动物」有用，「宋代历史」比「历史」有用。',
+        description: '兴趣词，逗号分隔（猫, 历史, 编程）。只本地打分，不花 token。',
         'x-hot': true,
       },
       [P + 'avoid']: {
         type: 'string',
         title: '不想看的内容',
-        description:
-          '不想让她看的内容，逗号分隔。' +
-          '标题/标签命中就不进候选（比如：恐怖, 鬼畜, 直播带货）。' +
-          '只影响「自己出门挑什么看」，你在对话里让她看某个视频不受限制。',
+        description: '不想看的，逗号分隔。命中不进候选，只影响她自己挑，不影响你指定。',
       },
       [P + 'newAccountRamp']: {
         type: 'boolean',
         title: '新号保护',
-        description:
-          '新号保护：前 3 天额度打五折，第 4~7 天八折，之后恢复满额。' +
-          '刚装插件时平台对这台设备还陌生，前几天收着点能少挨风控。' +
-          '用了几年的老号可以直接关掉。',
+        description: '新号保护：前 3 天额度过半，4~7 天八折。老号可以关。',
       },
       [P + 'riskGuard']: {
         type: 'string',
         title: '风控拦截力度',
-        description:
-          '遇到验证码/风控时的反应。' +
-          '**只记不拦**（默认，推荐）：记一条日志继续跑——多数验证码只是一次性的。' +
-          '**轻度**：验证码时停 30 分钟。' +
-          '**严格**：按下面「严格模式停多久」全面冷却。号被限流过就选这个。',
+        description: '遇到验证码怎么反应。默认「只记不拦」；号被限过就选严格。',
         'x-options': 'stroll-risk-guard',
       },
       [P + 'riskPauseHours']: {
         type: 'integer',
         title: '严格模式停多久',
-        description:
-          '严格模式下，撞到风控后停多久。' +
-          '只在「风控拦截力度 = 严格」时生效。默认 6 小时。' +
-          '号刚被限流过、想稳一点可以调到 12~24；日常建议用「off 只记不拦」。',
+        description: '严格模式下撞到风控停几小时。默认 6。',
         minimum: 1,
         maximum: 168,
         'x-suffix': ' 小时',
@@ -919,10 +724,7 @@ const ADVANCED = {
       [P + 'allowedImageDirs']: {
         type: 'string',
         title: '额外允许发图的目录',
-        description:
-          '除了默认的图片目录，还允许从哪里取图发动态（一行一个路径）。' +
-          '装了别的生图插件时，把它的输出目录填进来，她才能用你画好的图。' +
-          '不在这个列表里的目录一律不读——这是硬限制，防止误发你别的文件。',
+        description: '还允许从哪些目录取图发动态（一行一个）。不在列表里的一律不读。',
       },
 
     },
@@ -941,21 +743,14 @@ const VIEWING = {
       [P + 'openMode']: {
         type: 'string',
         title: '看视频方式',
-        description:
-          '她「看」一条视频时，拿到的是什么。' +
-          '**只看文字**（默认）：字幕 + 弹幕，不抽图——最省 token，也最能看清说了什么。没字幕的视频会自动补 1 帧。' +
-          '**文字 + 分镜图**：多一张 9 格分镜，能看画面但贵一个数量级。' +
-          '**只看画面**：不带字幕，适合舞蹈、手工这类说不清的。',
+        description: '只看文字（默认，最省）/ 文字+9格分镜 / 只看画面。没字幕会自动补 1 帧。',
         'x-options': 'stroll-open-mode',
         'x-hot': true,
       },
       [P + 'subtitleOpen']: {
         type: 'integer',
         title: '后台看：带几句字幕',
-        description:
-          '后台看她视频时带几句字幕（这个数是按「20 分钟的片子」算的）。' +
-          '短的自动加密（最多 72 句），长的按这个数来。按时间分段抽样，从开头覆盖到结尾，不是只取开头几句。' +
-          '默认 24。想让她抓得住细节可以调到 48；调太大会挤掉别的上下文。0 = 不带字幕。',
+        description: '后台看时带几句字幕（按 20 分钟折算，短的可到 72 句）。默认 24。',
         minimum: 0,
         maximum: 60,
         'x-suffix': ' 句',
@@ -963,10 +758,7 @@ const VIEWING = {
       [P + 'danmakuOpen']: {
         type: 'integer',
         title: '后台看：带几条弹幕',
-        description:
-          '后台看时带几条弹幕（按时间均匀抽样）。' +
-          '弹幕能看出「观众在哪个地方有反应」，比字幕更接近「现场感」。' +
-          '默认 12。0 = 不带弹幕。',
+        description: '后台看时带几条弹幕，按时间均匀抽。默认 12。',
         minimum: 0,
         maximum: 60,
         'x-suffix': ' 条',
@@ -974,10 +766,7 @@ const VIEWING = {
       [P + 'framesPerOpen']: {
         type: 'integer',
         title: '看视频抽几帧',
-        description:
-          '看一条视频抽几帧画面。' +
-          'B站用进度条缩略图（160×90，不占登录态，只看得出「画面大概在干嘛」）；抖音用播放页截图。' +
-          '默认 0（只看文字）。**建议 9**：B站会把 9 帧拼成一张分镜图，约 184 token，比 3 张独立小图还便宜。',
+        description: '看视频抽几帧。默认 0（只看文字）；建议 9，B站会拼成一张图约 184 token。',
         minimum: 0,
         maximum: 9,
         'x-suffix': ' 帧',
@@ -985,10 +774,7 @@ const VIEWING = {
       [P + 'keepWindowSeconds']: {
         type: 'integer',
         title: '打开后窗口留多久',
-        description:
-          '开窗模式下，看完这条之后窗口还留多久。' +
-          '只对「开窗看」有效（后台模式本来就不开窗）。默认 90 秒——够你瞄一眼，又不会一直挂在桌面上。' +
-          '0 = 看完立刻关。',
+        description: '开窗看完后窗口留多久。默认 90 秒，0 = 立刻关。',
         minimum: 0,
         maximum: 600,
         'x-suffix': ' 秒',
@@ -996,10 +782,7 @@ const VIEWING = {
       [P + 'openTalk']: {
         type: 'boolean',
         title: '后台看完也说一句',
-        description:
-          '她自己刷到一条时，要不要主动跟你聊一句。' +
-          '开着 = 看完会在对话里提一句（「刚看了个讲猫的，说……」，不是复述标题）。会多花一点 token。' +
-          '关掉 = 只记进「最近看过」，不打扰你。一起看的时候不受这个开关影响。',
+        description: '她自己刷到一条时要不要跟你聊一句。会多花 token。',
       },
 
     },
@@ -1021,18 +804,13 @@ const WATCH = {
       [P + 'watchTalk']: {
         type: 'boolean',
         title: '一起看时主动说几句',
-        description:
-          '一起看的时候，她要不要说观后感（而不是只报「进度到 3:20 了」）。' +
-          '开着 = 每次播报会顺带说 1~2 句自己看到的东西，像真的在旁边一起看。' +
-          '关掉 = 只报进度，安静但没什么陪伴感。',
+        description: '一起看时说观后感，而不是只报进度。',
         'x-hot': true,
       },
       [P + 'watchLines']: {
         type: 'integer',
         title: '一次说几句',
-        description:
-          '每次开口说几句（配合上面那条）。' +
-          '默认 1。两句以上会更像在聊天，但每句都在花 token。',
+        description: '每次开口说几句，默认 1。说多了更热闹也更花 token。',
         minimum: 1,
         maximum: 3,
         'x-suffix': ' 句',
@@ -1040,10 +818,7 @@ const WATCH = {
       [P + 'watchSpeakSec']: {
         type: 'integer',
         title: '一起看：多久说一句',
-        description:
-          '一起看时，两次开口至少隔多久。' +
-          '默认 90 秒。太短会很吵（电影里每句话都要点评一下），太长又像没在看。' +
-          '60~120 秒之间最自然。',
+        description: '一起看时两次开口至少隔多久。默认 90 秒，60~120 最自然。',
         minimum: 20,
         maximum: 600,
         'x-suffix': ' 秒',
@@ -1051,10 +826,7 @@ const WATCH = {
       [P + 'subtitleWatch']: {
         type: 'integer',
         title: '一起看：带几句字幕',
-        description:
-          '一起看时，每次播报带几句当前字幕。' +
-          '默认 2 句。她需要知道「现在演到哪句台词」才能接上话，给多了纯浪费。' +
-          '0 = 不带字幕（只靠标题和进度猜，容易说空话）。',
+        description: '一起看时带几句当前字幕。默认 2 句够接话。',
         minimum: 0,
         maximum: 5,
         'x-suffix': ' 句',
@@ -1062,9 +834,7 @@ const WATCH = {
       [P + 'danmakuWatch']: {
         type: 'integer',
         title: '一起看：带几条弹幕',
-        description:
-          '一起看时，每次带几条当前弹幕。' +
-          '默认 6 条。弹幕能让她知道「观众这会儿在笑什么」，比自己看画面更接近现场感。',
+        description: '一起看时带几条当前弹幕。默认 6 条，能听出观众在笑什么。',
         minimum: 0,
         maximum: 20,
         'x-suffix': ' 条',
@@ -1072,9 +842,7 @@ const WATCH = {
       [P + 'watchWindowSec']: {
         type: 'integer',
         title: '一起看：弹幕窗口多大',
-        description:
-          '取弹幕的时间窗口：以当前播放秒数为中心，前后各取多少秒。' +
-          '默认 30 秒。窗口太小只有零星几条，太大会混进不相干的内容。',
+        description: '取弹幕的时间窗口（当前进度前后各多少秒）。默认 30。',
         minimum: 5,
         maximum: 120,
         'x-suffix': ' 秒',
@@ -1082,10 +850,7 @@ const WATCH = {
       [P + 'watchPollSec']: {
         type: 'integer',
         title: '一起看：多久读一次',
-        description:
-          '多久读一次页面状态（标题、进度、评论）。' +
-          '默认 10 秒。这一步只读 DOM，**不花 token**，所以可以放心调小。' +
-          '调小 = 反应更快（你暂停她立刻知道）；调大 = 省一点浏览器性能。',
+        description: '多久读一次页面状态。默认 10 秒，不花 token，可以调小。',
         minimum: 5,
         maximum: 120,
         'x-suffix': ' 秒',
@@ -1093,29 +858,19 @@ const WATCH = {
       [P + 'watchNotify']: {
         type: 'string',
         title: '她开始看时提醒我',
-        description:
-          '她开始看一条内容时，怎么提醒你。' +
-          '**只在面板上**（默认，不花 token）：面板顶部会出现「正在看」的浮条。' +
-          '**面板 + 对话里说一句**：多花一点 token，但你会立刻在聊天里看到她说要看了。' +
-          '**不提醒**：只看面板的记录。',
+        description: '她开始看时怎么提醒你：只在面板（不花 token）/ 面板+对话说一句 / 不提醒。',
         'x-options': 'stroll-notify',
         'x-hot': true,
       },
       [P + 'watchWindow']: {        type: 'string',
         title: '陪看窗口多大',
-        description:
-          '陪看窗口开多大。' +
-          '最大化（默认）够用，也不挡任务栏。全屏会隐藏标题栏，按 F11 退出。' +
-          '窗口化适合你想一边干别的、一边瞄一眼的情况。',
+        description: '陪看窗口开多大。最大化够用；全屏按 F11 退出。',
         'x-options': 'stroll-watch-window',
       },
       [P + 'watchBrowser']: {
         type: 'string',
         title: '陪看用哪个浏览器',
-        description:
-          '陪看用哪个浏览器打开。' +
-          '默认 Chrome 优先——它的视频解码最稳。没装会自动退回 Edge 或自带 Chromium。' +
-          '如果你只用 Edge，可以直接选 Edge，省掉探测的几秒。',
+        description: '陪看用哪个浏览器。默认 Chrome 优先，没装自动退回 Edge。',
         'x-options': 'stroll-watch-browser',
       },
 
@@ -1137,19 +892,13 @@ const SHORTS = {
       [P + 'watchScroll']: {
         type: 'boolean',
         title: '抖音一起刷',
-        description:
-          '陪看抖音时，要不要自动切到下一条。' +
-          '开着 = 像真的在刷，一条接一条（按下面的「多久切一条」）。只对抖音生效，B站不受影响。' +
-          '默认关：省 token，也少招风控。',
+        description: '陪看抖音时自动切下一条。只对抖音生效，默认关。',
         'x-hot': true,
       },
       [P + 'watchScrollSec']: {
         type: 'integer',
         title: '一起刷：多久切一条',
-        description:
-          '一起刷时，每条停多久再切。' +
-          '0 = 这条播完就切（跟着视频时长走）。填 30 = 不管多长，30 秒后就切。' +
-          '短视频建议 0，长视频建议 30~60（不然会一直卡在同一条上）。',
+        description: '一起刷时每条停多久。0 = 播完就切；填 30 = 30 秒后切。',
         minimum: 0,
         maximum: 180,
         'x-suffix': ' 秒',
@@ -1157,10 +906,7 @@ const SHORTS = {
       [P + 'watchScrollEvery']: {
         type: 'integer',
         title: '一起刷：隔几条说一句',
-        description:
-          '刷几条才说一句。' +
-          '1 = 每条都说；3 = 刷三条说一次。' +
-          '默认 2。像人刷抖音也不是每条都评论，隔一条说一句最自然，也省一半 token。',
+        description: '刷几条说一句。默认 2——像人刷抖音也不是每条都评论。',
         minimum: 1,
         maximum: 10,
         'x-suffix': ' 条',
@@ -1168,10 +914,7 @@ const SHORTS = {
       [P + 'watchShot']: {
         type: 'boolean',
         title: '一起刷：附一张画面',
-        description:
-          '一起刷时要不要附一张当前画面（截图）。' +
-          '抖音没有 CC 字幕，不附截图她其实看不见内容，只能靠标题和话题猜。' +
-          '每张约 500 token，默认关。想看她说得准一点就打开。',
+        description: '一起刷时附一张当前画面。抖音没字幕，不附她其实看不见内容。约 500 token/张。',
       },
     },
   },
@@ -1188,28 +931,19 @@ const MESSAGES = {
       [P + 'dmWatch']: {
         type: 'boolean',
         title: '私信马上回',
-        description:
-          '是否每隔一会儿看一眼私信，有新消息就叫她起来回。' +
-          '开着 = 你一发消息，几秒内就会回（不用等她下次出门）。' +
-          '关掉 = 只能等她主动查消息时才看到，可能隔很久。',
+        description: '开着 = 你一发消息几秒内就回。关掉只能等她下次查。',
         'x-hot': true,
       },
       [P + 'mentionWatch']: {
         type: 'boolean',
         title: '有人 @ 我就叫我',
-        description:
-          'B站或抖音评论区有人 @ 她时，主动把她叫起来看一眼（90 秒查一次，安静时段不查）。' +
-          '关掉的话只有她出门逛、或你让她查消息时才看得到。' +
-          '回复仍然是公开评论，按「审批」规则走。',
+        description: '有人 @ 她时主动叫起来看一眼（90 秒一次，安静时段不查）。',
         'x-hot': true,
       },
       [P + 'dmPollSec']: {
         type: 'integer',
         title: '多久看一次私信',
-        description:
-          '多久查一次私信（兜底间隔）。' +
-          '抖音有新消息时页面会立刻通知她（1-2 秒），这个值只在「页面掉线/通知没触发」时兜底。' +
-          '默认 5 秒。嫌聊天记录刷太快可以调到 15~30 秒，代价是偶发延迟变长。',
+        description: '多久查一次私信。页面会自己推消息，这个只是掉线兜底。默认 5 秒。',
         minimum: 3,
         maximum: 300,
         'x-suffix': ' 秒',
@@ -1218,39 +952,26 @@ const MESSAGES = {
       [P + 'shareStyle']: {
         type: 'string',
         title: '分享视频怎么发',
-        description:
-          '她给你发抖音视频时的样子。' +
-          '**画面 + 标题**（默认）：先发一张视频画面，再发标题和链接——最稳。' +
-          '**真分享卡**：走抖音自己的「分享给朋友」，发原生视频卡片；多花 5~10 秒，抖音改版时可能失效（会自动退回「画面 + 标题」）。' +
-          '**只发链接**：一段纯文字链接。',
+        description: '给你发抖音视频的样子：画面+标题（默认，最稳）/ 真分享卡片 / 只发链接。',
         'x-options': 'stroll-share-style',
         'x-hot': true,
       },
       [P + 'strangerDmMode']: {
         type: 'string',
         title: '陌生人的私信',
-        description:
-          '陌生人发来私信时她怎么处理。' +
-          '**先问我**（默认）：转给你，你点头她才回。**她自己回**：按人设直接回。**都不回**：当没看见。' +
-          '回陌生人占「每天最多私信」额度；回主人不受影响。',
+        description: '陌生人私信：先问我（默认）/ 她自己回 / 都不回。回陌生人占私信额度。',
         'x-options': 'stroll-stranger-dm',
         'x-hot': true,
       },
       [P + 'quickMediaReply']: {
         type: 'boolean',
         title: '本地秒回',
-        description:
-          '对方只发了个表情/图片，或者只说了「在吗 / 你好 / hi」这种开场白时，不叫模型、直接秒回。' +
-          '0.3~0.6 秒（走模型要 2~5 秒）。只在「她自己回」模式下生效，同一个人 3 分钟最多一次。' +
-          '有实际内容的话一律交给她自己想，不会用模板糊弄。表情回的是真表情字符（😄），不是「（笑）」。',
+        description: '对方只发表情或「在吗」时不叫模型，直接秒回。3 分钟内只一次。',
       },
       [P + 'strangerMaxPages']: {
         type: 'integer',
         title: '陌生人常驻页数量',
-        description:
-          '给最近聊过的几个陌生人各开一个后台页，页面停在他的会话上——读表情/图片、发消息都跟私信一样快（发送 200ms 级）。' +
-          '每个页约 50~100MB 内存。默认 2，最多 4。' +
-          '0 = 不开（省内存，但表情包/图片可能读不到，只能等下次刷新）。',
+        description: '给几个陌生人开常驻页（读表情/发消息更快）。默认 2，每页 50~100MB。',
         minimum: 0,
         maximum: 4,
         'x-suffix': ' 个',
@@ -1258,34 +979,23 @@ const MESSAGES = {
       [P + 'strangerDmBlock']: {
         type: 'string',
         title: '私信黑名单',
-        description:
-          '这些人的私信一律不回（一行一个：昵称、B站 UID 或抖音 sec_uid 都认）。' +
-          '用来挡掉反复骚扰的号。命中后连「等你点头」都不会弹，直接忽略。',
+        description: '这些人的私信一律不回（一行一个：昵称 / UID / sec_uid）。',
       },
       [P + 'groupWatch']: {
         type: 'boolean',
         title: '盯着抖音群',
-        description:
-          '要不要盯着抖音群，有人说话就叫她。' +
-          '开着 = 群里有人聊天她会凑一句（按群聊额度）。关掉 = 完全不看群。' +
-          'B站没有群聊这个概念，只对抖音有效。',
+        description: '要不要盯抖音群，有人说话就叫她。B站没有群聊。',
         'x-hot': true,
       },
       [P + 'douyinGroups']: {
         type: 'string',
         title: '要盯的抖音群（可留空）',
-        description:
-          '要盯哪些抖音群（一行一个，写群名）。' +
-          '留空 = 自动认最近有消息的群（受下面「最多认几个群」限制）。' +
-          '填了就只盯这几个，别的群不进候选。',
+        description: '要盯哪些群（一行一个群名）。留空 = 自动认最近有消息的。',
       },
       [P + 'maxGroups']: {
         type: 'integer',
         title: '最多认几个群',
-        description:
-          '最多同时认几个群。' +
-          '默认 3。群多了她会顾不过来，也更容易在群里说重复的话。' +
-          '只在「要盯的抖音群」留空（自动认）时生效。',
+        description: '最多同时认几个群。默认 3，群多了会顾不过来。',
         minimum: 1,
         maximum: 10,
         'x-suffix': ' 个',
@@ -1294,10 +1004,7 @@ const MESSAGES = {
       [P + 'groupTabs']: {
         type: 'integer',
         title: '最多常驻几个群监听页',
-        description:
-          '最多给几个群常驻监听页（每个约 50~100MB 内存）。' +
-          '默认 1。常驻的群有新消息时反应最快；没常驻的群要等下一次轮询才看到。' +
-          '内存紧张就填 1，机器富余可以调到 2~3。',
+        description: '给几个群开常驻监听页。默认 1，每个约 50~100MB 内存。',
         minimum: 1,
         maximum: 8,
         'x-suffix': ' 个',
@@ -1306,15 +1013,12 @@ const MESSAGES = {
       [P + 'debugLog']: {
         type: 'boolean',
         title: '调试日志',
-        description:
-          '打开后关键路径会多打一些 info 日志（出门判定、记忆写入、健康检查等），方便排查问题。' +
-          '平时建议关着——日志太多会把 core.log 刷满。',
+        description: '打开后关键路径多打 info 日志，方便排查。平时关着，不然 core.log 会被刷满。',
       },
       [P + 'watchdog']: {
         type: 'boolean',
         title: '监听自检',
-        description:
-          '每分钟检查一次私信/群的监听页：观察器被页面导航带走了就原地重挂，页面卡死就重开。关掉可能漏消息。',
+        description: '监听卡住时自动重启浏览器。一般不用管。',
         'x-hot': true,
       },
     },

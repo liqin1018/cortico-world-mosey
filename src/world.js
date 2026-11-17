@@ -6653,6 +6653,18 @@ export class StrollWorld {
       mention: String(plan.mention ?? ''),
       root: plan.root ?? '',
       parent: plan.parent ?? '',
+      /**
+       * 配图相关必须跟着草稿一起存。
+       *
+       * 2026-11-17 网友反馈：审批模式下 B站动态发不出去（静默失败），
+       * 关掉审批（额度内自动）就正常。
+       * 根因是草稿只存了 text：批准时 plan.imagePath 为空 →
+       *   · B站图文退化成纯文字（看起来"没发出去"）
+       *   · 抖音图文直接 DOUYIN_NEEDS_IMAGE 失败
+       */
+      imagePath: plan.imagePath ?? '',
+      postKind: plan.postKind ?? '',
+      postTitle: plan.postTitle ?? '',
     });
   }
 
@@ -6721,6 +6733,10 @@ export class StrollWorld {
       mention: draft.mention ?? '',
       root: draft.root,
       parent: draft.parent,
+      // 从草稿带回来：少了这两个，审批后图文会丢图 / 抖音直接失败
+      imagePath: draft.imagePath ?? '',
+      postKind: draft.postKind ?? '',
+      postTitle: draft.postTitle ?? '',
     };
     const receipt = await this.executePlan(plan, source);
     const draftState =
@@ -6936,6 +6952,21 @@ export class StrollWorld {
       const code = error?.code ?? 'ERROR';
       if (code === 'RISK') {
         await this.push('stroll.risk', `平台风控：${error.message}。已经停手，不要重试。`, { code, action, platform }, 'flush');
+      } else if (source === 'operator') {
+        /**
+         * 主人亲手批的那条失败了，必须让他看见。
+         *
+         * 以前这里只处理 RISK，其它异常直接返回 { ok:false }——
+         * 面板上点了「批准」，草稿消失了，什么反馈都没有（2026-11-17 网友反馈的「静默失败」）。
+         */
+        await this
+          .push(
+            'stroll.sent',
+            `这条没发出去：${ACTION_NAMES?.[action] ?? action} · ${error?.message ?? String(error)}`,
+            { code, action, platform, target },
+            'flush',
+          )
+          .catch(() => {});
       }
       return { ok: false, code, action, platform, target, error: error?.message ?? String(error) };
     }

@@ -847,6 +847,16 @@ export default {
               digestCard.append(el('p', `今天做了 ${dg.total} 件事：${bits.join('、') || '（都是聊天）'}`, 'stroll-digest-line'));
               if (dg.top?.length) digestCard.append(el('p', `最常看的是 ${dg.top.join(' 和 ')}`, 'stroll-muted'));
             }
+            // 账号健康：J 的匿名自查结果（一天一次，后端异步查好放缓存里）
+            const hh = data?.health;
+            if (hh?.result && hh.result !== 'none') {
+              const label = {
+                public: '上一条评论公开可见',
+                hidden: '上一条评论匿名看不到（可能被压）',
+                unknown: '查不到（接口没返回）',
+              }[hh.result] ?? hh.result;
+              digestCard.append(el('p', `账号健康：${label}`, 'stroll-muted'));
+            }
             const ppl = data?.people ?? [];
             digestHint.textContent = ppl.length ? `最近聊过 ${ppl.length} 个人` : '';
             for (const who of ppl.slice(0, 3)) {

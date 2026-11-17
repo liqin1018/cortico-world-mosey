@@ -535,6 +535,8 @@ export class StrollWorld {
     this.maybeDailyDigest(hour, day);
     // 刷完回来报一句（幂等、不阻塞）
     this.maybeReportBack(hour);
+    // 账号健康：一天一次，异步查，面板只读缓存
+    this.checkAccountHealth().catch(() => {});
     const mode = this.outingMode();
     if (mode === 'off') return;
     // 刚被 -509/429 挡过：她先歇几分钟再出门（主人当场点的事不受影响）
@@ -7037,6 +7039,17 @@ export class StrollWorld {
    * 这里在本地留最近 20 条，面板上直接显示，不用再靠翻日志。
    * **纯内存 + saveSoon**，不拖慢任何动作。
    */
+  /**
+   * 只在「调试日志」打开时才打的日志。
+   *
+   * 2026-11-17：出问题只能翻 core.log，但 info 级别的流水平时太多。
+   * 加一个开关：打开后关键路径多打一些，平时完全安静。
+   */
+  debug(...args) {
+    if (!this.cfg.debugLog) return;
+    this.log?.info?.('[debug]', ...args);
+  }
+
   noteAnomaly(text, meta = {}) {
     try {
       const one = String(text ?? '').trim();
@@ -7090,6 +7103,64 @@ export class StrollWorld {
    * 幂等：同一条「最后动作」只报一次（reported.at）。
    * **不阻塞**：push 不 await。
    */
+  /**
+   * 账号健康：用**匿名视角**看她最近一条 B站公开评论还在不在。
+   *
+   * 2026-11-17：群友那份反馈教会的方法——插件自己带 cookie 回查永远能看到
+   * 自己的 state=17 评论，只有匿名才看得见「别人眼里有没有」。
+   *
+   * 一天最多查一次（缓存 healthCheckedAt），零登录态、只读公开接口。
+   * 结果给面板「今天」卡片用一行显示。
+   */
+  async checkAccountHealth() {
+    try {
+      const today = dayKey(new Date(), this.timeZone);
+      const cache = this.store.data.health ?? {};
+      if (cache.day === today && cache.result) return cache.result;
+
+      // 找最近一条带 rpid 的 B站评论（抖音的 cid 不能这样匿名查）
+      const acts = (this.store.data.actions ?? []).filter(
+        (a) => a.platform === 'bilibili' && (a.action === 'comment' || a.action === 'reply') && a.extra?.rpid,
+      );
+      const last = acts[0];
+      if (!last) {
+        const r = { day: today, result: 'none' };
+        this.store.data.health = r;
+        this.store.saveSoon();
+        return 'none';
+      }
+      const bvid = String(last.target ?? '');
+      const rpid = String(last.extra.rpid);
+      // BV → aid（公开接口，不需要 cookie）
+      const info = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, {
+        headers: { referer: 'https://www.bilibili.com/', 'user-agent': 'Mozilla/5.0' },
+      }).then((r) => r.json());
+      const aid = Number(info?.data?.aid ?? 0);
+      if (!aid) {
+        const r = { day: today, result: 'unknown', at: Date.now() };
+        this.store.data.health = r;
+        this.store.saveSoon();
+        return 'unknown';
+      }
+      // **不带 cookie**：这就是「别人看到的」
+      const pub = await fetch(
+        `https://api.bilibili.com/x/v2/reply?oid=${aid}&type=1&pn=1&ps=20&sort=1`,
+        { headers: { referer: `https://www.bilibili.com/video/${bvid}`, 'user-agent': 'Mozilla/5.0' } },
+      ).then((r) => r.json());
+      const hits = (pub?.data?.replies ?? []).some((x) => String(x.rpid) === rpid);
+      const result = hits ? 'public' : 'hidden';
+      this.store.data.health = { day: today, result, bvid, rpid, at: Date.now() };
+      this.store.saveSoon();
+      if (result === 'hidden') {
+        this.noteAnomaly('最近一条 B站评论匿名看不到（可能被压），先缓一缓再发', { kind: 'HEALTH' });
+      }
+      this.log?.info?.('stroll account health', { result, bvid, rpid });
+      return result;
+    } catch {
+      return 'unknown';
+    }
+  }
+
   maybeReportBack(hour) {
     try {
       if (hour < 8 || hour > 23) return;
@@ -8043,6 +8114,8 @@ export class StrollWorld {
       todayReads: this.store.readsToday(),
       viewed: this.store.viewedList(6),
       digest: this.digestToday(),
+      // 账号健康只读缓存（真实查询在 tick 里异步做，面板不能等网络）
+      health: this.store.data.health ?? null,
       people: this.recentPeople(4),
       following: this.followFeedView(4),
       weekly: this.weeklyReport(7),

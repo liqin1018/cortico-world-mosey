@@ -58,6 +58,7 @@ export const DEFAULTS = {
   /** 最多常驻几个群监听页（每个占一个后台标签页） */
   groupTabs: 3,
   /** 监听自检：页面卡死/观察器丢了自动重挂，默认开 */
+  debugLog: false,
   watchdog: true,
   /** 陌生人的私信：ask=先问主人 / auto=她自己回 / off=都不回（主人不受影响） */
   strangerDmMode: 'ask',
@@ -1047,6 +1048,13 @@ const MESSAGES = {
         'x-suffix': ' 个',
         'x-hot': true,
       },
+      [P + 'debugLog']: {
+        type: 'boolean',
+        title: '调试日志',
+        description:
+          '打开后关键路径会多打一些 info 日志（出门判定、记忆写入、健康检查等），方便排查问题。' +
+          '平时建议关着——日志太多会把 core.log 刷满。',
+      },
       [P + 'watchdog']: {
         type: 'boolean',
         title: '监听自检',
@@ -1105,6 +1113,7 @@ export const POLICY_FIELDS = {
   mustPost: { type: 'boolean' },
   maxGroups: { type: 'int', min: 1, max: 10 },
   groupTabs: { type: 'int', min: 1, max: 8 },
+  debugLog: { type: 'boolean' },
   watchdog: { type: 'boolean' },
   strangerDmMode: { type: 'enum', values: ['ask', 'auto', 'off'] },
   strangerDmBlock: { type: 'string', max: 500 },

@@ -533,6 +533,8 @@ export class StrollWorld {
     await this.maybeMustNudge(pending, hour, day);
     // 每天一条「今天干了什么」（幂等、纯聚合、不阻塞）
     this.maybeDailyDigest(hour, day);
+    // 刷完回来报一句（幂等、不阻塞）
+    this.maybeReportBack(hour);
     const mode = this.outingMode();
     if (mode === 'off') return;
     // 刚被 -509/429 挡过：她先歇几分钟再出门（主人当场点的事不受影响）
@@ -7075,6 +7077,56 @@ export class StrollWorld {
       };
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * 刷完回来了，说一声。
+   *
+   * 2026-11-17：以前她出门是「推送叫你 → 出去 → 没有下文」，
+   * 主人那边只看到一堆动作记录，不知道这一趟到底干了什么。
+   *
+   * 判据：最后一条动作之后 6-12 分钟没有新动作 = 她回来了。
+   * 幂等：同一条「最后动作」只报一次（reported.at）。
+   * **不阻塞**：push 不 await。
+   */
+  maybeReportBack(hour) {
+    try {
+      if (hour < 8 || hour > 23) return;
+      const acts = (this.store.data.actions ?? []).filter((a) => a.platform !== 'system');
+      const last = acts[0];
+      if (!last) return;
+      const lastAt = Date.parse(last.at);
+      if (!Number.isFinite(lastAt)) return;
+      const idle = Date.now() - lastAt;
+      // 出门后 6~12 分钟没动静才算「回来了」；太短可能还在刷，太久就不打扰了
+      if (idle < 6 * 60 * 1000 || idle > 12 * 60 * 1000) return;
+      if (this.store.data.reported?.at === last.at) return;
+      this.store.data.reported = { at: last.at };
+      this.store.saveSoon();
+
+      const since = Number(this.autoWalkAt ?? 0) || lastAt - 30 * 60 * 1000;
+      const mine = acts.filter((a) => Date.parse(a.at) >= since);
+      const n = (k) => mine.filter((a) => a.action === k).length;
+      const bits = [
+        n('like') ? `赞了 ${n('like')} 个` : '',
+        n('comment') + n('reply') ? `评论 ${n('comment') + n('reply')} 条` : '',
+        n('follow') ? `关注 ${n('follow')} 个` : '',
+        n('save') ? `收了 ${n('save')} 个` : '',
+      ].filter(Boolean);
+      if (!bits.length) return;
+      // 标题从 viewed 里拿：open 不写 actions，只写 viewed
+      const viewed = this.store.data.viewed ?? [];
+      const recentView = viewed.find((v) => Date.parse(v.at ?? '') >= since);
+      const title = String(recentView?.title ?? '').slice(0, 20);
+      this.push(
+        'stroll.report',
+        `回来了。${bits.join('，')}。${title ? `最后看的是《${title}》。` : ''}想听细节就问。`,
+        { n: mine.length },
+        'debounce',
+      ).catch(() => {});
+    } catch {
+      // 汇报失败不影响任何动作
     }
   }
 

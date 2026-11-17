@@ -6960,8 +6960,9 @@ export class StrollWorld {
         result,
         receipt: this.receiptText(action, platform, result, plan),
       };
-      // 跟这个人聊过一笔（同步改内存，落盘走 saveSoon，不加延迟）
-      this.notePersonTurn(plan, text);
+      // 只记「跟人说话」：评论/回复的 target 是视频 BV 或动态，存进去就变成一堆 BV 号
+      // （2026-11-17 实测 people 里全是 BV1hPsJ6BEL9 这种，就是这里没判断 action）
+      if (action === 'dm') this.notePersonTurn(plan, text);
       // 群里的这句已经回掉了：上下文清掉，别让她下一条（可能是私信主人）被当成回群
       if (plan.group) this.lastGroupPoke = null;
       if (source === 'operator') {
@@ -7057,6 +7058,7 @@ export class StrollWorld {
         (a) => a.platform !== 'system' && dayKey(new Date(a.at), this.timeZone) === day,
       );
       const n = (k) => acts.filter((a) => a.action === k).length;
+      this.log?.info?.('stroll digest today', { day, total: acts.length, all: (this.store.data.actions ?? []).length, tz: this.timeZone });
       return {
         day,
         total: acts.length,

@@ -150,4 +150,12 @@ export const EVENT_DECLS = [
   { type: 'stroll.reply', description: { zh: '有人回复或 @ 了她，或者主人刚发来私信（会立刻把她叫起来回）。', en: 'Someone replied or mentioned her, or the owner just sent a DM (she is woken to answer right away).' }, trigger: 'debounce' },
   { type: 'stroll.watch', description: { zh: '和主人一起看时，页面/进度/评论区的新情况。', en: 'The shared watch page changed: title, progress or comments.' }, trigger: 'debounce' },
   { type: 'stroll.watching', description: { zh: '她开始看某一条了（只在配置里选了「对话里也说一句」时推送）。', en: 'She started watching something (only when chat notifications are on).' }, trigger: 'debounce' },
+  {
+    type: 'stroll.back',
+    description: {
+      zh: '她刚出门回来。**只是给个开口的机会**：想跟主人说一句就说，不想说就放着——不要每次都有交代。',
+      en: 'She just came back from an outing. Only an opening: she may mention it if she feels like it, or say nothing.',
+    },
+    trigger: 'debounce',
+  },
 ];

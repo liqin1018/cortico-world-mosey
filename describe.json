@@ -307,6 +307,14 @@
         "en": "She started watching something (only when chat notifications are on)."
       },
       "trigger": "debounce"
+    },
+    {
+      "type": "stroll.back",
+      "description": {
+        "zh": "她刚出门回来。**只是给个开口的机会**：想跟主人说一句就说，不想说就放着——不要每次都有交代。",
+        "en": "She just came back from an outing. Only an opening: she may mention it if she feels like it, or say nothing."
+      },
+      "trigger": "debounce"
     }
   ]
 }

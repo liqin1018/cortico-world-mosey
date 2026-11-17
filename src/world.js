@@ -7094,12 +7094,13 @@ export class StrollWorld {
   }
 
   /**
-   * 刷完回来了，说一声。
+   * 刷完回来了——**给她一个开口的机会**，不是替她写总结。
    *
    * 2026-11-17：以前她出门是「推送叫你 → 出去 → 没有下文」，
    * 主人那边只看到一堆动作记录，不知道这一趟到底干了什么。
    *
    * 判据：最后一条动作之后 6-12 分钟没有新动作 = 她回来了。
+   * 说什么、说不说都由她决定（push 里只给事实 + 一句「随你」）。
    * 幂等：同一条「最后动作」只报一次（reported.at）。
    * **不阻塞**：push 不 await。
    */
@@ -7190,9 +7191,20 @@ export class StrollWorld {
       const viewed = this.store.data.viewed ?? [];
       const recentView = viewed.find((v) => Date.parse(v.at ?? '') >= since);
       const title = String(recentView?.title ?? '').slice(0, 20);
+      /**
+       * 不是「替她汇报」，是「给她一个开口的机会」。
+       *
+       * 2026-11-17 群友说得对：哪有让自家孩子出去玩一圈回来还写总结的？
+       * 以前这里直接推一条成品「回来了。赞了 3 个，评论 1 条。」——
+       * 那是运营周报，不是她说话。
+       *
+       * 现在只给事实（这一趟做了什么）和一句「说不说随你」，
+       * 由她决定要不要调 stroll_act action=dm，或者什么都不做。
+       */
       this.push(
-        'stroll.report',
-        `回来了。${bits.join('，')}。${title ? `最后看的是《${title}》。` : ''}想听细节就问。`,
+        'stroll.back',
+        `你刚回来（这一趟：${bits.join('、')}${title ? `，最后看的是《${title}》` : ''}）。\n` +
+          '想跟主人提一句就提，不想提就放着——不用每次都交代，也不用复述这些数字。',
         { n: mine.length },
         'debounce',
       ).catch(() => {});

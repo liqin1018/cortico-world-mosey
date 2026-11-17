@@ -975,7 +975,11 @@ check(
     );
     return (
       keys.indexOf('mustLike') === keys.indexOf('dailyLikes') + 1 &&
-      keys.indexOf('mustComment') === keys.indexOf('dailyComments') + 1 &&
+      // 评论按平台拆开后：B站额度 → 抖音额度 → B站间隔 → 抖音间隔 → 必做（2026-11-17 用户要求）
+      keys.indexOf('dailyCommentsDouyin') === keys.indexOf('dailyComments') + 1 &&
+      keys.indexOf('commentGapBili') === keys.indexOf('dailyComments') + 2 &&
+      keys.indexOf('commentGapDouyin') === keys.indexOf('dailyComments') + 3 &&
+      keys.indexOf('mustComment') === keys.indexOf('dailyComments') + 4 &&
       keys.indexOf('mustFollow') === keys.indexOf('dailyFollows') + 1 &&
       // 动态的额度按平台拆成两个，抖音那条夹在中间，所以「必做」隔两位
       keys.indexOf('dailyPostsDouyin') === keys.indexOf('dailyPosts') + 1 &&

@@ -717,10 +717,16 @@ export class StrollWorld {
          * 面板上要的是「两个平台加起来」的总数，所以这一项单独算：
          * 目标 = 两个额度之和，已完成 = 两个计数器之和（2026-11-14 用户要求）。
          */
-        if (action === 'post') {
-          const need = Math.max(0, Number(this.cfg.dailyPosts ?? 0)) + Math.max(0, Number(this.cfg.dailyPostsDouyin ?? 0));
+        if (action === 'post' || action === 'comment') {
+          // 动态和评论都按平台分了额度：面板显示「两边加起来」
+          const first = action === 'post' ? 'dailyPosts' : 'dailyComments';
+          const second = action === 'post' ? 'dailyPostsDouyin' : 'dailyCommentsDouyin';
+          const need =
+            Math.max(0, Number(this.cfg[first] ?? 0)) + Math.max(0, Number(this.cfg[second] ?? 0));
           const done =
-            Number(usage['post:bilibili'] ?? 0) + Number(usage['post:douyin'] ?? 0) + Number(usage.post ?? 0);
+            Number(usage[`${action}:bilibili`] ?? 0) +
+            Number(usage[`${action}:douyin`] ?? 0) +
+            Number(usage[action] ?? 0);
           return { action, label, unit, need, done, left: Math.max(0, need - done) };
         }
         const need = Math.max(0, Number(this.cfg[quotaKey] ?? 0));

@@ -120,6 +120,7 @@ export const DEFAULTS = {
   hostileReply: 'cold',
   shareWithOwner: true,
   shareWithOwnerPerDay: 1,
+  commentGapMinutes: 8,
   commentBlockedDm: true,
   mentionOwnerOnComment: false,
   shareWindowIdleSec: 0,
@@ -463,6 +464,19 @@ const QUOTA = {
         minimum: 0,
         maximum: 500,
         'x-suffix': ' 次',
+      },
+      [P + 'commentGapMinutes']: {
+        type: 'integer',
+        minimum: 0,
+        maximum: 120,
+        title: '两条评论之间至少隔几分钟',
+        description:
+          '**这个比「每天最多评论」更影响会不会被压。** 抖音判机器最强的信号是「短时间内连续评论」，' +
+          '不是单条怎么发。默认 8 分钟；0 = 不限制（不建议）。\n' +
+          '如果评论还是被压（面板「最近异常」里会显示「抖音评论没公开」），先把这个调到 15~20，' +
+          '再把「每天最多评论」降到 2~4。',
+        'x-suffix': ' 分钟',
+        'x-hot': true,
       },
       [P + 'dailySaves']: {
         type: 'integer',
@@ -1165,6 +1179,7 @@ export const POLICY_FIELDS = {
   hostileReply: { type: 'enum', values: ['cold', 'ignore', 'sharp'] },
   shareWithOwner: { type: 'boolean' },
   shareWithOwnerPerDay: { type: 'int', min: 0, max: 5 },
+  commentGapMinutes: { type: 'integer', min: 0, max: 120 },
   commentBlockedDm: { type: 'boolean' },
   mentionOwnerOnComment: { type: 'boolean' },
   shareWindowIdleSec: { type: 'number' },

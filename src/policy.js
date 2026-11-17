@@ -200,6 +200,32 @@ export class Policy {
       };
     }
 
+    /**
+     * 主动评论之间要隔久一点。
+     *
+     * 2026-11-17：用户把 dailyComments 调到 30，一天被压好几条。
+     * 抖音判「机器」最强的信号不是单条怎么发，而是**短时间内连续的评论**——
+     * 全局 20 秒的写节奏对它来说还是太密。
+     *
+     * 只约束 action=comment（自己发的评论）；reply 是回别人，属于对话，不在这里限。
+     * 默认 8 分钟，0 = 不限制。
+     */
+    if (!chatty && action === 'comment') {
+      const cm = Math.max(0, Number(this.cfg.commentGapMinutes ?? 8));
+      if (cm > 0) {
+        const sinceComment = Date.now() - Number((this.store.data.lastCommentAt ?? {})[platform] ?? 0);
+        const need = cm * 60 * 1000;
+        if (sinceComment < need) {
+          const waitMin = Math.ceil((need - sinceComment) / 60000);
+          return {
+            ok: false,
+            code: 'COMMENT_GAP',
+            message: `上一条评论才过去 ${Math.round(sinceComment / 60000)} 分钟，再等 ${waitMin} 分钟（「评论间隔」设的是 ${cm} 分钟）。连续几条评论是抖音判机器最强的信号，别急着发。`,
+          };
+        }
+      }
+    }
+
     if (!chatty && !noDedupe && (target || dedupeKey)) {
       const key = dedupeKey || `${platform}:${action}:${target}`;
       const seen = this.store.seenAt(key);

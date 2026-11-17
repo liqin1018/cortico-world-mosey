@@ -950,6 +950,44 @@ export class DouyinBrowser {
    *
    * 注意：创作者中心是独立登录态，「网页登录」那套 cookie 带不过来。
    */
+  /**
+   * 屏幕外的发布窗口：独立 profile + 挪到屏幕外。
+   *
+   * 2026-11-17：用户挂机回来发现桌面一直开着一个 douyin.com/chat——
+   * postImage 为了让「未发布图文」可见必须把**主 context** 切成有头，
+   * 私信/群监听也跟着跑进那个窗口，发完还不关。
+   *
+   * 全自动发布不需要主人看着，所以给它一个自己的 profile，开在屏幕外，用完就关。
+   * 草稿模式仍然用主窗口（他要自己点「继续编辑 → 发布」、填验证码）。
+   */
+  async launchPostProfile() {
+    const mod = await this.loadPlaywright();
+    const chromium = mod.chromium ?? mod.default?.chromium;
+    const dir = path.join(this.dataDir, 'stroll', 'post-profile');
+    fs.mkdirSync(dir, { recursive: true });
+    const ctx = await chromium.launchPersistentContext(dir, {
+      headless: false,
+      channel: this.channel ?? 'msedge',
+      viewport: { width: 1400, height: 900 },
+      locale: 'zh-CN',
+      timezoneId: 'Asia/Shanghai',
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--autoplay-policy=no-user-gesture-required',
+        '--mute-audio',
+        '--window-position=-2400,-2400',
+        '--window-size=1420,940',
+        '--disable-features=CalculateNativeWinOcclusion',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+      ],
+      ignoreDefaultArgs: ['--enable-automation'],
+    });
+    const cookies = await this.shareCookies().catch(() => []);
+    if (cookies.length) await ctx.addCookies(cookies).catch(() => {});
+    return ctx;
+  }
+
   async postImage(files, { title = '', text = '', mode = 'publish' } = {}) {
     const list = (Array.isArray(files) ? files : [files]).filter(Boolean).slice(0, 35);
     if (!list.length) return { ok: false, code: 'NO_IMAGE', error: '没有图片可发。' };
@@ -962,7 +1000,12 @@ export class DouyinBrowser {
        * 后台 headless 存下的草稿，主人用自己的浏览器怎么看都看不到（2026-11-15 反馈）。
        * 开窗口他就能直接在这个窗口里点「继续编辑 → 发布」，顺便还能自己填验证码。
        */
-      const ctx = await this.launch({ headless: false });
+      /**
+       * 全自动发布：开屏幕外的独立窗口（不碰主 context，不打扰主人）。
+       * 草稿模式：仍然用主窗口——主人要自己点「继续编辑 → 发布」。
+       */
+      const offscreen = mode !== 'draft';
+      const ctx = offscreen ? await this.launchPostProfile() : await this.launch({ headless: false });
       const page = await ctx.newPage();
       try {
         await page.goto('https://creator.douyin.com/creator-micro/content/upload', { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -1248,6 +1291,11 @@ export class DouyinBrowser {
          *
          * 现在留 10 分钟（够点发布/填验证码），到点切回无头。
          */
+        // 屏幕外窗口用完就关（草稿模式那个主窗口还是按 10 分钟规则）
+        if (offscreen) {
+          await ctx.close().catch(() => {});
+          return;
+        }
         if (this.__keepPage) {
           this.__keepPage = false;
           if (this.postRestoreTimer) clearTimeout(this.postRestoreTimer);

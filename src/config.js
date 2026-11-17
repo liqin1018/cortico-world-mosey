@@ -960,13 +960,18 @@ const WATCH = {
       [P + 'watchTalk']: {
         type: 'boolean',
         title: '一起看时主动说几句',
-        description: '开着时，播报会提醒她说 1-2 句观后感，不是只报进度。',
+        description:
+          '一起看的时候，她要不要说观后感（而不是只报「进度到 3:20 了」）。' +
+          '开着 = 每次播报会顺带说 1~2 句自己看到的东西，像真的在旁边一起看。' +
+          '关掉 = 只报进度，安静但没什么陪伴感。',
         'x-hot': true,
       },
       [P + 'watchLines']: {
         type: 'integer',
         title: '一次说几句',
-        description: '配合上一条，控制每次说多少。',
+        description:
+          '每次开口说几句（配合上面那条）。' +
+          '默认 1。两句以上会更像在聊天，但每句都在花 token。',
         minimum: 1,
         maximum: 3,
         'x-suffix': ' 句',
@@ -974,7 +979,10 @@ const WATCH = {
       [P + 'watchSpeakSec']: {
         type: 'integer',
         title: '一起看：多久说一句',
-        description: '太短会吵。',
+        description:
+          '一起看时，两次开口至少隔多久。' +
+          '默认 90 秒。太短会很吵（电影里每句话都要点评一下），太长又像没在看。' +
+          '60~120 秒之间最自然。',
         minimum: 20,
         maximum: 600,
         'x-suffix': ' 秒',
@@ -982,7 +990,10 @@ const WATCH = {
       [P + 'subtitleWatch']: {
         type: 'integer',
         title: '一起看：带几句字幕',
-        description: '按当前播放进度取的字幕句数（通常 1-2 句就够）。',
+        description:
+          '一起看时，每次播报带几句当前字幕。' +
+          '默认 2 句。她需要知道「现在演到哪句台词」才能接上话，给多了纯浪费。' +
+          '0 = 不带字幕（只靠标题和进度猜，容易说空话）。',
         minimum: 0,
         maximum: 5,
         'x-suffix': ' 句',
@@ -990,7 +1001,9 @@ const WATCH = {
       [P + 'danmakuWatch']: {
         type: 'integer',
         title: '一起看：带几条弹幕',
-        description: '当前进度前后窗口内取几条弹幕。',
+        description:
+          '一起看时，每次带几条当前弹幕。' +
+          '默认 6 条。弹幕能让她知道「观众这会儿在笑什么」，比自己看画面更接近现场感。',
         minimum: 0,
         maximum: 20,
         'x-suffix': ' 条',
@@ -998,7 +1011,9 @@ const WATCH = {
       [P + 'watchWindowSec']: {
         type: 'integer',
         title: '一起看：弹幕窗口多大',
-        description: '以当前播放秒数为中心，前后各取多少秒的弹幕。',
+        description:
+          '取弹幕的时间窗口：以当前播放秒数为中心，前后各取多少秒。' +
+          '默认 30 秒。窗口太小只有零星几条，太大会混进不相干的内容。',
         minimum: 5,
         maximum: 120,
         'x-suffix': ' 秒',
@@ -1006,7 +1021,10 @@ const WATCH = {
       [P + 'watchPollSec']: {
         type: 'integer',
         title: '一起看：多久读一次',
-        description: '读标题/进度/评论，不花 token。',
+        description:
+          '多久读一次页面状态（标题、进度、评论）。' +
+          '默认 10 秒。这一步只读 DOM，**不花 token**，所以可以放心调小。' +
+          '调小 = 反应更快（你暂停她立刻知道）；调大 = 省一点浏览器性能。',
         minimum: 5,
         maximum: 120,
         'x-suffix': ' 秒',
@@ -1014,19 +1032,29 @@ const WATCH = {
       [P + 'watchNotify']: {
         type: 'string',
         title: '她开始看时提醒我',
+        description:
+          '她开始看一条内容时，怎么提醒你。' +
+          '**只在面板上**（默认，不花 token）：面板顶部会出现「正在看」的浮条。' +
+          '**面板 + 对话里说一句**：多花一点 token，但你会立刻在聊天里看到她说要看了。' +
+          '**不提醒**：只看面板的记录。',
         'x-options': 'stroll-notify',
-        description: '面板上永远有「正在看」浮条；选「对话里也说一句」会多花一点 token。',
         'x-hot': true,
       },
       [P + 'watchWindow']: {        type: 'string',
         title: '陪看窗口多大',
-        description: '最大化够用；全屏会隐藏标题栏，按 F11 退出。',
+        description:
+          '陪看窗口开多大。' +
+          '最大化（默认）够用，也不挡任务栏。全屏会隐藏标题栏，按 F11 退出。' +
+          '窗口化适合你想一边干别的、一边瞄一眼的情况。',
         'x-options': 'stroll-watch-window',
       },
       [P + 'watchBrowser']: {
         type: 'string',
         title: '陪看用哪个浏览器',
-        description: '默认 Chrome 优先；没装会自动退回 Edge/自带 Chromium。',
+        description:
+          '陪看用哪个浏览器打开。' +
+          '默认 Chrome 优先——它的视频解码最稳。没装会自动退回 Edge 或自带 Chromium。' +
+          '如果你只用 Edge，可以直接选 Edge，省掉探测的几秒。',
         'x-options': 'stroll-watch-browser',
       },
 
@@ -1048,13 +1076,19 @@ const SHORTS = {
       [P + 'watchScroll']: {
         type: 'boolean',
         title: '抖音一起刷',
-        description: '开着时，陪看窗口会自动切到下一条抖音视频（只对抖音生效，B站不受影响）。',
+        description:
+          '陪看抖音时，要不要自动切到下一条。' +
+          '开着 = 像真的在刷，一条接一条（按下面的「多久切一条」）。只对抖音生效，B站不受影响。' +
+          '默认关：省 token，也少招风控。',
         'x-hot': true,
       },
       [P + 'watchScrollSec']: {
         type: 'integer',
         title: '一起刷：多久切一条',
-        description: '0 = 这条播完就切；填 30 就是每条停 30 秒。',
+        description:
+          '一起刷时，每条停多久再切。' +
+          '0 = 这条播完就切（跟着视频时长走）。填 30 = 不管多长，30 秒后就切。' +
+          '短视频建议 0，长视频建议 30~60（不然会一直卡在同一条上）。',
         minimum: 0,
         maximum: 180,
         'x-suffix': ' 秒',
@@ -1062,7 +1096,10 @@ const SHORTS = {
       [P + 'watchScrollEvery']: {
         type: 'integer',
         title: '一起刷：隔几条说一句',
-        description: '1 = 每条都说话；3 = 刷三条才说一次，省 token。',
+        description:
+          '刷几条才说一句。' +
+          '1 = 每条都说；3 = 刷三条说一次。' +
+          '默认 2。像人刷抖音也不是每条都评论，隔一条说一句最自然，也省一半 token。',
         minimum: 1,
         maximum: 10,
         'x-suffix': ' 条',
@@ -1070,7 +1107,10 @@ const SHORTS = {
       [P + 'watchShot']: {
         type: 'boolean',
         title: '一起刷：附一张画面',
-        description: '抖音没字幕，附截图她才看得见画面。每张约 500 token，默认关。',
+        description:
+          '一起刷时要不要附一张当前画面（截图）。' +
+          '抖音没有 CC 字幕，不附截图她其实看不见内容，只能靠标题和话题猜。' +
+          '每张约 500 token，默认关。想看她说得准一点就打开。',
       },
     },
   },

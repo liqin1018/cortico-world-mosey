@@ -1237,9 +1237,28 @@ export class DouyinBrowser {
         const stillOnEditor = /content.post.image/.test(after);
         return { ok: true, confirmed: !stillOnEditor, url: after, images: list.length, dialogs, tail: afterText.slice(0, 200) };
       } finally {
-        // 草稿存好后把窗口留着：主人要在这个窗口里点「继续编辑 → 发布」
+        /**
+         * 草稿存好后把窗口留着：主人要在这个窗口里点「继续编辑 → 发布」。
+         *
+         * **但不能一直留着。** 2026-11-17 用户反馈：挂机两小时回来，
+         * 桌面上一直开着一个 douyin.com/chat。根因是这里——
+         * postImage 为了让「未发布图文」可见，把主 context 从无头切成了有头，
+         * 发完之后只关了自己那个标签页，context 还是有头，
+         * 于是私信监听、群监听这些后台任务全跑在这个窗口里，永远不关。
+         *
+         * 现在留 10 分钟（够点发布/填验证码），到点切回无头。
+         */
         if (this.__keepPage) {
           this.__keepPage = false;
+          if (this.postRestoreTimer) clearTimeout(this.postRestoreTimer);
+          this.postRestoreTimer = setTimeout(() => {
+            this.postRestoreTimer = null;
+            if (this.cfg.background === false) return; // 主人本来就要有头模式，别动
+            this.launch({ headless: true, force: true })
+              .then(() => this.log?.info?.('stroll post window restored', { to: 'headless' }))
+              .catch(() => {});
+          }, 10 * 60 * 1000);
+          this.postRestoreTimer.unref?.();
         } else {
           await page.close().catch(() => {});
         }

@@ -6693,6 +6693,26 @@ export class StrollWorld {
   }
 
   /** 面板批准后走这里；这是唯一真正执行草稿的入口。 */
+  /**
+   * 一次批准所有「低风险」草稿。
+   *
+   * 只批 like / save / follow——这三种改错了后果最轻（取消赞、取消收藏、取关都是一步）。
+   * 评论、动态、私信仍然逐条批：那三种发出去就收不回，而且最容易踩平台规则。
+   */
+  async approveAll() {
+    const pending = this.store.pendingDrafts();
+    const safe = pending.filter((d) => ['like', 'save', 'follow'].includes(d.action));
+    if (!safe.length) return { ok: false, error: '没有可以批量批准的（点赞 / 稍后再看 / 关注）。' };
+    const done = [];
+    const failed = [];
+    for (const d of safe) {
+      const r = await this.approveDraft(d.id, 'operator').catch((e) => ({ ok: false, error: e?.message }));
+      if (r?.ok) done.push(d.id);
+      else failed.push({ id: d.id, error: r?.error ?? '失败' });
+    }
+    return { ok: done.length > 0, approved: done.length, failed, skipped: pending.length - safe.length };
+  }
+
   async approveDraft(id, source = 'operator') {
     const draft = this.store.draft(id);
     if (!draft || draft.status !== 'pending') return { ok: false, error: '这条草稿不在了或已处理。' };
@@ -6950,6 +6970,7 @@ export class StrollWorld {
       return receipt;
     } catch (error) {
       const code = error?.code ?? 'ERROR';
+      this.noteAnomaly(`${ACTION_NAMES?.[action] ?? action} 失败：${error?.message ?? String(error)}`, { kind: code });
       if (code === 'RISK') {
         await this.push('stroll.risk', `平台风控：${error.message}。已经停手，不要重试。`, { code, action, platform }, 'flush');
       } else if (source === 'operator') {
@@ -7006,6 +7027,29 @@ export class StrollWorld {
    * 一天只发一次（digestDay 幂等），没动作的日子不发。
    */
   /** 今天的动作统计（面板「今天」卡片用，纯聚合）。 */
+  /**
+   * 记一条「刚才出问题了」。
+   *
+   * 2026-11-17：面板上一直看不到 warn 级别的东西，出问题只能翻 core.log。
+   * 这里在本地留最近 20 条，面板上直接显示，不用再靠翻日志。
+   * **纯内存 + saveSoon**，不拖慢任何动作。
+   */
+  noteAnomaly(text, meta = {}) {
+    try {
+      const one = String(text ?? '').trim();
+      if (!one) return;
+      const list = Array.isArray(this.store.data.anomalies) ? this.store.data.anomalies : [];
+      // 一模一样的信息 5 分钟内不重复记（分享降级那种会连刷）
+      const last = list[list.length - 1];
+      if (last && last.text === one && Date.now() - Number(last.at ?? 0) < 5 * 60 * 1000) return;
+      list.push({ at: Date.now(), text: one.slice(0, 120), kind: String(meta.kind ?? '') });
+      this.store.data.anomalies = list.slice(-20);
+      this.store.saveSoon();
+    } catch {
+      // 记异常本身失败就算了
+    }
+  }
+
   digestToday() {
     try {
       const day = dayKey(new Date(), this.timeZone);
@@ -7353,6 +7397,7 @@ export class StrollWorld {
     try {
       if (method === 'status') return await this.panelStatus();
       if (method === 'approve') return await this.approveDraft(String(args[0] ?? ''), 'operator');
+      if (method === 'approve_all') return this.approveAll();
       if (method === 'reject') return this.rejectDraft(String(args[0] ?? ''));
       if (method === 'open') {
         const result = await this.readOpen({ url: String(args[0] ?? '') });
@@ -7930,6 +7975,8 @@ export class StrollWorld {
         .slice(0, 10)
         .map((x) => this.describeAction(x)),
       recentTotal: this.store.data.actions.filter((x) => x.platform !== 'system').length,
+      // 最近出的问题（面板「最近异常」卡片）
+      anomalies: (this.store.data.anomalies ?? []).slice(-6).reverse(),
       riskCount: this.store.data.actions.filter((x) => x.action === 'risk').length,
       risk: this.store.data.risk,
       policy: this.policyView(),

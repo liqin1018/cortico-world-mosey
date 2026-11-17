@@ -2151,3 +2151,27 @@
   color: var(--stroll-sub, #6b7280);
   font-weight: 400;
 }
+
+/* 最近异常：有才显示，一行一条 */
+.stroll-anomalies {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.stroll-anomaly {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.stroll-anomaly-time {
+  flex: 0 0 auto;
+  color: var(--stroll-sub, #6b7280);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  padding-top: 1px;
+}
+.stroll-anomaly-text {
+  color: var(--stroll-ink, #1c2330);
+}

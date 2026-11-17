@@ -591,7 +591,32 @@ export default {
           segButtons.set(item.value, b);
           seg.append(b);
         }
-        draftHead.append(draftTitle, seg);
+        /**
+         * 批量批准。只批 like / save / follow——这三种改错了一步就能撤回，
+         * 评论/动态/私信仍然逐条批（发出去收不回）。
+         */
+        let approvingAll = false;
+        const approveAllBtn = button('全部批准', async () => {
+          if (approvingAll) return;
+          approvingAll = true;
+          approveAllBtn.disabled = true;
+          msgSet('正在批准低风险的那几条…');
+          try {
+            const r = await ctx.invoke('approve_all');
+            await refresh();
+            msgSet(
+              r?.ok
+                ? `批准了 ${r.approved} 条${r.failed?.length ? `，${r.failed.length} 条失败` : ''}${r.skipped ? `（${r.skipped} 条要你逐条看）` : ''}`
+                : r?.error || '没有可批的',
+              !r?.ok,
+            );
+          } catch (error) {
+            msgSet(error.message || String(error), true);
+          }
+          approvingAll = false;
+          approveAllBtn.disabled = false;
+        }, 'ghost xs');
+        draftHead.append(draftTitle, approveAllBtn, seg);
         const draftHint = el('p', undefined, 'stroll-muted');
         // 陌生人私信：模式是「先问我」时，别人发来的消息停在这里等她点头。
         // 以前只靠她在对话里说一句，主人一忙就错过了，所以必须有个看得见的地方。
@@ -679,14 +704,18 @@ export default {
         historySec.append(historyHead, historyList);
         root.append(historySec);
 
-        /* ---------------- 今天 ---------------- */
-        const digestSec = el('section', undefined, 'stroll-sec');
-        const digestHint = el('span', undefined, 'stroll-sec-hint');
-        const digestHead = sectionHead('今天');
-        digestHead.append(digestHint);
+        /* ---------------- 最近异常 ---------------- */
+        const anomalySec = el('section', undefined, 'stroll-sec');
+        const anomalyHint = el('span', undefined, 'stroll-sec-hint');
+        const anomalyHead = sectionHead('最近异常');
+        anomalyHead.append(anomalyHint);
+        const anomalyList = el('div', undefined, 'stroll-anomalies');
+        anomalySec.append(anomalyHead, anomalyList);
+
+        root.append(anomalySec);
+        // 「今天」不再是独立区块：并进下面「最近」的顶部（两处都在讲当天的事）
         const digestCard = el('div', undefined, 'stroll-digest');
-        digestSec.append(digestHead, digestCard);
-        root.append(digestSec);
+        const digestHint = el('span', undefined, 'stroll-sec-hint');
 
         /* ---------------- 最近 / 维护 ---------------- */
         const split = el('div', undefined, 'stroll-split');
@@ -699,7 +728,8 @@ export default {
         const recentHint = el('span', undefined, 'stroll-sec-hint');
         const recentHead = sectionHead('最近', null, recentRight);
         recentHead.insertBefore(recentHint, recentRight);
-        recentSec.append(recentHead);
+        recentHead.insertBefore(digestHint, recentRight);
+        recentSec.append(recentHead, digestCard);
         const timeline = el('div', undefined, 'stroll-timeline');
         recentSec.append(timeline);
 
@@ -783,6 +813,22 @@ export default {
           const caps = p.caps ?? {};
           const bili = s.bili ?? {};
           const dy = s.douyin ?? {};
+          // 「最近异常」：有才显示，没有就整块隐藏（不占版面）
+          {
+            const list = s.anomalies ?? [];
+            anomalyList.replaceChildren();
+            anomalySec.style.display = list.length ? '' : 'none';
+            anomalyHint.textContent = list.length ? `最近 ${list.length} 条` : '';
+            for (const a of list) {
+              const row = el('div', undefined, 'stroll-anomaly');
+              const when = a.at ? new Date(a.at) : null;
+              const hhmmss = when
+                ? `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
+                : '';
+              row.append(el('span', hhmmss, 'stroll-anomaly-time'), el('span', a.text, 'stroll-anomaly-text'));
+              anomalyList.append(row);
+            }
+          }
           // 「今天」卡片：今天做了什么 + 最近跟谁聊过（都是纯聚合，不走网络）
           {
             const dg = s.digest ?? {};

@@ -280,8 +280,9 @@ const POSTING = {
         type: 'string',
         title: '发哪种动态',
         description:
-          '纯文字 = 只有一段话；纯图片 = 只发图不写字；图文 = 图加一段话。' +
-          '选后两种要先配好下面的「配图从哪来」，否则会退回纯文字。',
+          '这一步决定「发出去的东西长什么样」，B站和抖音都按它走：' +
+          '纯文字 = 一段话；纯图片 = 只发图；图文 = 图 + 一段话。' +
+          '选后两种必须先配好紧接着的「配图从哪来」——没图时不会自己现画，会退回纯文字。',
         'x-options': 'stroll-post-kind',
         'x-hot': true,
       },
@@ -435,7 +436,7 @@ const QUOTA = {
       [P + 'dailyPosts']: {
         type: 'integer',
         title: '每天最多发几条 B站动态',
-        description: '只算 B站。抖音动态在下面「必做」之后单独设。',
+        description: '只算 B站。抖音是紧随其后的「每天最多发几条抖音动态」，两边各算各的。',
         minimum: 0,
         maximum: 30,
         'x-suffix': ' 条',
@@ -607,7 +608,9 @@ const INTERACT = {
       [P + 'allowPost']: {
         type: 'boolean',
         title: '可以发 B站动态',
-        description: '纯文字；可以 @ 主人。',
+        description:
+          '会不会在 B站发动态。发什么由「动态」组里的「发哪种动态」决定——' +
+          '可以只发一句话，也可以带图。关掉之后完全不发。',
       },
       [P + 'allowSave']: {
         type: 'boolean',
@@ -1123,7 +1126,29 @@ const MESSAGES = {
  *   基础 → 主人 → 公开动作（她能做什么）→ 每日额度（做多少 / 哪些必做）
  *   → 自己出门（怎么出去）→ 私信与群 → 看视频 → 一起看 → 抖音一起刷 → 高级
  */
-export const CONFIG_GROUPS = [BASIC, OWNER, INTERACT, POSTING, QUOTA, OUTING, MESSAGES, VIEWING, WATCH, SHORTS, ADVANCED];
+/**
+ * 分组顺序按「先用哪个」排，不按代码模块排。
+ *
+ * 2026-11-17 用户反馈设置页看不懂：'可以发 B站动态' 写着「纯文字」，
+ * 下面「发哪种动态」却有图文——说明各自独立演进，没人从整页角度看过。
+ *
+ * 现在的顺序：先能跑起来（基础）→ 做多少（额度）→ 什么时候出去（出门）
+ * → 出去看什么（看视频）→ 怎么互动（公开动作）→ 发什么（动态）
+ * → 怎么聊（私信与群）→ 一起看 → 高级（风控/日志，最后）。
+ */
+export const CONFIG_GROUPS = [
+  BASIC,        // 平台、开关、审批方式
+  OWNER,        // 她 @ 谁、私信给谁
+  QUOTA,        // 每天能做多少（最常调）
+  OUTING,       // 什么时候自己出去
+  VIEWING,      // 出去看什么、看多深
+  INTERACT,     // 评论/点赞/关注的方式和限制
+  POSTING,      // 发动态：发哪种、配图从哪来
+  MESSAGES,     // 私信、陌生人、群
+  WATCH,        // 一起看
+  SHORTS,       // 抖音一起刷（暂时独立，键名不动）
+  ADVANCED,     // 风控、日志、浏览器
+];
 
 /** 旧引用兼容：第一组即基础组。 */
 

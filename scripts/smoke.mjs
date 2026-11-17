@@ -953,11 +953,12 @@ check(
   '出门方式能在设置里改',
   !!CONFIG_GROUPS.find((g) => /自己出门/.test(g.schema.title))?.schema.properties?.['worlds.stroll.outingMode'],
 );
-// 设置页顺序：常改的在前，节奏项都收进「自己出门」，一般不动的一律沉底
+// 设置页顺序：先能跑起来（基础）→ 做多少（额度）→ 什么时候出去（出门）
+// → 出去看什么（看视频）→ 怎么互动（公开动作）→ 发什么（动态）→ 怎么聊（私信群）→ 一起看 → 高级
 check(
   '设置页分组顺序',
   CONFIG_GROUPS.map((g) => g.schema.title).join('→') ===
-    '基础→主人→公开动作→动态→每日额度→自己出门→私信与群→看视频→一起看→抖音一起刷→高级',
+    '基础→主人→每日额度→自己出门→看视频→公开动作→动态→私信与群→一起看→抖音一起刷→高级',
   CONFIG_GROUPS.map((g) => g.schema.title).join('→'),
 );
 check(

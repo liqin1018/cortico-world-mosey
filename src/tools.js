@@ -59,7 +59,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll_act',
     description:
-      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态；按「动态」组的设置自动带图：图片工坊/本地目录/现画。想指定某张图就把路径放进 file，不传就每次现画）、dm、save（B站稍后再看）、sticker（发表情包）、image（把自己画的图/本地图片发到抖音私信、群聊或评论区）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（评论 rpid）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
+      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态；按「动态」组的设置自动带图：图片工坊/本地目录/现画。想指定某张图就把路径放进 file，不传就每次现画）、dm、save（B站稍后再看）、sticker（发表情包）、image（把自己画的图/本地图片发到抖音私信、群聊或评论区）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（B站 rpid / 抖音 cid）和通知给出的 root（主评论 ID）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
     tags: ['act', 'speak'],
     parameters: {
       type: 'object',
@@ -90,11 +90,11 @@ export const TOOL_DECLS = [
           enum: ['chat', 'comment'],
           description: 'image 用：chat 发到私信/群（默认），comment 发到评论区（这时 target 要给视频链接）。',
         },
-        reply_to: { type: 'string', description: '回复评论时，被回复的评论 ID（rpid）。' },
+        reply_to: { type: 'string', description: '回复评论时，对方那条评论的 ID（B站 rpid / 抖音 cid），不能为 0。' },
         root: {
           type: 'string',
           description:
-            'B站楼中楼专用：这条楼中楼所属的**主评论** rpid。推送里会带 `root=...`，照着传就行——带了它就不用去评论区翻页找楼层，深层楼中楼也能定位。不传的话插件会自己翻评论区找，楼很深时会失败。只在 reply 时有意义。',
+            '楼中楼所属的主评论 ID（B站 rpid / 抖音 cid）。推送里带 root 时照传；回复主评论时 root 与 reply_to 相同，回复子评论时两者不同。不传会尝试查询，查不到就停止。只在 reply 时有意义。',
         },
         mention_owner: {
           type: 'boolean',

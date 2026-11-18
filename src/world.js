@@ -1534,8 +1534,8 @@ export class StrollWorld {
   /**
    * 评论区 @ 她：B站 + 抖音 一起看，有新东西就推给她。
    *
-   * 抖音走自己的通知接口（notice_group=6）；**只做「看见」，不做楼中楼回复**——
-   * 回复接口在我们账号上实测 403，容易误报，先不碰。她能回的方式是发一条新评论或私信对方。
+   * 抖音走通知接口（notice_group=6），带回 cid/rootCid 供楼中楼回复定位。
+   * 没有评论 ID 的作品提及不生成回复指令。
    */
   async mentionBeat() {
     if (!this.running) return;
@@ -1593,12 +1593,17 @@ export class StrollWorld {
     };
     const lines = picked.map((x, i) => {
       if (x.platform === 'douyin') {
+        const canReply = /^[1-9]\d*$/.test(String(x.cid ?? ''));
+        const rootArg = /^[1-9]\d*$/.test(String(x.rootCid ?? '')) ? ` root=${x.rootCid}` : '';
+        const replyHint = canReply
+          ? `回他：stroll_act action=reply platform=douyin target=${x.url} reply_to=${x.cid}${rootArg} text=…（正文不用另写 @；回复失败时不要改发新评论）`
+          : '未取得可回复的评论 ID；可先读评论区确认，或私信对方，不要把新评论当作回复。';
         return (
-          `${i + 1}. ${x.user || '有人'} 在抖音评论里 @ 了你（${whenOf(stampOf(x)) || '时间不明'}）\n` +
+          `${i + 1}. ${x.user || '有人'} 在抖音${canReply ? '评论里' : '作品中'} @ 了你（${whenOf(stampOf(x)) || '时间不明'}）\n` +
           `   视频：${x.where || '（没读到标题）'}\n` +
           `   评论：${x.text}\n` +
           `   链接：${x.url}\n` +
-          `   想回：stroll_act action=comment platform=douyin target=${x.url} text=…（抖音楼中楼暂不支持，只能发一条新评论；也可以私信他）`
+          `   ${replyHint}`
         );
       }
       const target = x.bvid
@@ -1644,7 +1649,7 @@ export class StrollWorld {
     await this.push(
       'stroll.reply',
       `（${label}）有人在评论区 @ 你了：\n${lines.join('\n')}\n` +
-        '想回就照上面给的参数回；不想回就放着，不用每条都应。抖音那边暂时只能发新评论或私信，回不到那条评论下面。',
+        '想回就照上面给的参数回；不想回就放着，不用每条都应。回复未确认时先检查原评论，不要另发新评论或立即重发。',
       { kind: 'at', platform: platforms.join(','), n: picked.length },
       'debounce',
     );
@@ -3387,6 +3392,8 @@ export class StrollWorld {
         const list = await this.douyin.commentList(id, { pages: 1 }).catch(() => null);
         if (!list) return JSON.stringify({ ok: false, error: '读不到抖音评论区（要登录，或者正被限流）。' });
         const items = list.slice(0, clamp(args.n ?? 10, 1, 20)).map((c) => ({
+          cid: c.cid,
+          root: c.rootCid,
           user: c.nick,
           text: c.text || (c.images?.length ? '[图片评论]' : ''),
           like: c.digg,
@@ -6265,17 +6272,42 @@ export class StrollWorld {
 
       let target;
       if (platform === 'douyin') {
-        if (action === 'reply') return { ok: false, error: '抖音楼中楼回复暂未开放；先发一条评论。' };
         target = await this.douyin.idOf(targetRaw);
         if (!target) return { ok: false, error: '给个抖音视频链接/ID。' };
         const isReply = action === 'reply';
+        let root = '';
+        let parent = '';
+        if (isReply) {
+          parent = String(args.reply_to ?? '').trim();
+          root = String(args.root ?? '').trim();
+          if (!/^[1-9]\d*$/.test(parent)) return { ok: false, error: '回复要给有效的 reply_to（抖音评论 cid），不能为 0。' };
+          if (root && !/^[1-9]\d*$/.test(root)) return { ok: false, error: 'root 要填主评论 cid，不能为 0。' };
+          if (!root) {
+            const page = await this.douyin.getPage();
+            await this.douyin.ensureVideo(page, target, { note: /\/note\//.test(targetRaw), quick: true });
+            const found = await this.douyin.commentStatus(target, parent).catch(() => null);
+            root = String(found?.rootCid ?? '');
+            if (!/^[1-9]\d*$/.test(root)) {
+              return { ok: false, code: 'NO_REPLY_TARGET', error: '无法确认这条抖音评论属于哪层楼；请从通知或评论区取得主评论 cid 后传 root，不会改发新评论。' };
+            }
+          }
+        }
+        const dedupeKey = isReply
+          ? `${platform}:reply:${target}:r${root}:p${parent}:${text.replace(/\s+/g, '')}`
+          : undefined;
         const check = this.policy.check(action, platform, target, {
           quotaAction: `comment:${platform}`,
           skipQuota: isReply,
           userInitiated: asked,
+          dedupeKey,
         });
         if (!check.ok) return check;
-        return { ok: true, action, platform, target, text, mentionOwner, mentionName, countQuota: !isReply };
+        return {
+          ok: true, action, platform, target, text, root, parent, dedupeKey,
+          mentionOwner: isReply ? false : mentionOwner,
+          mentionName: isReply ? '' : mentionName,
+          countQuota: !isReply,
+        };
       }
 
       let kind = 'video';
@@ -6741,6 +6773,7 @@ export class StrollWorld {
     const check = this.policy.check(draft.action, draft.platform, draft.target, {
       userInitiated: true,
       quotaAction: draft.quotaAction || this.capAction(draft.action),
+      skipQuota: draft.action === 'reply',
       dedupeKey: draft.dedupeKey,
       free: draft.action === 'dm' && !draft.countQuota,
       fast: !!draft.chat,
@@ -6810,6 +6843,10 @@ export class StrollWorld {
       } else if (action === 'save') {
         result = await this.bili.save(target);
       } else if (action === 'comment' || action === 'reply') {
+        if (platform === 'douyin' && action === 'reply' &&
+            (!/^[1-9]\d*$/.test(String(plan.root ?? '')) || !/^[1-9]\d*$/.test(String(plan.parent ?? '')))) {
+          return { ok: false, code: 'BAD_REPLY_TARGET', error: '抖音回复缺少有效的主评论或被回复评论 ID，请重新取得回复目标。' };
+        }
         result = platform === 'bilibili'
           ? await this.bili.comment({
               bvid: plan.kind === 'video' || !plan.kind ? target : '',
@@ -6823,6 +6860,8 @@ export class StrollWorld {
               mentionOwner: plan.mentionOwner,
             })
           : await this.douyin.comment(target, text, {
+              root: action === 'reply' ? plan.root : '',
+              parent: action === 'reply' ? plan.parent : '',
               // 抖音 @ 人要用昵称（sec_uid 不行）；没存昵称就现读一次
               // 优先用调用方指定的那个（@豆包 这种），没指定才 @ 主人
               mention: plan.mentionName || (plan.mentionOwner ? await this.douyinOwnerName() : ''),
@@ -7013,7 +7052,8 @@ export class StrollWorld {
       return receipt;
     } catch (error) {
       const code = error?.code ?? 'ERROR';
-      this.noteAnomaly(`${ACTION_NAMES?.[action] ?? action} 失败：${error?.message ?? String(error)}`, { kind: code });
+      const uncertain = code === 'REPLY_NOT_CONFIRMED';
+      this.noteAnomaly(`${ACTION_NAMES?.[action] ?? action} ${uncertain ? '未确认' : '失败'}：${error?.message ?? String(error)}`, { kind: code });
       if (code === 'RISK') {
         await this.push('stroll.risk', `平台风控：${error.message}。已经停手，不要重试。`, { code, action, platform }, 'flush');
       } else if (source === 'operator') {
@@ -7026,13 +7066,13 @@ export class StrollWorld {
         await this
           .push(
             'stroll.sent',
-            `这条没发出去：${ACTION_NAMES?.[action] ?? action} · ${error?.message ?? String(error)}`,
+            `${uncertain ? '这条发送结果未确认' : '这条没发出去'}：${ACTION_NAMES?.[action] ?? action} · ${error?.message ?? String(error)}`,
             { code, action, platform, target },
             'flush',
           )
           .catch(() => {});
       }
-      return { ok: false, code, action, platform, target, error: error?.message ?? String(error) };
+      return { ok: false, code, action, platform, target, ...(uncertain ? { uncertain: true } : {}), error: error?.message ?? String(error) };
     }
   }
 

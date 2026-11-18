@@ -1406,7 +1406,7 @@ check(
   '@ 提醒能在设置里关',
   !!CONFIG_GROUPS.find((g) => /私信与群/.test(g.schema.title))?.schema.properties?.['worlds.stroll.mentionWatch'],
 );
-/* 抖音评论区的 @：只做「看见」，不碰楼中楼回复 */
+/* 抖音评论区的 @：保留主评论与被回复评论的定位信息 */
 const mappedDyAt = mapAtNotice({
   type: 45,
   nid_str: '7706827679853151242',
@@ -1414,18 +1414,19 @@ const mappedDyAt = mapAtNotice({
   create_time: 1794385651,
   at: {
     sub_type: 2,
-    content: '@小月 看到了吗',
-    schema_url: 'aweme://aweme/detail/7706493792187339619?cid=7706827662362215209',
+    content: '@小鹿 看到了吗',
+    schema_url: 'aweme://aweme/detail/7706493792187339619?cid=7706827662362215209&reply_id=0',
     aweme: { aweme_id: '7706493792187339619', desc: '万能的网友救一下。#电脑性能帧数', aweme_type: 68 },
-    user_info: { nickname: '小月月一直在玩', sec_uid: 'MS4wABC' },
+    user_info: { nickname: '小鹿', sec_uid: 'MS4wABC' },
   },
 });
 check(
   '抖音 @ 通知映射（cid 从 schema_url 里取）',
   mappedDyAt?.cid === '7706827662362215209' &&
+    mappedDyAt?.rootCid === '7706827662362215209' &&
     mappedDyAt?.awemeId === '7706493792187339619' &&
     mappedDyAt?.type === 'note' &&
-    mappedDyAt?.user === '小月月一直在玩' &&
+    mappedDyAt?.user === '小鹿' &&
     /万能的网友/.test(mappedDyAt?.where ?? ''),
   JSON.stringify(mappedDyAt),
 );
@@ -1445,11 +1446,11 @@ world.douyin.noticeMentions = async () => [
 mPushes.length = 0;
 await world.mentionBeat();
 check(
-  '抖音有人 @ 也会叫她，并说明只能发评论/私信',
+  '抖音有人 @ 推送楼中楼回复参数',
   mPushes.length === 1 &&
     /抖音评论里 @ 了你/.test(mPushes[0].text) &&
-    /action=comment/.test(mPushes[0].text) &&
-    !/reply_to=/.test(mPushes[0].text),
+    /action=reply platform=douyin/.test(mPushes[0].text) &&
+    /reply_to=7706827662362215209 root=7706827662362215209/.test(mPushes[0].text),
   JSON.stringify(mPushes).slice(0, 200),
 );
 await world.mentionBeat();
@@ -1462,6 +1463,91 @@ world.push = prevPushM;
 world.running = prevRunningM;
 world.cfg.bilibili = prevCfgM.bilibili;
 world.cfg.mentionWatch = prevCfgM.mentionWatch;
+
+/* ---------------- 抖音楼中楼：通知 → 计划/草稿 → 请求 ---------------- */
+{
+  const notice = (schema, sub_type = 2) => mapAtNotice({
+    type: 45, at: { sub_type, schema_url: schema, aweme: { aweme_id: '7530000000000000000' } },
+  });
+  check('子评论通知保留不同的 root/cid', notice('?cid=222&reply_id=111').rootCid === '111');
+  check('通知没给主评论时不猜 cid 就是主评论', notice('?cid=222').rootCid === '');
+  check('作品提及不当成评论回复', notice('?cid=222&reply_id=111', 1).cid === '');
+
+  const rw = new StrollWorld({
+    cfg: { ...DEFAULTS, enabled: true, douyin: true, quietFrom: 0, quietTo: 0, dailyComments: 0, dailyCommentsDouyin: 0, douyinCommentVia: 'manual' },
+    timezone: 'Asia/Shanghai', dataDir: path.join(tmp, 'douyin-reply'), persist: () => {},
+  });
+  const args = { platform: 'douyin', target: '7530000000000000000', reply_to: '222', root: '111', text: '这条解释看明白了' };
+  const plan = await rw.buildPlan('reply', args, { byOwner: true });
+  check('抖音子回复在主动评论额度为零时仍可计划', plan.ok && plan.root === '111' && plan.parent === '222' && plan.countQuota === false, JSON.stringify(plan));
+  const draft = rw.makeDraft(plan);
+  check('审批草稿保留 root/parent 和不计额度', draft.root === '111' && draft.parent === '222' && draft.countQuota === false);
+  check('reply_to=0 被拒绝', !(await rw.buildPlan('reply', { ...args, reply_to: '0' })).ok);
+  check('root=0 被拒绝', !(await rw.buildPlan('reply', { ...args, root: '0' })).ok);
+  const other = await rw.buildPlan('reply', { ...args, reply_to: '333' }, { byOwner: true });
+  check('同文回复不同评论不共享去重键', other.ok && other.dedupeKey !== plan.dedupeKey);
+
+  const requests = [];
+  let responseMode = 'ok';
+  let publishStatus = 1;
+  const savedFetch = globalThis.fetch;
+  const page = {
+    isClosed: () => false,
+    url: () => 'https://www.douyin.com/video/7530000000000000000',
+    waitForTimeout: async () => { throw new Error('Target page has been closed'); },
+    evaluate: async (fn, payload) => {
+      globalThis.fetch = async (url, options) => {
+        requests.push({ url, body: new URLSearchParams(options?.body) });
+        if (responseMode === 'lost') throw new Error('simulated connection loss');
+        const data = responseMode === 'ok'
+          ? { status_code: 0, comment: { cid: '444', status: publishStatus } }
+          : { status_code: 8, status_msg: 'request denied' };
+        return { status: responseMode === 'ok' ? 200 : 403, text: async () => JSON.stringify(data) };
+      };
+      try { return await fn(payload); } finally { globalThis.fetch = savedFetch; }
+    },
+  };
+  rw.douyin.getPage = async () => page;
+  rw.douyin.isLoggedIn = async () => true;
+  rw.douyin.ensureVideo = async () => {};
+  rw.douyin.findCommentInput = async () => { throw new Error('楼中楼不得打开顶层评论输入框'); };
+  const invalidDraft = await rw.executePlan({ ...plan, root: '', parent: '' }, 'smoke');
+  check('缺失定位的旧回复草稿不能误发新评论', invalidDraft.code === 'BAD_REPLY_TARGET' && requests.length === 0);
+  const sent = await rw.approveDraft(draft.id, 'smoke');
+  check('子回复执行发送主评论与子评论ID', sent.ok && requests.at(-1)?.body.get('reply_id') === '111' && requests.at(-1)?.body.get('reply_to_reply_id') === '222', JSON.stringify(sent));
+  check('楼中楼执行不扣主动评论额度', rw.store.usage('comment:douyin') === 0);
+  const mainReply = await rw.douyin.comment(args.target, args.text, { root: '111', parent: '111' });
+  check('回主评论时 reply_to_reply_id=0', mainReply.confirmed && requests.at(-1).body.get('reply_id') === '111' && requests.at(-1).body.get('reply_to_reply_id') === '0');
+  for (const status of [0, 7]) {
+    publishStatus = status;
+    rw.store.data.lastWriteAt = 0;
+    rw.store.data.lastWriteByPlat = {};
+    const key = `smoke:reply:closed:${status}`;
+    const closedDraft = rw.makeDraft({ ...plan, dedupeKey: key });
+    const closedReceipt = await rw.approveDraft(closedDraft.id, 'smoke');
+    check(`发布已返回 cid/status=${status} 后关页仍保留成功回执和去重`,
+      closedReceipt.ok && !!rw.store.seenAt(key), JSON.stringify(closedReceipt));
+  }
+  publishStatus = 1;
+  for (const mode of ['denied', 'lost']) {
+    responseMode = mode;
+    const before = requests.length;
+    let code = '';
+    try { await rw.douyin.comment(args.target, args.text, { root: '111', parent: '222' }); } catch (e) { code = e.code; }
+    check(`楼中楼 ${mode} 不重试不降级新评论`, code === 'REPLY_NOT_CONFIRMED' && requests.length === before + 1, code);
+  }
+  rw.store.data.lastWriteAt = 0;
+  rw.store.data.lastWriteByPlat = {};
+  const unknownDraft = rw.makeDraft({ ...plan, text: '这次补充也看到了', dedupeKey: 'smoke:reply:unknown' });
+  const unknownReceipt = await rw.approveDraft(unknownDraft.id, 'smoke');
+  check('楼中楼丢失回执时草稿标为未确认而非未发送', unknownReceipt.uncertain === true && rw.store.draft(unknownDraft.id).status === 'unknown');
+  rw.douyin.commentStatus = async () => ({ rootCid: '111' });
+  const resolved = await rw.buildPlan('reply', { ...args, root: '', text: '这次补充也看到了' }, { byOwner: true });
+  check('未传 root 时使用查询到的主评论', resolved.root === '111' && resolved.parent === '222');
+  rw.douyin.commentStatus = async () => null;
+  const missingRoot = await rw.buildPlan('reply', { ...args, root: '' }, { byOwner: true });
+  check('主评论查不到时停止回复', !missingRoot.ok && missingRoot.code === 'NO_REPLY_TARGET');
+}
 
 /* ---------------- 抖音登录态：误报与备份 ---------------- */
 const prevDyPage = world.douyin.page;

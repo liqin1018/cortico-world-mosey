@@ -60,7 +60,8 @@ export function mapAtNotice(item) {
   if (!awemeId) return null;
   const schema = String(at.schema_url ?? '');
   const cid = schema.match(/[?&]cid=(\d+)/)?.[1] ?? String(at.cid ?? at.comment_id ?? '');
-  const rootCid = schema.match(/[?&]reply_id=(\d+)/)?.[1] ?? (String(at.reply_id ?? '') || cid);
+  const rootId = schema.match(/[?&]reply_id=(\d+)/)?.[1] ?? String(at.reply_id ?? '');
+  const rootCid = rootId === '0' ? cid : rootId;
   const note = Number(aweme.aweme_type ?? item.aweme_type ?? 0) === 68;
   const content = String(at.content ?? at.label_text ?? '').trim();
   const title = String(aweme.desc ?? aweme.item_title ?? aweme.title ?? '').trim();
@@ -79,7 +80,8 @@ export function mapAtNotice(item) {
     at: Number(item.create_time ?? 0) * 1000,
     url: `${ORIGIN}/${note ? 'note' : 'video'}/${awemeId}`,
     awemeId,
-    cid,
+    cid: Number(at.sub_type) === 1 ? '' : cid,
+    rootCid: Number(at.sub_type) === 1 ? '' : rootCid,
   };
 }
 
@@ -3631,20 +3633,20 @@ export class DouyinBrowser {
    * 而走评论框那条要 6-8 秒，其中 5 秒纯粹在等抖音把评论区 hydrate 出来。
    * 只在不带 @ 的时候用：@ 是编辑器插的 chip（text_extra），字段拼错了会变成一条
    * 纯文本「@昵称」——看起来提到了、其实没通知人，还不如慢一点稳。
-   * 返回 null 表示「这条路走不通」，调用方退回点评论框。
+   * 返回 null 表示没拿到发布回执；新评论可退回编辑器，楼中楼必须停止，避免误发新评论。
    */
-  async commentViaApi(page, id, text) {
+  async commentViaApi(page, id, text, { root = '', parent = '' } = {}) {
     if (!page || page.isClosed()) return null;
     if (!/douyin\.com/.test(page.url())) return null;
     const r = await page
       .evaluate(
-        async ({ awemeId, text }) => {
+        async ({ awemeId, text, root, parent }) => {
           const body = new URLSearchParams({
             aweme_id: String(awemeId),
             text,
             text_extra: '[]',
-            reply_id: '0',
-            reply_to_reply_id: '0',
+            reply_id: root || '0',
+            reply_to_reply_id: parent && parent !== root ? parent : '0',
             is_following: '0',
             aweme_type: '0',
             channel_id: '0',
@@ -3686,7 +3688,7 @@ export class DouyinBrowser {
             extra: Array.isArray(data?.comment?.text_extra) ? data.comment.text_extra : [],
           };
         },
-        { awemeId: id, text },
+        { awemeId: id, text, root, parent },
       )
       .catch(() => null);
     if (!r) return null;
@@ -3800,7 +3802,14 @@ export class DouyinBrowser {
     return h ? h.asElement() : null;
   }
 
-  async comment(idOrUrl, text, { mention = '' } = {}) {
+  async comment(idOrUrl, text, { mention = '', root = '', parent = '' } = {}) {
+    root = String(root ?? '').trim();
+    parent = String(parent ?? '').trim();
+    const isReply = !!(root || parent);
+    if (isReply && (!/^[1-9]\d*$/.test(root) || !/^[1-9]\d*$/.test(parent))) {
+      throw new DouyinError('BAD_REPLY_TARGET', '楼中楼回复必须带有效的主评论 ID 和被回复评论 ID。');
+    }
+    if (isReply) mention = '';
     return this.serialize(async () => {
       const id = await this.idOf(idOrUrl);
       if (!id) throw new DouyinError('BAD_ID', '不是有效的抖音视频');
@@ -3827,9 +3836,10 @@ export class DouyinBrowser {
       // ---- 快路径：不带 @ 直接调发布接口 ----
       // 1 秒出结果，省掉「等评论区 hydrate（约 5 秒）+ 点两下 + 打字 + 等回执」
       // 前提是页面得停在这条视频上：实测从抖音首页调会被 403 挡回来，从 /video/ 页调才通。
-      if (!mention && viaApi) {
+      // 楼中楼只走带明确回复目标的请求；失败时不能落入顶层评论编辑器。
+      if (isReply || (!mention && viaApi)) {
         await this.ensureVideo(page, id, { note: /\/note\//.test(String(idOrUrl)), quick: true });
-        const fast = await this.commentViaApi(page, id, text).catch((e) => {
+        const fast = await this.commentViaApi(page, id, text, { root, parent }).catch((e) => {
           if (e?.code === 'LOGIN_REQUIRED') throw e;
           return null;
         });
@@ -3838,8 +3848,13 @@ export class DouyinBrowser {
           // 刚提交常是 7（审核中）；按 0.2/0.3/0.6 秒查一次，落定就走
           if (!status || status === 7) {
             for (const wait of [200, 300, 600]) {
-              await page.waitForTimeout(wait);
-              const st = await this.commentStatus(id, fast.cid).catch(() => null);
+              // 已拿到 cid 就已提交；关页只会中断状态查询，不能抹掉发布回执。
+              try {
+                await page.waitForTimeout(wait);
+              } catch {
+                break;
+              }
+              const st = await this.commentStatus(id, fast.cid, { root }).catch(() => null);
               if (st && st.status > 0) {
                 status = st.status;
                 if (status !== 7) break;
@@ -3867,9 +3882,15 @@ export class DouyinBrowser {
             visible,
             note,
             via: 'api',
+            root,
+            parent,
             url: `https://www.douyin.com/video/${id}`,
           };
         }
+      }
+
+      if (isReply) {
+        throw new DouyinError('REPLY_NOT_CONFIRMED', '未拿到抖音楼中楼回复回执；可能被拒绝或响应丢失，请先查看原评论，不要立即重发。不会改发新评论。');
       }
 
       // ---- 稳路径：真的去点评论框（带 @ 时只能走这条） ----
@@ -4031,12 +4052,12 @@ export class DouyinBrowser {
   }
 
   /** 按 cid 取单条评论的最终状态（发布接口返回的 status 只是「刚提交」，会变）。 */
-  async commentStatus(awemeId, cid) {
+  async commentStatus(awemeId, cid, { root = '' } = {}) {
     const page = this.page;
     if (!page || !awemeId || !cid) return null;
     return await page
       .evaluate(
-        async ({ id, cid }) => {
+        async ({ id, cid, root }) => {
           const q = new URLSearchParams({
             device_platform: 'webapp',
             aid: '6383',
@@ -4053,18 +4074,23 @@ export class DouyinBrowser {
             platform: 'PC',
             downlink: '10',
           });
-          const r = await fetch(`https://www.douyin.com/aweme/v1/web/comment/list/?${q}`, { credentials: 'include' });
+          if (root) q.set('comment_id', String(root));
+          const endpoint = root ? 'comment/list/reply' : 'comment/list';
+          const r = await fetch(`https://www.douyin.com/aweme/v1/web/${endpoint}/?${q}`, { credentials: 'include' });
           if (!r.ok) return null;
           const d = await r.json().catch(() => null);
           const hit = (d?.comments ?? []).find((c) => String(c.cid) === String(cid));
           if (!hit) return null;
+          const rootId = String(hit.reply_id ?? '');
           return {
+            cid: String(hit.cid),
+            rootCid: root || (rootId === '0' ? String(hit.cid) : rootId),
             status: Number(hit.status ?? 0),
             text: String(hit.text ?? ''),
             extra: Array.isArray(hit.text_extra) ? hit.text_extra.map((e) => ({ type: e.type, sec_uid: e.sec_uid })) : [],
           };
         },
-        { id: String(awemeId), cid: String(cid) },
+        { id: String(awemeId), cid: String(cid), root: String(root) },
       )
       .catch(() => null);
   }
@@ -4104,6 +4130,7 @@ export class DouyinBrowser {
             for (const c of d.comments) {
               out.push({
                 cid: String(c.cid ?? ''),
+                rootCid: String(c.reply_id ?? '0') === '0' ? String(c.cid ?? '') : String(c.reply_id),
                 text: String(c.text ?? ''),
                 uid: String(c.user?.uid ?? ''),
                 nick: String(c.user?.nickname ?? ''),

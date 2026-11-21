@@ -1227,6 +1227,27 @@
 }
 
 /* ---------------- 空态 ---------------- */
+/* 过期草稿提示：不能静默消失，主人得知道「刚才看到那条不会发了」 */
+.stroll-expired {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+  padding: 11px 12px;
+  border: 1px dashed color-mix(in srgb, var(--s-warn) 45%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--s-warn) 7%, transparent);
+}
+.stroll-expired strong {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-warn);
+}
+.stroll-expired span {
+  font-size: 10.5px;
+  line-height: 1.45;
+  opacity: 0.72;
+}
 .stroll-empty {
   padding: 18px 14px;
   border: 1px dashed var(--s-line);

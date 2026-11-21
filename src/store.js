@@ -6,6 +6,18 @@ const MAX_ACTIONS = 300;
 const MAX_DRAFTS = 30;
 const MAX_SEEN = 2500;
 const MAX_DAYS = 90;
+/**
+ * 草稿等主人批的时限。
+ *
+ * 超过这个时间的草稿不再算「待批」——但它**不删**。
+ * 2026-11-22 群友反馈：待审批列表里两条评论凭空消失，鱼那边早就说过「已提交待审批」。
+ * 原因就是这里：以前 addDraft 每次新建都把超时的旧草稿 filter 掉（物理删除），
+ * pendingDrafts 又只返回 30 分钟内的，于是面板上一个字都没有，谁都不知道发生过什么。
+ * 现在改成标 expired，面板能显示「这几条过期了，得重发」。
+ */
+export const DRAFT_TTL_MS = 30 * 60 * 1000;
+/** 过期草稿留多久：够主人隔天回来核对，不至于无限堆积。 */
+const DRAFT_EXPIRED_KEEP_MS = 3 * 86400000;
 const STAT_KEYS = { like: 'likes', comment: 'comments', follow: 'follows', post: 'posts', dm: 'dms', save: 'saves' };
 
 function blank() {
@@ -118,11 +130,16 @@ export class Store {
     const weeks = Object.keys(this.data.weekUsage).sort();
     for (const week of weeks.slice(0, Math.max(0, weeks.length - 26))) delete this.data.weekUsage[week];
     this.data.actions = this.data.actions.slice(-MAX_ACTIONS);
-    // pending/sending 必留；unknown（进程退出时发送中，结果不明）留 7 天，让主人能核对，不再当场删掉
-    const keep = new Set(['pending', 'sending', 'unknown']);
+    // pending/sending 必留；unknown（进程退出时发送中，结果不明）留 7 天，让主人能核对，不再当场删掉；
+    // expired 留 3 天——过期不等于没发生过，主人得能看见「这几条作废了」
+    const keep = new Set(['pending', 'sending', 'unknown', 'expired']);
     this.data.drafts = this.data.drafts
       .filter((d) => {
         if (!keep.has(d.status)) return false;
+        if (d.status === 'expired') {
+          const at = Date.parse(d.expiredAt ?? d.createdAt ?? '');
+          return Number.isFinite(at) && Date.now() - at < DRAFT_EXPIRED_KEEP_MS;
+        }
         if (d.status !== 'unknown') return true;
         const at = Date.parse(d.createdAt ?? '');
         return Number.isFinite(at) && Date.now() - at < 7 * 86400000;
@@ -193,10 +210,14 @@ export class Store {
   }
 
   addDraft(draft) {
+    // 超时的旧草稿标 expired，不物理删除：删了面板就「凭空少一条」，主人和鱼对不上账
     const now = Date.now();
-    this.data.drafts = this.data.drafts.filter(
-      (d) => d.status === 'pending' && now - Date.parse(d.createdAt) < 30 * 60 * 1000,
-    );
+    for (const d of this.data.drafts) {
+      if (d.status === 'pending' && now - Date.parse(d.createdAt) >= DRAFT_TTL_MS) {
+        d.status = 'expired';
+        d.expiredAt = new Date().toISOString();
+      }
+    }
     const item = {
       id: randomCode('draft'),
       status: 'pending',
@@ -214,8 +235,29 @@ export class Store {
   pendingDrafts() {
     const now = Date.now();
     return this.data.drafts
-      .filter((d) => d.status === 'pending' && now - Date.parse(d.createdAt) < 30 * 60 * 1000)
+      .filter((d) => d.status === 'pending' && now - Date.parse(d.createdAt) < DRAFT_TTL_MS)
       .map((d) => ({ ...d, ageSec: Math.round((now - Date.parse(d.createdAt)) / 1000) }));
+  }
+
+  /**
+   * 已经超时、不能再批的草稿。
+   *
+   * 面板拿它显示「N 条已过期，要重发」——以前这批草稿是静默消失的，
+   * 主人只知道「刚才明明看到一条」，鱼那边还以为在等审批。
+   * 包含还没被 addDraft 标 expired、但实际已经超时的 pending。
+   */
+  expiredDrafts(limit = 5) {
+    const now = Date.now();
+    return this.data.drafts
+      .filter((d) => d.status === 'expired'
+        || (d.status === 'pending' && now - Date.parse(d.createdAt) >= DRAFT_TTL_MS))
+      .slice(-limit)
+      .reverse()
+      .map((d) => ({
+        ...d,
+        status: 'expired',
+        expiredSec: Math.round((now - Date.parse(d.expiredAt ?? d.createdAt)) / 1000),
+      }));
   }
 
   closeDraft(id, status, extra = {}) {

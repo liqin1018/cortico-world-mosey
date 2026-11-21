@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store } from './store.js';
+import { Store, DRAFT_TTL_MS } from './store.js';
 import { Policy, approvalFor, clampText } from './policy.js';
 import { Bilibili } from './bilibili.js';
 import { DouyinBrowser, secUidOf, stripLeadingFakeAt } from './douyin.js';
@@ -1528,6 +1528,119 @@ export class StrollWorld {
   }
 
   /**
+   * 抖音「有人回复了我的评论」：抖音不发通知，只能自己看她那几条评论下面的楼。
+   *
+   * 2026-11-22：主人在楼中楼里接着回她，她 6 分钟毫无动静——`notice_group=6` 只装 @，
+   * 子回复一条都不在里面。B站那条链路早有 `bili.replies()`，抖音这块一直缺。
+   * 只查最近 3 天、最多 5 层楼，1 分钟一次，别把账号刷成风控。
+   */
+  async douyinMyReplies() {
+    if (!this.douyin) return [];
+    if (Date.now() - Number(this.dyReplyAt ?? 0) < 60 * 1000) return [];
+    this.dyReplyAt = Date.now();
+    /**
+     * 别因为「不知道我是谁」就整条放弃。
+     *
+     * 2026-11-22：这里原本是 `if (!me) return []`，结果 selfUid 一直空着（启动时页面还停在
+     * about:blank，sessionAlive 直接返回 null），读楼函数连日志都没打就退出了，
+     * 表现出来就是「怎么改都没动静」。改成拿不到 uid 就退回用昵称比对。
+     */
+    if (!this.douyin.selfUid) await this.douyin.sessionAlive?.({ force: true }).catch(() => null);
+    const me = String(this.douyin.selfUid ?? '');
+    const myName = String(this.douyin.selfName ?? '');
+    const cutoff = Date.now() - 3 * 86400000;
+    const picked = [];
+    const used = new Set();
+    const add = (awemeId, cid, root, at, loose) => {
+      const key = `${awemeId}:${root}`;
+      if (!/^\d+$/.test(awemeId) || !/^\d+$/.test(root) || used.has(key)) return;
+      if (!(at >= cutoff)) return;
+      // 只盯最近 6 小时的楼：更早的楼里翻出来的旧留言会变成一串马后炮
+      if (loose && Date.now() - at > 6 * 3600 * 1000) return;
+      used.add(key);
+      picked.push({ awemeId, cid, root, at, loose });
+    };
+    // 她发过的评论：只认她那条本身被回复
+    for (const a of [...(this.store.data.actions ?? [])].reverse()) {
+      if (a.platform !== 'douyin' || (a.action !== 'comment' && a.action !== 'reply')) continue;
+      const cid = String(a.extra?.cid ?? '');
+      const awemeId = String(a.target ?? '');
+      if (!/^\d+$/.test(cid) || !/^\d+$/.test(awemeId)) continue;
+      add(awemeId, cid, String(a.extra?.root ?? '') || cid, Date.parse(a.at), false);
+      if (picked.length >= 2) break;
+    }
+    /**
+     * @ 通知所在的楼也一起盯。
+     *
+     * 她回复后插件并不总能拿到那条回复的 cid（实测 2026-11-22：她明明回了，
+     * `actions` 里却没有记录），只靠上面那份会漏掉正在进行的对话。
+     * 这种楼放宽成「这层楼里有别人的新回复」，宁可多说一句也别装死。
+     */
+    for (const t of this.store.data.dyThreads ?? []) {
+      add(String(t.awemeId ?? ''), '', String(t.root ?? ''), Number(t.at) || 0, true);
+      if (picked.length >= 5) break;
+    }
+    const out = [];
+    const stats = { me: me ? 'uid' : myName ? 'name' : 'unknown', threads: picked.length, kids: 0, kept: 0, statuses: {} };
+    for (const p of picked) {
+      const kids = await this.douyin.commentReplies(p.awemeId, p.root).catch(() => []);
+      stats.kids += kids.length;
+      for (const k of kids) {
+        const st = String(k.status ?? '?');
+        stats.statuses[st] = (stats.statuses[st] ?? 0) + 1;
+        // 2 = 只有她自己看得见；其余（含审核中 7、未知）都算「有人说话了」
+        if (!k.cid || !k.text || k.status === 2) continue;
+        if (me ? k.uid === me : myName && k.user === myName) continue;
+        if (!p.loose) {
+          // 只认「回的是她那条」：子回复指向她的 cid；或者她那条本身就是主楼（reply_id=0）
+          const toMe = k.to === p.cid || (p.root === p.cid && (k.to === '0' || k.to === ''));
+          if (!toMe) continue;
+        }
+        out.push({
+          platform: 'douyin',
+          source: p.loose ? 'thread' : 'reply',
+          kind: 'at',
+          id: `dreply:${k.cid}`,
+          cid: k.cid,
+          rootCid: p.root,
+          awemeId: p.awemeId,
+          user: k.user,
+          text: k.text,
+          where: '抖音评论区（你刚在的那层楼）',
+          url: `https://www.douyin.com/video/${p.awemeId}`,
+          at: k.at,
+        });
+      }
+    }
+    stats.kept = out.length;
+    this.log?.info?.('stroll dy replies', stats);
+    return out;
+  }
+
+  /** 批量记住几层楼（@ 通知一次给 6 条，只留最近 5 层）。 */
+  rememberDyThreads(items) {
+    const prev = Array.isArray(this.store.data.dyThreads) ? this.store.data.dyThreads : [];
+    const next = [...prev];
+    let changed = false;
+    for (const x of items ?? []) {
+      const awemeId = String(x?.awemeId ?? '');
+      const root = String(x?.rootCid || x?.cid || '');
+      if (!/^\d+$/.test(awemeId) || !/^\d+$/.test(root)) continue;
+      if (next.some((t) => String(t?.awemeId) === awemeId && String(t?.root) === root)) continue;
+      next.unshift({ awemeId, root, at: Number(x.at) || Date.now() });
+      changed = true;
+    }
+    if (!changed) return;
+    this.store.data.dyThreads = next.slice(0, 5);
+    this.store.save();
+  }
+
+  /** 记住单层楼。 */
+  rememberDyThread(x) {
+    this.rememberDyThreads([{ ...x, rootCid: x?.rootCid || x?.cid }]);
+  }
+
+  /**
    * 评论区 @ 她：查一次「@我的」，有新东西就推给她。
    * 只读接口，失败就当没有（未登录/没开评论通知都会是空的），不打扰她。
    */
@@ -1545,7 +1658,17 @@ export class StrollWorld {
     const douyinOn = (live.douyin ?? this.cfg.douyin) !== false;
     if (!biliOn && !douyinOn) return;
     if ((live.mentionWatch ?? this.cfg.mentionWatch ?? true) === false) return;
-    if (this.policy.isQuiet()) return;
+    /**
+     * 安静时段**不拦这一条**。
+     *
+     * 2026-11-22：主人凌晨 01:30 在评论区 @ 了她（带真 @ 标签），等到 01:40 一点动静都没有，
+     * 最后是主人自己在聊天里问「你看到了吗」才发现——因为这里有一行 `isQuiet() → return`，
+     * 安静时段（他家配的是 1-7 点）连通知接口都不查。而她自己的私信、群聊从来不受安静时段限制，
+     * 只有 @ 半夜是哑的，这个不一致就是 bug。
+     *
+     * 安静时段只该管「她自己出门、主动搭话、吵陌生人」（见 529 / 2433 两处），
+     * 别人主动 @ 她是对话，该立刻叫她。
+     */
     const paused = this.policy.paused();
     // 只读接口不怕软限流（-509 这类），硬风控（验证码/封禁）期间连读都别读
     const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
@@ -1554,16 +1677,23 @@ export class StrollWorld {
     // 30 秒（原 90 秒）：@ 是对话，不该等一分半；平台侧延迟只能靠这个补
     if (Date.now() - Number(this.mentionAt ?? 0) < 30 * 1000) return;
     this.mentionAt = Date.now();
-    const [biliItems, douyinItems, biliReplies] = await Promise.all([
+    const [biliItems, douyinItems, biliReplies, douyinReplies] = await Promise.all([
       biliOn ? this.bili.mentions(6).catch(() => []) : [],
       douyinOn ? this.douyin.noticeMentions(6).catch(() => []) : [],
       // 「谁回复了我的评论」——楼中楼对话链的入口，和 @ 是两套通知
       biliOn ? this.bili.replies(6).catch(() => []) : [],
+      douyinOn ? this.douyinMyReplies().catch(() => []) : [],
     ]);
+    /**
+     * 抖音的 @ 通知带着「这层楼」的坐标。不管这条推没推过都记下来：
+     * 已经推过的旧 @ 同样在对话里，之后有人在那层回话，她得能被叫醒。
+     */
+    if (douyinOn) this.rememberDyThreads(douyinItems);
     const items = [
       ...biliItems.map((x) => ({ ...x, platform: 'bilibili', source: 'at' })),
       ...douyinItems,
       ...biliReplies.map((x) => ({ ...x, platform: 'bilibili', source: 'reply' })),
+      ...douyinReplies,
     ];
     // B站 沿用老的去重键（升级后不会把旧 @ 再提醒一遍），抖音单独加平台前缀
     const keyOf = (x) => (x.platform === 'douyin' ? `atpush:douyin:${x.id}` : `atpush:${x.id}`);
@@ -1598,8 +1728,13 @@ export class StrollWorld {
         const replyHint = canReply
           ? `回他：stroll_act action=reply platform=douyin target=${x.url} reply_to=${x.cid}${rootArg} text=…（正文不用另写 @；回复失败时不要改发新评论）`
           : '未取得可回复的评论 ID；可先读评论区确认，或私信对方，不要把新评论当作回复。';
+        const head = x.source === 'thread'
+          ? `${x.user || '有人'} 在你那层楼里回了一句`
+          : x.source === 'reply'
+            ? `${x.user || '有人'} 回复了你的评论`
+            : `${x.user || '有人'} 在抖音${canReply ? '评论里' : '作品中'} @ 了你`;
         return (
-          `${i + 1}. ${x.user || '有人'} 在抖音${canReply ? '评论里' : '作品中'} @ 了你（${whenOf(stampOf(x)) || '时间不明'}）\n` +
+          `${i + 1}. ${head}（${whenOf(stampOf(x)) || '时间不明'}）\n` +
           `   视频：${x.where || '（没读到标题）'}\n` +
           `   评论：${x.text}\n` +
           `   链接：${x.url}\n` +
@@ -3542,12 +3677,22 @@ export class StrollWorld {
     if (!plan.ok) return JSON.stringify(plan);
     if (args.preview === true || approvalFor(this.cfg, plan.action) === 'draft') {
       const draft = this.makeDraft(plan);
+      /**
+       * 有效期必须写进回执。
+       *
+       * 草稿 30 分钟没人批就作废（以前是静默消失，主人打开面板什么都没有，
+       * 她还以为在等审批——2026-11-22 群友反馈）。把到期时间给她，
+       * 她转告主人时才能说清「半小时内要点，过了得重发」。
+       */
+      const expiresAt = new Date(Date.parse(draft.createdAt) + DRAFT_TTL_MS).toISOString();
       return JSON.stringify({
         ok: true,
         draft: true,
         id: draft.id,
         preview: this.previewText(draft),
-        message: '已放进草稿箱；等主人在「摸鱼」面板点批准。不要自己批准，也不要重复提交。',
+        expiresAt,
+        expiresInSec: Math.round(DRAFT_TTL_MS / 1000),
+        message: `已放进草稿箱；等主人在「摸鱼」面板点批准。**${Math.round(DRAFT_TTL_MS / 60000)} 分钟内有效**（到 ${expiresAt}），过期就作废、要重新提一次。不要自己批准，也不要重复提交。`,
       });
     }
     const receipt = await this.executePlan(plan, 'model');
@@ -7183,57 +7328,54 @@ export class StrollWorld {
    * **不阻塞**：push 不 await。
    */
   /**
-   * 账号健康：用**匿名视角**看她最近一条 B站公开评论还在不在。
+   * 账号健康：最近一条 B站公开评论**在别人眼里可见吗**。
    *
-   * 2026-11-17：群友那份反馈教会的方法——插件自己带 cookie 回查永远能看到
-   * 自己的 state=17 评论，只有匿名才看得见「别人眼里有没有」。
+   * 判据用发送时那次回查的结果——`bilibili.comment` 里的 `visibility` 三态，
+   * 带登录态读评论自身的 `state` 字段（0 = 正常，17 = 仅自己可见/审核中），
+   * 是唯一能分「真被压」和「只是没翻到」的证据。
    *
-   * 一天最多查一次（缓存 healthCheckedAt），零登录态、只读公开接口。
-   * 结果给面板「今天」卡片用一行显示。
+   * 2026-11-22 修掉两个错（群友反馈「两条评论都会报匿名看不到」）：
+   *   1. 以前写 `acts[0]`，但 actions 是 push 追加的，`acts[0]` 是**最旧**的一条，
+   *      实测取到 11-15 的评论，而当时最新已是 11-21。
+   *   2. 就算取对了，几天前的评论早被新评论挤到几十页后面；第一页找不到 ≠ 被压。
+   *      实测那个视频 2206 条评论，接口第一页只有 20 条，老评论绝无可能出现。
+   *
+   * 现状核对：90 条 B站评论里 82 条 public、8 条 unknown、0 条 hidden——
+   * 评论根本没被压，是这个检查自己在天天报假警。
+   *
+   * 一天最多查一次（缓存 health.day），不发请求、不碰登录态。
    */
   async checkAccountHealth() {
     try {
       const today = dayKey(new Date(), this.timeZone);
       const cache = this.store.data.health ?? {};
-      if (cache.day === today && cache.result) return cache.result;
+      // 只认新口径算出来的缓存：老数据里 source 不存在，是「匿名翻第一页」那套误报，
+      // 不能让它在当天继续挂着吓人（重启后立刻重算一次）
+      if (cache.day === today && cache.result && cache.source === 'send-time') return cache.result;
 
-      // 找最近一条带 rpid 的 B站评论（抖音的 cid 不能这样匿名查）
       const acts = (this.store.data.actions ?? []).filter(
         (a) => a.platform === 'bilibili' && (a.action === 'comment' || a.action === 'reply') && a.extra?.rpid,
       );
-      const last = acts[0];
+      // 最后一条才是最新。这里以前是 acts[0]，取到的是数组第一条 = 最旧的那条评论
+      const last = acts[acts.length - 1];
       if (!last) {
         const r = { day: today, result: 'none' };
         this.store.data.health = r;
         this.store.saveSoon();
         return 'none';
       }
+
       const bvid = String(last.target ?? '');
       const rpid = String(last.extra.rpid);
-      // BV → aid（公开接口，不需要 cookie）
-      const info = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, {
-        headers: { referer: 'https://www.bilibili.com/', 'user-agent': 'Mozilla/5.0' },
-      }).then((r) => r.json());
-      const aid = Number(info?.data?.aid ?? 0);
-      if (!aid) {
-        const r = { day: today, result: 'unknown', at: Date.now() };
-        this.store.data.health = r;
-        this.store.saveSoon();
-        return 'unknown';
-      }
-      // **不带 cookie**：这就是「别人看到的」
-      const pub = await fetch(
-        `https://api.bilibili.com/x/v2/reply?oid=${aid}&type=1&pn=1&ps=20&sort=1`,
-        { headers: { referer: `https://www.bilibili.com/video/${bvid}`, 'user-agent': 'Mozilla/5.0' } },
-      ).then((r) => r.json());
-      const hits = (pub?.data?.replies ?? []).some((x) => String(x.rpid) === rpid);
-      const result = hits ? 'public' : 'hidden';
-      this.store.data.health = { day: today, result, bvid, rpid, at: Date.now() };
+      const visibility = String(last.extra?.visibility ?? '');
+      // hidden 才报；public 就是好的；unknown / 没记录一律不下结论（宁可不说，别吓人）
+      const result = visibility === 'hidden' ? 'hidden' : visibility === 'public' ? 'public' : 'unknown';
+      this.store.data.health = { day: today, result, bvid, rpid, at: Date.now(), source: 'send-time' };
       this.store.saveSoon();
       if (result === 'hidden') {
-        this.noteAnomaly('最近一条 B站评论匿名看不到（可能被压），先缓一缓再发', { kind: 'HEALTH' });
+        this.noteAnomaly('最近一条 B站评论发送时就是「仅自己可见」（state 非 0），先换个说法再发', { kind: 'HEALTH' });
       }
-      this.log?.info?.('stroll account health', { result, bvid, rpid });
+      this.log?.info?.('stroll account health', { result, bvid, rpid, visibility });
       return result;
     } catch {
       return 'unknown';
@@ -8181,6 +8323,15 @@ export class StrollWorld {
         platform: d.platform,
         preview: this.previewText(d),
         ageSec: d.ageSec,
+        expiresInSec: Math.max(0, Math.round(DRAFT_TTL_MS / 1000) - Number(d.ageSec ?? 0)),
+      })),
+      // 已作废的草稿：不能让它们静默消失，面板要显示「这几条过期了，需要重发」
+      expiredDrafts: this.store.expiredDrafts(5).map((d) => ({
+        id: d.id,
+        action: d.action,
+        platform: d.platform,
+        preview: this.previewText(d),
+        expiredSec: d.expiredSec,
       })),
       // 「先问我」模式下等主人点头的陌生人私信（面板「待你点头」里显示）
       strangerPending: this.strangerPendingList(),

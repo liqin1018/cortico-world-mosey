@@ -3666,7 +3666,36 @@ export class DouyinBrowser {
             platform: 'PC',
             downlink: '10',
           });
-          const res = await fetch(`https://www.douyin.com/aweme/v1/web/comment/publish/?${q}`, {
+          let url = `https://www.douyin.com/aweme/v1/web/comment/publish/?${q}`;
+          let signed = false;
+          /**
+           * 带签名再发。
+           *
+           * 2026-11-22：顶层评论不带签名也能过（历史 14 次成功全是无签名），
+           * 但只要带 reply_id（楼中楼）就被挡回来——403 / 码 -1 / 码 8 轮着来。
+           * 抖音自己的网页端发回复时是带 X-Bogus 的，这里调页面里的 crawler 现场签一次。
+           *
+           * **必须设超时**：crawler 没热身完时 frontierSign 会一直不返回，
+           * 而 page.evaluate 本身没有超时，整条回复会卡到 4 分钟看门狗（2026-11-22 实测：
+           * 连撞三次 STUCK，主人等不到回复，她只能转私信解释）。1.5 秒签不出来就走无签名。
+           */
+          try {
+            const f = window.byted_acrawler?.frontierSign;
+            if (typeof f === 'function') {
+              const out = await Promise.race([
+                f.call(window.byted_acrawler, { url }),
+                new Promise((r) => setTimeout(() => r(null), 1500)),
+              ]);
+              const o = typeof out === 'string' ? JSON.parse(out) : out;
+              if (o?.['X-Bogus']) {
+                url += `&X-Bogus=${encodeURIComponent(o['X-Bogus'])}`;
+                signed = true;
+              }
+            }
+          } catch {
+            // 签不出来就走无签名，和以前一样
+          }
+          const res = await fetch(url, {
             method: 'POST',
             credentials: 'include',
             headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -3683,6 +3712,7 @@ export class DouyinBrowser {
             http: res.status,
             code: data?.status_code ?? -1,
             msg: data?.status_msg ?? '',
+            signed,
             cid: data?.comment?.cid ? String(data.comment.cid) : '',
             status: Number(data?.comment?.status ?? 0),
             extra: Array.isArray(data?.comment?.text_extra) ? data.comment.text_extra : [],
@@ -3693,12 +3723,9 @@ export class DouyinBrowser {
       .catch(() => null);
     if (!r) return null;
     // status_code 8 既可能是「未登录」也可能是参数不对（实测 aweme_id 无效时也是 8），
-    // 只有明确说未登录才升级成登录问题，其余一律当作「这条路走不通」，退回点评论框。
-    if (!r.cid) {
-      if (/未登录|请先登录|login/i.test(String(r.msg ?? ''))) {
-        throw new DouyinError('LOGIN_REQUIRED', '抖音登录态失效了，去面板重新扫码再评论');
-      }
-      return null;
+    // 只有明确说未登录才升级成登录问题；其余原样带回，让上层能把 http/code 说出来。
+    if (!r.cid && /未登录|请先登录|login/i.test(String(r.msg ?? ''))) {
+      throw new DouyinError('LOGIN_REQUIRED', '抖音登录态失效了，去面板重新扫码再评论');
     }
     return r;
   }
@@ -3837,9 +3864,10 @@ export class DouyinBrowser {
       // 1 秒出结果，省掉「等评论区 hydrate（约 5 秒）+ 点两下 + 打字 + 等回执」
       // 前提是页面得停在这条视频上：实测从抖音首页调会被 403 挡回来，从 /video/ 页调才通。
       // 楼中楼只走带明确回复目标的请求；失败时不能落入顶层评论编辑器。
+      let fast = null;
       if (isReply || (!mention && viaApi)) {
         await this.ensureVideo(page, id, { note: /\/note\//.test(String(idOrUrl)), quick: true });
-        const fast = await this.commentViaApi(page, id, text, { root, parent }).catch((e) => {
+        fast = await this.commentViaApi(page, id, text, { root, parent }).catch((e) => {
           if (e?.code === 'LOGIN_REQUIRED') throw e;
           return null;
         });
@@ -3890,7 +3918,8 @@ export class DouyinBrowser {
       }
 
       if (isReply) {
-        throw new DouyinError('REPLY_NOT_CONFIRMED', '未拿到抖音楼中楼回复回执；可能被拒绝或响应丢失，请先查看原评论，不要立即重发。不会改发新评论。');
+        const why = fast ? `（HTTP ${fast.http} / 抖音码 ${fast.code} / 签名${fast.signed ? '已带' : '未带'}）` : '';
+        throw new DouyinError('REPLY_NOT_CONFIRMED', `未拿到抖音楼中楼回复回执${why}；可能被拒绝或响应丢失，请先查看原评论，不要立即重发。不会改发新评论。`);
       }
 
       // ---- 稳路径：真的去点评论框（带 @ 时只能走这条） ----
@@ -4169,7 +4198,7 @@ export class DouyinBrowser {
     if (!/douyin\.com/.test(page.url())) {
       await this.goto(page, `${ORIGIN}/user/message`, 2500).catch(() => null);
     }
-    const list = await page
+    const res = await page
       .evaluate(
         async ({ count }) => {
           const q = new URLSearchParams({
@@ -4196,15 +4225,124 @@ export class DouyinBrowser {
           const r = await fetch(`https://www.douyin.com/aweme/v1/web/notice/?${q}`, {
             credentials: 'include',
           });
-          if (!r.ok) return [];
+          if (!r.ok) return { code: r.status, list: [] };
           const d = await r.json().catch(() => null);
-          if (Number(d?.status_code ?? -1) !== 0) return [];
-          return Array.isArray(d?.notice_list_v2) ? d.notice_list_v2 : [];
+          const code = Number(d?.status_code ?? -1);
+          return { code, list: code === 0 && Array.isArray(d?.notice_list_v2) ? d.notice_list_v2 : [] };
         },
         { count: Math.max(1, Math.min(20, limit)) },
       )
-      .catch(() => []);
-    return list.map(mapAtNotice).filter(Boolean).slice(0, Math.max(1, limit));
+      .catch(() => null);
+    const { code, list } = res ?? { code: -1, list: [] };
+    const mapped = list.map(mapAtNotice).filter(Boolean);
+    /**
+     * 2026-11-22：主人带真 @ 标签（能点进主页那种）@ 了她，通知接口 8 分钟什么都没给，
+     * 她完全不知道，最后是主人在聊天里问「你看到了吗」才发现。
+     * 打一条原始类型分布（5 分钟最多一条），区分「接口没数据」和「类型被 mapAtNotice 过滤」。
+     */
+    if (Date.now() - Number(this.noticeLogAt ?? 0) > 5 * 60 * 1000) {
+      this.noticeLogAt = Date.now();
+      const types = {};
+      for (const x of list) {
+        const t = String(x?.type ?? '?');
+        types[t] = (types[t] ?? 0) + 1;
+      }
+      this.log?.info?.('stroll douyin notice', { group: 6, code, raw: list.length, mapped: mapped.length, types });
+    }
+    return mapped.slice(0, Math.max(1, limit));
+  }
+
+  /**
+   * 看某条评论的楼里有没有新回复。
+   *
+   * 抖音**不会**为「有人回复了我的评论」发 @ 通知（notice_group=6 只装 @），
+   * 所以主人在楼中楼里接着回她，她那边一点信号都没有（2026-11-22 实测：
+   * 通知接口连续 4 次都是同样的 6 条 @，新的子回复一条都没进来）。
+   * 只能自己看他那几条评论下面的楼。
+   */
+  async commentReplies(awemeId, rootCid, { count = 20 } = {}) {
+    const page = this.page;
+    if (!page || !awemeId || !rootCid) {
+      this.log?.info?.('stroll dy replies api', { page: !!page, awemeId: !!awemeId, rootCid: !!rootCid });
+      return [];
+    }
+    /**
+     * 用 `comment/list` 找主楼，读它自带的 `reply_comment` 预览。
+     *
+     * 2026-11-22：先试的是 `comment/list/reply`——`http 200` 但 `comments` 是空的，
+     * 这层楼它就是不返回（换过 cursor/count/insert_ids 都一样）。
+     * `comment/list` 是我们天天在用、确定有数据的接口，主楼对象里还带 2-3 条最新回复，
+     * 对我们这种「只想知道刚有人回了什么」的场景够了。
+     */
+    const res = await page
+      .evaluate(
+        async ({ id, root, count }) => {
+          const base = {
+            device_platform: 'webapp',
+            aid: '6383',
+            channel: 'channel_pc_web',
+            aweme_id: String(id),
+            item_type: '0',
+            count: String(count),
+            pc_client_type: '1',
+            version_code: '190500',
+            version_name: '19.5.0',
+            cookie_enabled: 'true',
+            platform: 'PC',
+            downlink: '10',
+          };
+          const grab = async (extra) => {
+            const q = new URLSearchParams({ ...base, ...extra });
+            const r = await fetch(`https://www.douyin.com/aweme/v1/web/comment/list/?${q}`, { credentials: 'include' });
+            if (!r.ok) return { http: r.status, hit: null };
+            const d = await r.json().catch(() => null);
+            const list = d?.comments ?? [];
+            const hit = list.find((c) => String(c.cid) === String(root)) ?? null;
+            return { http: r.status, code: Number(d?.status_code ?? -1), hit, n: list.length };
+          };
+          // 先精确取（insert_ids 对公开评论有效），再退回翻前 3 页
+          let got = await grab({ cursor: '0', insert_ids: String(root) });
+          if (!got.hit) {
+            for (const cursor of [0, 20, 40]) {
+              const page2 = await grab({ cursor: String(cursor) });
+              if (page2.hit) {
+                got = page2;
+                break;
+              }
+            }
+          }
+          if (!got.hit) return { http: got.http, code: got.code ?? -1, list: [], found: false };
+          const kids = Array.isArray(got.hit.reply_comment) ? got.hit.reply_comment : [];
+          return {
+            http: got.http,
+            code: got.code ?? 0,
+            found: true,
+            total: Number(got.hit.reply_comment_total ?? 0),
+            list: kids.map((c) => ({
+              cid: String(c.cid ?? ''),
+              text: String(c.text ?? ''),
+              root: String(c.reply_id ?? ''),
+              to: String(c.reply_to_reply_id ?? ''),
+              at: Number(c.create_time ?? 0) * 1000,
+              uid: String(c.user?.uid ?? ''),
+              user: String(c.user?.nickname ?? ''),
+              status: Number(c.status ?? 0),
+            })),
+          };
+        },
+        { id: String(awemeId), root: String(rootCid), count },
+      )
+      .catch((e) => ({ http: -1, list: [], err: String(e?.message ?? e).slice(0, 60) }));
+    const out = Array.isArray(res?.list) ? res.list : [];
+    this.log?.info?.('stroll dy replies api', {
+      http: res?.http ?? -1,
+      root: String(rootCid).slice(-6),
+      found: !!res?.found,
+      total: res?.total ?? 0,
+      n: out.length,
+      err: res?.err ?? '',
+    });
+    return out;
   }
 
   /**

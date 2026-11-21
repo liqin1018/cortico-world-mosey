@@ -224,6 +224,65 @@ world.store.data.drafts = [
 world.store.prune();
 check('unknown 草稿留 7 天，失败草稿清掉', world.store.data.drafts.some((d) => d.id === 'keep-unknown') && !world.store.data.drafts.some((d) => d.id === 'drop-failed'));
 
+/**
+ * 草稿过期不能静默消失。
+ *
+ * 2026-11-22 群友反馈：待审批列表里的评论过一会儿就没了，桌宠那边还以为在等她批。
+ * 以前 addDraft 直接 filter 掉超时草稿，面板上一点痕迹都没有。
+ */
+const savedDrafts = world.store.data.drafts;
+const staleAt = new Date(Date.now() - 40 * 60 * 1000).toISOString();
+world.store.data.drafts = [
+  { id: 'stale-draft', status: 'pending', createdAt: staleAt, action: 'comment', platform: 'bilibili', text: '过了 40 分钟没人批' },
+];
+world.store.addDraft({ action: 'like', platform: 'bilibili', target: 'BV1stale', text: '新草稿' });
+const stale = world.store.data.drafts.find((d) => d.id === 'stale-draft');
+check('过期草稿标 expired 而不是物理删掉', !!stale && stale.status === 'expired');
+check('过期草稿不再算待批', !world.store.pendingDrafts().some((d) => d.id === 'stale-draft'));
+check('面板能拿到过期草稿', world.store.expiredDrafts().some((d) => d.id === 'stale-draft'));
+world.store.prune();
+check('prune 后过期草稿还在（留 3 天）', world.store.data.drafts.some((d) => d.id === 'stale-draft'));
+world.store.data.drafts = savedDrafts;
+
+/**
+ * 健康检查：看最新一条，且只认发送时记录的 visibility。
+ *
+ * 以前取 acts[0]（最旧的一条）+ 匿名翻第一页，于是天天报「匿名看不到」——
+ * 实测 90 条评论 82 条 public、0 条 hidden，全是假警。
+ */
+const savedActions = world.store.data.actions;
+const savedHealth = world.store.data.health;
+const savedAnomalies = world.store.data.anomalies;
+world.store.data.health = {};
+world.store.data.actions = [
+  { at: '2026-11-15T13:50:35.762Z', platform: 'bilibili', action: 'comment', target: 'BV1old', extra: { rpid: '111', visibility: 'hidden' } },
+  { at: '2026-11-21T12:06:54.996Z', platform: 'bilibili', action: 'comment', target: 'BV1new', extra: { rpid: '222', visibility: 'public' } },
+];
+const healthNewest = await world.checkAccountHealth();
+check(
+  '健康检查看最新一条而不是最旧的',
+  healthNewest === 'public' && String(world.store.data.health.rpid) === '222',
+  JSON.stringify(world.store.data.health),
+);
+
+world.store.data.health = {};
+world.store.data.actions = [
+  { at: '2026-11-21T12:06:54.996Z', platform: 'bilibili', action: 'comment', target: 'BV1x', extra: { rpid: '333' } },
+];
+const healthUnknown = await world.checkAccountHealth();
+check('没记录可见性时不下结论，不报被压', healthUnknown === 'unknown', healthUnknown);
+
+world.store.data.health = {};
+world.store.data.actions = [
+  { at: '2026-11-21T12:06:54.996Z', platform: 'bilibili', action: 'comment', target: 'BV1y', extra: { rpid: '444', visibility: 'hidden' } },
+];
+const healthHidden = await world.checkAccountHealth();
+check('只有发送时就是仅自己可见才报 hidden', healthHidden === 'hidden', healthHidden);
+
+world.store.data.actions = savedActions;
+world.store.data.health = savedHealth;
+world.store.data.anomalies = savedAnomalies;
+
 world.store.data.interests = {};
 world.store.addViewed({ platform: 'bilibili', id: 'BV1interest', author: '兴趣测试UP' });
 check('看过的作者会计入兴趣', Number(world.store.data.interests['兴趣测试UP'] ?? 0) === 1);
@@ -882,6 +941,12 @@ check('history ok', history.ok === true);
 
 const draft = JSON.parse(await world.toolAct({ action: 'like', platform: 'bilibili', target: 'BV1SVsd6MEGZ', preview: true }));
 check('draft created', draft.ok === true && draft.draft === true && !!draft.id);
+// 草稿有寿命，必须让鱼知道：不然它跟主人说「已提交待审批」，半小时后一起以为见了鬼（2026-11-22 反馈）
+check(
+  '草稿回执写清 30 分钟有效期',
+  !!draft.expiresAt && draft.expiresInSec === 1800 && /30 分钟内有效/.test(draft.message),
+  JSON.stringify({ expiresAt: draft.expiresAt, expiresInSec: draft.expiresInSec }),
+);
 check('draft pending', world.store.pendingDrafts().length === 1);
 check('model cannot approve', JSON.parse(await world.toolAct({ action: 'approve', draft_id: draft.id })).ok === false);
 const rejected = world.rejectDraft(draft.id);
@@ -902,7 +967,23 @@ check('模型可以改兴趣词', okPolicy.ok === true && /猫/.test(cfg.interes
 cfg.ownerUid = '123456';
 
 /* ---------------- 每天必做 ---------------- */
+/**
+ * 时间基准必须互相对齐。
+ *
+ * `mustDoList()` 用「现在」算今天是哪天，而 tick 用传进去的 now。
+ * 跨零点跑回归时本地日期和配置时区（默认北京）会差一天：
+ * 本地 11-22 00:33、北京还是 11-21，于是 mustDay 记 11-21、
+ * tick 的 day 算成 11-22，autoNudged 记到另一天，断言必然假失败。
+ * 这里把「测试用的中午」挪到同一天，而不是放宽断言。
+ */
 const mustDay = dayKey(new Date(), world.timeZone);
+const mustNoon = new Date();
+mustNoon.setHours(12, 0, 0, 0);
+let noonGuard = 0;
+while (dayKey(mustNoon, world.timeZone) !== mustDay && noonGuard < 3) {
+  mustNoon.setDate(mustNoon.getDate() - 1);
+  noonGuard += 1;
+}
 const prevMustCfg = { like: world.cfg.mustLike, dailyLikes: world.cfg.dailyLikes, auto: world.cfg.autoSessionsPerDay };
 const prevUsageLike = Number(world.store.data.usage?.[mustDay]?.like ?? 0);
 world.cfg.mustLike = true;
@@ -926,8 +1007,6 @@ world.store.data.autoSessions[mustDay] = 0;
 world.store.data.autoNudged = {};
 world.store.data.lastAutoAt = Date.now() - 31 * 60 * 1000;
 world.store.data.mustNudge = { day: mustDay, n: 0, at: 0 };
-const mustNoon = new Date();
-mustNoon.setHours(12, 0, 0, 0);
 await world.tick(mustNoon.getTime());
 check(
   '按次数模式：必做不压间隔（不用为了省 token 去关必做）',
@@ -1382,6 +1461,25 @@ check(
 );
 await world.mentionBeat();
 check('同一条 @ 只叫一次', mPushes.length === 1);
+/**
+ * 2026-11-22：安静时段（他家配的是 1-7 点）把 @ 轮询整条掐掉了，主人凌晨 @ 完等 8 分钟没动静，
+ * 而私信、群聊从来不受安静时段限制。安静时段只该管「她自己出门、主动搭话、吵陌生人」。
+ */
+world.mentionAt = 0;
+const prevQuiet = [world.cfg.quietFrom, world.cfg.quietTo];
+world.cfg.quietFrom = 0;
+world.cfg.quietTo = 24;
+check('构造出全天安静状态', world.policy.isQuiet() === true);
+world.bili.mentions = async () => [{ ...atItem, id: 'at-quiet' }];
+await world.mentionBeat();
+check(
+  '安静时段里有人 @ 她，照样立刻叫她',
+  mPushes.length === 2 && /有人在评论区 @ 你了/.test(mPushes[1].text),
+  JSON.stringify(mPushes.slice(-1)).slice(0, 160),
+);
+world.cfg.quietFrom = prevQuiet[0];
+world.cfg.quietTo = prevQuiet[1];
+mPushes.length = 1; // 下面几条用例按「只推过一条」继续断言，这里把计数还原
 world.mentionAt = 0;
 world.bili.mentions = async () => [atItem, { ...atItem, id: 'at-2' }, { ...atItem, id: 'at-3' }];
 await world.mentionBeat();
@@ -1431,6 +1529,68 @@ check(
   JSON.stringify(mappedDyAt),
 );
 check('抖音 @ 的时间是毫秒', mappedDyAt.at === 1794385651000, String(mappedDyAt.at));
+
+/**
+ * 2026-11-22：主人在楼中楼里接着回她，她 6 分钟毫无动静。
+ * 抖音不为「有人回复了我的评论」发通知（notice_group=6 只有 @），
+ * 只能自己看她那几条评论下面的楼。B站有 bili.replies()，抖音这块是补上的。
+ */
+world.cfg.douyin = true;
+world.cfg.bilibili = false;
+world.douyin.selfUid = 'uid-me';
+world.douyin.noticeMentions = async () => [];
+world.douyin.commentReplies = async () => [
+  { cid: '7000000000000000003', text: '你不睡我不睡', root: '7000000000000000002', to: '7000000000000000002', at: Date.now(), uid: 'uid-other', user: '阿洒', status: 1 },
+  { cid: '7000000000000000004', text: '我自己接着说的', root: '7000000000000000002', to: '7000000000000000002', at: Date.now(), uid: 'uid-me', user: '穹', status: 1 },
+  { cid: '7000000000000000005', text: '审核中的', root: '7000000000000000002', to: '7000000000000000002', at: Date.now(), uid: 'uid-other', user: '老K', status: 2 },
+];
+const actLen = world.store.data.actions.length;
+world.store.data.actions.push({
+  at: new Date(Date.now() - 60 * 1000).toISOString(),
+  platform: 'douyin',
+  action: 'comment',
+  target: '7000000000000000001',
+  extra: { cid: '7000000000000000002' },
+});
+world.dyReplyAt = 0;
+const dyReplies = await world.douyinMyReplies();
+check(
+  '抖音楼里有人回她时读得出来（自己发的、审核中的都排除）',
+  dyReplies.length === 1 && dyReplies[0].cid === '7000000000000000003' && dyReplies[0].rootCid === '7000000000000000002',
+  JSON.stringify(dyReplies).slice(0, 200),
+);
+world.mentionAt = 0;
+world.dyReplyAt = 0;
+mPushes.length = 0;
+await world.mentionBeat();
+check(
+  '有人回复她的评论也会叫她，并给出 reply_to 和 root',
+  mPushes.length === 1 && /回复了你的评论/.test(mPushes[0].text) && /reply_to=7000000000000000003/.test(mPushes[0].text) && /root=7000000000000000002/.test(mPushes[0].text),
+  (mPushes[0]?.text ?? '').slice(0, 160),
+);
+/**
+ * 她回完的那层楼也要盯：实测她明明回了，actions 里却没有那条记录，
+ * 只靠「她自己评论过的 cid」会漏掉正在进行的对话。
+ */
+world.douyin.commentReplies = async (awemeId, root) =>
+  root === '7000000000000000009'
+    ? [{ cid: '7000000000000000008', text: '在吗', root, to: '7000000000000000007', at: Date.now(), uid: 'uid-other', user: '阿柚', status: 1 }]
+    : [];
+world.store.data.dyThreads = [{ awemeId: '7000000000000000001', root: '7000000000000000009', at: Date.now() - 60000 }];
+world.dyReplyAt = 0;
+const loose = await world.douyinMyReplies();
+check(
+  '@ 所在的那层楼里有人回话也能捞到（不要求回的是她那条）',
+  loose.some((r) => r.cid === '7000000000000000008' && r.rootCid === '7000000000000000009'),
+  JSON.stringify(loose).slice(0, 200),
+);
+world.rememberDyThread({ awemeId: '7000000000000000001', cid: '7000000000000000010' });
+check('记住 @ 通知所在的楼', (world.store.data.dyThreads ?? []).some((t) => t.root === '7000000000000000010'));
+world.store.data.dyThreads = [];
+
+world.store.data.actions.length = actLen;
+world.cfg.douyin = false;
+mPushes.length = 2;
 
 world.cfg.bilibili = false;
 world.cfg.douyin = true;
@@ -1516,6 +1676,39 @@ world.cfg.mentionWatch = prevCfgM.mentionWatch;
   const sent = await rw.approveDraft(draft.id, 'smoke');
   check('子回复执行发送主评论与子评论ID', sent.ok && requests.at(-1)?.body.get('reply_id') === '111' && requests.at(-1)?.body.get('reply_to_reply_id') === '222', JSON.stringify(sent));
   check('楼中楼执行不扣主动评论额度', rw.store.usage('comment:douyin') === 0);
+  /**
+   * 2026-11-22：楼中楼 20 次尝试 0 次成功，全是 403 / 码 -1 / 码 8。
+   * 实测同一个请求不带签名 403、带签名 200 —— 缺的是页面里 crawler 签出来的 X-Bogus。
+   */
+  globalThis.window = { byted_acrawler: { frontierSign: async () => ({ 'X-Bogus': 'SMOKE' }) } };
+  rw.store.data.lastWriteAt = 0;
+  rw.store.data.lastWriteByPlat = {};
+  await rw.douyin.comment(args.target, '签名这条要带上', { root: '111', parent: '222' });
+  check('发布会带上页面签名 X-Bogus', /[?&]X-Bogus=SMOKE(&|$)/.test(requests.at(-1)?.url ?? ''), requests.at(-1)?.url);
+  delete globalThis.window;
+  rw.store.data.lastWriteAt = 0;
+  rw.store.data.lastWriteByPlat = {};
+  await rw.douyin.comment(args.target, '签不出来也得能发', { root: '111', parent: '222' });
+  check('签不出来退回无签名，不阻断发布', !/X-Bogus/.test(requests.at(-1)?.url ?? '') && requests.at(-1)?.body.get('reply_id') === '111', requests.at(-1)?.url);
+  /**
+   * 2026-11-22：真机上连撞三次 STUCK（4 分钟看门狗）。
+   * crawler 没热身完时 frontierSign 会一直不返回，page.evaluate 又没有超时，
+   * 整条回复就卡死了——她只能转私信跟主人说"评论区回不出去"。
+   */
+  globalThis.window = { byted_acrawler: { frontierSign: () => new Promise(() => {}) } };
+  rw.store.data.lastWriteAt = 0;
+  rw.store.data.lastWriteByPlat = {};
+  const signStart = Date.now();
+  await rw.douyin.comment(args.target, '签名卡住也得能发', { root: '111', parent: '222' });
+  const signMs = Date.now() - signStart;
+  check(
+    '签名函数卡住时 1.5 秒放弃，不拖死发布',
+    signMs < 6000 && !/X-Bogus/.test(requests.at(-1)?.url ?? ''),
+    `${signMs}ms`,
+  );
+  delete globalThis.window;
+  rw.store.data.lastWriteAt = 0;
+  rw.store.data.lastWriteByPlat = {};
   const mainReply = await rw.douyin.comment(args.target, args.text, { root: '111', parent: '111' });
   check('回主评论时 reply_to_reply_id=0', mainReply.confirmed && requests.at(-1).body.get('reply_id') === '111' && requests.at(-1).body.get('reply_to_reply_id') === '0');
   for (const status of [0, 7]) {

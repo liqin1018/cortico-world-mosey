@@ -1180,12 +1180,28 @@ export default {
 
           // 待批（草稿 + 等你点头的陌生人私信，一起算进这个数字）
           const drafts = data?.drafts ?? [];
+          const expiredDrafts = data?.expiredDrafts ?? [];
           const strangerPend = data?.strangerPending ?? [];
           draftsCount = drafts.length;
           renderStrangers(strangerPend);
           draftHint.textContent = APPROVAL_HINT[p.approval] ?? '';
           for (const [value, b] of segButtons) b.classList.toggle('on', value === p.approval);
           draftBox.replaceChildren();
+          /**
+           * 已过期的草稿要露出来。
+           *
+           * 2026-11-22 群友反馈：明明看到过一条待批，过一会儿没了，
+           * 桌宠那边还以为在等她批。实际是草稿 30 分钟就作废——
+           * 以前连痕迹都不留，现在至少告诉她「这几条作废了，要重发」。
+           */
+          if (expiredDrafts.length) {
+            const box = el('div', undefined, 'stroll-expired');
+            box.append(
+              el('strong', `${expiredDrafts.length} 条草稿已过期`),
+              el('span', '超过 30 分钟没批就作废，不会发出去。还想发就让她重新提一次。'),
+            );
+            draftBox.append(box);
+          }
           if (!drafts.length) {
             const empty = el('div', undefined, 'stroll-empty');
             const mark = el('span', undefined, 'stroll-empty-icon');

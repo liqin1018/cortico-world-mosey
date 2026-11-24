@@ -5738,7 +5738,7 @@ export class DouyinBrowser {
         const r = this.stickers?.addBuffer?.(buf, {
           source,
           src: it.src,
-          name: `表情${(this.stickers?.stats?.().total ?? 0) + 1}`,
+          name: `表情${Object.keys(this.stickers?.load?.().items ?? {}).length + 1}`,
         });
         if (r?.ok) {
           if (r.duplicate) dup += 1;

@@ -152,6 +152,13 @@ export const DEFAULTS = {
   /** 书库目录；留空用数据目录下的 stroll/books。面板「选文件夹」会写这里。 */
   booksDir: '',
 
+  /**
+   * 表情包的**图片**目录；留空用数据目录下的 stroll/stickers。
+   * 指到别的插件的图库（比如 QQ 的 data/stickers）就能共用一份：
+   * 摸鱼照旧只在自己的 stroll/stickers/index.json 里记名字和标签，图片本身放这里。
+   */
+  stickerDir: '',
+
   /** 盯抖音群：新消息像私信一样立刻叫她。 */
   groupWatch: true,
   /**
@@ -256,6 +263,13 @@ const OWNER = {
         type: 'string',
         title: '书库文件夹',
         description: '她想读的书放这（txt/md）。留空用默认目录。',
+        'x-hot': true,
+      },
+      [P + 'stickerDir']: {
+        type: 'string',
+        title: '表情包文件夹',
+        description:
+          '表情包的图片放这。留空用默认目录；填成 QQ 那边的 data\\stickers，两边就共用一份图库（名字和标签仍记在摸鱼自己的索引里）。',
         'x-hot': true,
       },
     },
@@ -1149,6 +1163,7 @@ export const POLICY_FIELDS = {
   shareStyle: { type: 'enum', values: ['card', 'image', 'text'] },
   dmPollSec: { type: 'int', min: 3, max: 300 },
   booksDir: { type: 'string', max: 400 },
+  stickerDir: { type: 'string', max: 400 },
   groupWatch: { type: 'boolean' },
   douyinGroups: { type: 'string', max: 200 },
   tokenDailyBudget: { type: 'int', min: 1000, max: 50000 },

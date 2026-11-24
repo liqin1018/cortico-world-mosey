@@ -32,12 +32,25 @@ function cleanName(name, fallback = '表情') {
 }
 
 export class StickerBook {
-  constructor({ dataDir, log } = {}) {
+  constructor({ dataDir, dir, log } = {}) {
     this.dataDir = dataDir;
-    this.dir = path.join(String(dataDir ?? '.'), 'stroll', 'stickers');
-    this.file = path.join(this.dir, 'index.json');
+    // 索引永远在摸鱼自己的数据目录：和别的插件共用图库时，只共享图片，不往别人目录里塞 index.json
+    this.indexDir = path.join(String(dataDir ?? '.'), 'stroll', 'stickers');
+    this.file = path.join(this.indexDir, 'index.json');
+    // 图片目录可以指到别处（cfg.stickerDir），比如 QQ 的 data/stickers
+    this.dir = dir ? path.resolve(String(dir)) : this.indexDir;
     this.log = log ?? { info() {}, warn() {} };
     this.data = null;
+  }
+
+  /** 换过目录之后，老收藏的图还留在原来的 stroll/stickers 里：找到就用它，不搬文件。 */
+  fileOf(entry) {
+    if (!entry) return '';
+    const name = String(entry.file ?? '');
+    const first = path.join(this.dir, name);
+    if (fs.existsSync(first) || this.dir === this.indexDir) return first;
+    const legacy = path.join(this.indexDir, name);
+    return fs.existsSync(legacy) ? legacy : first;
   }
 
   load() {
@@ -62,7 +75,78 @@ export class StickerBook {
   }
 
   get(id) {
-    return this.load().items[String(id ?? '')] ?? null;
+    const key = String(id ?? '');
+    return this.load().items[key] ?? this.scanDir().find((x) => x.id === key) ?? null;
+  }
+
+  /**
+   * 图库目录里还没登记进索引的图片（共用 QQ 图库时，几千张都在这里）。
+   *
+   * 别人的图库是「文件名就是全部信息」，所以名字用文件名、没有标签。按目录读一次缓存 60 秒：
+   * 每调一次 `stickers` 就 readdir + stat 几千个文件，白白卡住她。
+   */
+  scanDir() {
+    const now = Date.now();
+    if (this._scan && this._scanDir === this.dir && now - this._scanAt < 60_000) return this._scan;
+    const out = [];
+    let names = [];
+    try {
+      names = fs.readdirSync(this.dir);
+    } catch {
+      // 目录还没建：就是空的
+    }
+    for (const name of names) {
+      if (!/\.(png|jpe?g|webp|gif|bmp)$/i.test(name)) continue;
+      const full = path.join(this.dir, name);
+      let st = null;
+      try {
+        st = fs.statSync(full);
+      } catch {
+        continue;
+      }
+      if (!st.isFile()) continue;
+      out.push({
+        id: `dir:${name}`,
+        file: name,
+        ext: path.extname(name).toLowerCase(),
+        size: st.size,
+        name: cleanName(path.basename(name, path.extname(name)), '表情'),
+        tags: [],
+        source: 'dir',
+        src: '',
+        tab: '',
+        addedAt: st.mtimeMs,
+        lastSeenAt: st.mtimeMs,
+        lastUsed: 0,
+        used: 0,
+      });
+    }
+    this._scan = out;
+    this._scanAt = now;
+    this._scanDir = this.dir;
+    return out;
+  }
+
+  /** 索引里登记过的 + 目录里还没登记过的。所有「有几张、叫什么」都走这里。 */
+  allEntries() {
+    const known = Object.values(this.load().items);
+    const seen = new Set(known.map((x) => String(x.file)));
+    return [...known, ...this.scanDir().filter((x) => !seen.has(x.file))];
+  }
+
+  /**
+   * 把目录里扫出来的一张登记进索引，之后才能改名/打标签/记用过几次。
+   * 文件不动，只在 index.json 里加一条。
+   */
+  ensure(id) {
+    const key = String(id ?? '');
+    const data = this.load();
+    if (data.items[key]) return data.items[key];
+    const found = this.scanDir().find((x) => x.id === key);
+    if (!found) return null;
+    data.items[key] = { ...found, addedAt: Date.now(), lastSeenAt: Date.now() };
+    this.save();
+    return data.items[key];
   }
 
   /** 存一张。同样的图只留一份（按内容的 sha1 去重），返回 { entry, duplicate }。 */
@@ -80,8 +164,10 @@ export class StickerBook {
       this.save();
       return { ok: true, duplicate: true, entry: exist };
     }
-    // 只留最近用过的 800 张，别让目录无限长
-    const ids = Object.values(data.items)
+    // 只留最近用过的 800 张，别让目录无限长。
+    // 只算摸鱼自己写进来的（s_ 开头）：共用图库时，别人的文件和登记条目一律不动。
+    const own = Object.values(data.items).filter((x) => /^s_/.test(String(x.file ?? '')));
+    const ids = own
       .sort((a, b) => Number(b.lastUsed || b.addedAt || 0) - Number(a.lastUsed || a.addedAt || 0))
       .map((x) => x.id);
     for (const drop of ids.slice(MAX_ITEMS - 1)) {
@@ -117,6 +203,7 @@ export class StickerBook {
       used: 0,
     };
     data.items[id] = entry;
+    this._scan = null; // 新文件进来了，下次重新扫目录
     this.save();
     return { ok: true, duplicate: false, entry };
   }
@@ -124,7 +211,7 @@ export class StickerBook {
   list({ query = '', tag = '', limit = 20 } = {}) {
     const q = String(query ?? '').trim().toLowerCase();
     const t = String(tag ?? '').trim().toLowerCase();
-    const items = Object.values(this.load().items)
+    const items = this.allEntries()
       .filter((x) => {
         if (t && !(x.tags ?? []).some((g) => String(g).toLowerCase().includes(t))) return false;
         if (!q) return true;
@@ -136,7 +223,7 @@ export class StickerBook {
   }
 
   stats() {
-    const items = Object.values(this.load().items);
+    const items = this.allEntries();
     return { total: items.length, used: items.filter((x) => Number(x.used || 0) > 0).length };
   }
 
@@ -146,22 +233,25 @@ export class StickerBook {
    */
   find(query) {
     const raw = String(query ?? '').trim();
-    const data = this.load();
     if (!raw) {
-      const any = this.list({ limit: 1 }).items[0];
-      return any ? { ok: true, entry: any } : { ok: false, error: '表情库还是空的：先收藏几张再来。' };
+      // 「不写 text 就是随机一张」得真的是随机：以前取的是列表第一个，永远发同一张
+      const all = this.allEntries();
+      if (!all.length) return { ok: false, error: '表情库还是空的：先收藏几张再来。' };
+      return { ok: true, entry: all[Math.floor(Math.random() * all.length)] };
     }
     const low = raw.toLowerCase().replace(/^#/, '');
-    const exact = Object.values(data.items).find((x) => x.id === low || x.name.toLowerCase() === low);
+    const all = this.allEntries();
+    const exact = all.find((x) => x.id === low || x.name.toLowerCase() === low);
     if (exact) return { ok: true, entry: exact };
     if (/^\d+$/.test(low)) {
+      // 序号按列表顺序。上限原来写死 200：共用 QQ 图库后有两千多张，第 201 张以后就点不到
       const idx = Number(low) - 1;
-      const sorted = this.list({ limit: 200 }).items;
+      const sorted = this.list({ limit: Number.MAX_SAFE_INTEGER }).items;
       if (sorted[idx]) return { ok: true, entry: sorted[idx] };
     }
-    const byName = Object.values(data.items).filter((x) => x.name.toLowerCase().includes(low));
+    const byName = all.filter((x) => x.name.toLowerCase().includes(low));
     if (byName.length === 1) return { ok: true, entry: byName[0] };
-    const byTag = Object.values(data.items).filter((x) => (x.tags ?? []).some((g) => String(g).toLowerCase().includes(low)));
+    const byTag = all.filter((x) => (x.tags ?? []).some((g) => String(g).toLowerCase().includes(low)));
     const pool = byName.length ? byName : byTag;
     if (pool.length > 1) {
       return { ok: false, error: `「${raw}」能对上 ${pool.length} 张，说具体点。`, candidates: pool.slice(0, 8).map((x) => x.name) };
@@ -169,12 +259,8 @@ export class StickerBook {
     return { ok: false, error: `表情库里没有「${raw}」。`, candidates: this.list({ limit: 8 }).items.map((x) => x.name) };
   }
 
-  fileOf(entry) {
-    return entry ? path.join(this.dir, String(entry.file)) : '';
-  }
-
   touch(id) {
-    const e = this.get(id);
+    const e = this.ensure(id);
     if (!e) return null;
     e.lastUsed = Date.now();
     e.used = Number(e.used || 0) + 1;
@@ -183,7 +269,7 @@ export class StickerBook {
   }
 
   rename(id, name) {
-    const e = this.get(id);
+    const e = this.ensure(id);
     if (!e) return { ok: false, error: '没这张。' };
     e.name = cleanName(name, e.name);
     this.save();
@@ -191,7 +277,7 @@ export class StickerBook {
   }
 
   tag(id, tags) {
-    const e = this.get(id);
+    const e = this.ensure(id);
     if (!e) return { ok: false, error: '没这张。' };
     const add = Array.isArray(tags) ? tags : String(tags ?? '').split(/[,，、\s]+/);
     const set = new Set([...(e.tags ?? []), ...add.map((t) => cleanName(t, '')).filter(Boolean)]);
@@ -201,14 +287,19 @@ export class StickerBook {
   }
 
   remove(id) {
-    const e = this.get(id);
+    // 只删索引里登记过的：目录里扫出来、还没登记的那些，删了索引也删不掉文件，不如不认这个动作
+    const e = this.load().items[String(id ?? '')];
     if (!e) return { ok: false, error: '没这张。' };
-    try {
-      fs.unlinkSync(path.join(this.dir, e.file));
-    } catch {
-      // 文件没了也算删掉索引
+    // 共用图库时，别人的文件不能删（QQ 还在用）；只删摸鱼自己写的 s_ 那份
+    if (/^s_/.test(String(e.file ?? ''))) {
+      try {
+        fs.unlinkSync(this.fileOf(e));
+      } catch {
+        // 文件没了也算删掉索引
+      }
     }
     delete this.load().items[e.id];
+    this._scan = null;
     this.save();
     return { ok: true, removed: e.id };
   }

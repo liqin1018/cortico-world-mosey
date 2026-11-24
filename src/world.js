@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -176,7 +177,12 @@ export class StrollWorld {
      * 它们所有 `this.log?.info?.()` 全是空操作——抖音那边的日志会整片消失（2026-11-08 排查踩过）。
      */
     this.bili = new Bilibili({ dataDir, cfg, log: this.log, policy: this.policy, store: this.store });
-    this.stickers = new StickerBook({ dataDir, log: this.log });
+    this.stickers = new StickerBook({
+      dataDir,
+      // 图片目录可以指到别处（面板「表情包文件夹」）：和 QQ 共用一份图库时，索引还在摸鱼自己这儿
+      dir: String(cfg.stickerDir ?? '').trim() || '',
+      log: this.log,
+    });
     this.douyin = new DouyinBrowser({ dataDir, cfg, log: this.log, policy: this.policy, stickers: this.stickers });
     // 发完事后核实失败时回调：由这里补一条提醒（不能拖慢发送，所以在 douyin 侧异步做）
     this.douyin.onSendUnconfirmed = (stamp, meta) => this.onDouyinSendUnconfirmed(stamp, meta).catch(() => {});
@@ -1827,15 +1833,36 @@ export class StrollWorld {
      */
     const said = lines.join(' ');
     const hasBiliLink = /b23\.tv\/|(?:www\.)?bilibili\.com\/video\/|BV[0-9A-Za-z]{10}/.test(said);
+    /**
+     * 表情/图片没拿到画面时必须明说。
+     *
+     * 抖音的表情发过来是它自己的名字（「[不可以色色]」），以前这里只拼消息原文，
+     * 她看到的就是一行像台词的文字，于是照着名字编画面，被追问才承认没看到。
+     * 陌生人私信那条路一直有这句提示，主人私信漏了。
+     * 两条判据：解析时认出了媒体（blankMedia），或者正文整个就是一个 [名字]。
+     */
+    const noPicture =
+      !urls.length &&
+      (fresh.some((x) => x.blankMedia) ||
+        fresh.some((x) => /^\s*\[[^\]\n]{1,12}\]\s*$|\[图片[^\]]*\]|\[表情\]/.test(String(x.text ?? ''))));
     const body =
       `主人私信你：\n${lines.join('\n')}\n` +
       (hasBiliLink
         ? '消息里有 B站链接。想聊内容就先 stroll action=open url=<那个链接原样>（参数名是 url，不是 target），看完再回一句短的；打不开就直说不懂，别拿用户 ID 当视频号。'
         : '现在就回一句短的，别查 status/feed。') +
+      (noPicture
+        ? '\n（这条是表情/图片，我这边只拿到占位、没看到画面。别说「看到了」；被问就如实说看不到。）'
+        : '') +
+      (blobs?.some?.((b) => b.gifTiles)
+        ? '\n（对方发的是动图，附件是抽成 8 格的拼图：左上→右下是时间顺序，不是一张奇怪的大图。）'
+        : '') +
       (fresh[0].platform === 'douyin' ? '抖音记得 target=主人。' : '') +
       savedLine;
-    if (!urls.length && /\[图片\]|\[表情\]/.test(lines.join(' '))) {
-      this.log?.warn?.('stroll image url missing (dm)', { who: fresh[0].who });
+    if (noPicture) {
+      this.log?.warn?.('stroll image url missing (dm)', {
+        who: fresh[0].who,
+        text: String(fresh[0].text ?? '').slice(0, 40),
+      });
     } else if (urls.length && !blobs?.length) {
       this.log?.warn?.('stroll image fetch failed (dm)', { urls: urls.slice(0, 2) });
     }
@@ -2995,6 +3022,8 @@ export class StrollWorld {
       text: tail.map((m) => (m.url ? `${m.text}（${m.url}）` : m.text)).join(' / '),
       // 主人发来的图片：推的时候下载成附件，她才能真的看见
       images: tail.flatMap((m) => (m.image ? [m.image] : [])),
+      // 认出了表情/图片却一张图都没拿到：pushDm 要据此告诉她「没看到画面」，别让她照着名字编
+      blankMedia: tail.some((m) => (m.kind === 'emoji' || m.kind === 'image') && !m.image),
     };
     if (commit) put(nextSeen);
     else {
@@ -3121,8 +3150,57 @@ export class StrollWorld {
   }
 
   /**
+   * GIF 抽帧要一个 ffmpeg 可执行文件。顺序：环境变量 → PATH 里的 ffmpeg → 本机常见位置。
+   * 一个都没有就返回 ''，调用方发原图（和加这个功能之前一样）。
+   */
+  ffmpegBin() {
+    if (this._ffmpegBin !== undefined) return this._ffmpegBin;
+    const cands = [process.env.CORTICO_FFMPEG, 'ffmpeg', 'F:/AI/ffmpeg/bin/ffmpeg.exe'];
+    this._ffmpegBin = cands.find((p) => p && (p === 'ffmpeg' || fs.existsSync(p))) ?? '';
+    return this._ffmpegBin;
+  }
+
+  /**
+   * 把 GIF 抽 8 帧拼成一张 4x2 的图。
+   *
+   * 模型只看得到第一帧（多模态接口普遍如此），一张 1.2 秒的动图在她眼里就是静止的一格，
+   * 于是只能描述「躲在柱子后面」，动作全丢。拼成一格一格之后挥锤、表情变化都看得出来。
+   * 任何失败（没有 ffmpeg、超时、输出的图是空的）都返回 ''，调用方退回发原 GIF。
+   */
+  gifTiles(bytes) {
+    const bin = this.ffmpegBin();
+    if (!bin) return '';
+    const dir = path.join(this.dataDir, 'stroll', 'tmp');
+    const stamp = `${process.pid}-${Date.now()}`;
+    const src = path.join(dir, `gif-${stamp}.gif`);
+    const out = path.join(dir, `tile-${stamp}.png`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(src, bytes);
+      execFileSync(
+        bin,
+        ['-y', '-loglevel', 'error', '-t', '4', '-i', src, '-vf', 'fps=8,scale=360:-1,tile=4x2', '-frames:v', '1', out],
+        { timeout: 8000, windowsHide: true },
+      );
+      const png = fs.readFileSync(out);
+      return png?.length > 1000 ? png : '';
+    } catch {
+      return '';
+    } finally {
+      for (const f of [src, out]) {
+        try {
+          fs.unlinkSync(f);
+        } catch {
+          // 临时文件删不掉留着也没事，下次换名字
+        }
+      }
+    }
+  }
+
+  /**
    * 把几条消息里的图片下载成附件（最多 limit 张），顺手存到本地收件箱。
    * 单张上限 6MB：宿主那边模型附件也有体积限制，太大反而整条丢掉。
+   * 动图（GIF）会换成抽帧拼图再喂给模型，见 gifTiles()。
    */
   async imageBlobs(urls, { limit = 2, maxBytes = 6 * 1024 * 1024, platform = 'douyin', label = '图片', save = true } = {}) {
     const list = (urls ?? [])
@@ -3166,11 +3244,19 @@ export class StrollWorld {
       }
       const saved = save ? this.saveImageBytes(saveBytes) : null;
       if (saved) files.push(saved);
+      // 动图：模型只看得到第一帧（动作全丢），抽 8 帧拼一张图再喂；拼不出来就照旧发原图
+      const tiles = mime === 'image/gif' ? this.gifTiles(bytes) : null;
+      if (tiles) {
+        this.log?.info?.('stroll gif tiled', { kb: Math.round(tiles.length / 1024), srcKb: Math.round(bytes.length / 1024) });
+      }
       blobs.push({
-        bytes,
-        mime,
+        bytes: tiles || bytes,
+        mime: tiles ? 'image/png' : mime,
         name: `${label}-${blobs.length + 1}`,
-        fallbackText: `（${label} ${blobs.length + 1}：${Math.round(bytes.length / 1024)}KB ${mime}${saved ? `，已存为 ${saved.name}` : ''}）`,
+        fallbackText: tiles
+          ? `（${label} ${blobs.length + 1}：动图抽成 8 帧拼图，左上→右下是时间顺序${saved ? `，原图已存为 ${saved.name}` : ''}）`
+          : `（${label} ${blobs.length + 1}：${Math.round(bytes.length / 1024)}KB ${mime}${saved ? `，已存为 ${saved.name}` : ''}）`,
+        ...(tiles ? { gifTiles: true } : {}),
       });
     }
     // 数组上挂一份「存到哪了」，调用方拼推送文案用（宿主只读 blobs 的每一项，不会看这个属性）
@@ -3645,13 +3731,18 @@ export class StrollWorld {
         tag: String(args.tag ?? '').trim(),
         limit: clamp(Number(args.n ?? 10), 1, 40),
       });
+      // seq 就是 `sticker text=<数字>` 认的那个号（全量列表里的位置）。
+      // 共用 QQ 图库后有两千多张，只给名字的话她没法点名中间某一张。
+      const all = this.stickers.list({ limit: Number.MAX_SAFE_INTEGER }).items;
+      const pos = new Map(all.map((x, i) => [x.id, i + 1]));
       return JSON.stringify({
         ok: true,
         ...list,
+        items: list.items.map((x) => ({ ...x, seq: pos.get(x.id) ?? 0 })),
         dir: this.stickers.dir,
         stats: this.stickers.stats(),
         hint: list.total
-          ? '发的时候用 stroll_act action=sticker text=<名字/序号>；不写 text 就是随机一张。'
+          ? '发的时候用 stroll_act action=sticker text=<seq 数字 / 名字>；不写 text 就是随机一张。'
           : '表情库还是空的：用 stroll_act action=collect_stickers 从抖音收藏几张。',
       });
     }
@@ -5873,7 +5964,13 @@ export class StrollWorld {
     if (!this.cfg.douyin) return { ok: false, error: '抖音关着。' };
     const pick = this.stickers.find(args.text);
     if (!pick.ok) {
-      return { ok: false, error: pick.error, candidates: pick.candidates, total: this.stickers.stats().total };
+      return {
+        ok: false,
+        error: pick.error,
+        candidates: pick.candidates,
+        total: this.stickers.stats().total,
+        hint: '先 stroll action=stickers（必要时 n=40 / query=）拿到 seq 或名字再发；seq 是那一次查出来的位置，别用旧的。',
+      };
     }
     const target = await this.stickerTargetOf(args.target);
     if (!target.ok) return target;

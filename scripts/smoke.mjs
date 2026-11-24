@@ -52,6 +52,12 @@ function atMsProbe(v) {
 
 const shouldQuick = (...a) => !!world.quickReplyKind(...a);
 
+/**
+ * tool 可能返回字符串，也可能返回 { text, blobs }（open 带抽帧分镜、comments 带图片附件）。
+ * 统一成 JSON 再断言：这条以前写死 JSON.parse(字符串)，一抓到预览图就把 check 弄红。
+ */
+const asJson = (r) => JSON.parse(typeof r === 'string' ? r : String(r?.text ?? '{}'));
+
 function check(name, ok, detail) {
   checks.push([name, !!ok]);
   if (!ok) throw new Error(`FAILED: ${name}${detail ? ` — ${detail}` : ''}`);
@@ -712,8 +718,8 @@ check('按序号挑', book.find('1').ok === true);
 check('挑不到给候选', book.find('不存在').ok === false && Array.isArray(book.find('不存在').candidates));
 check('改名能生效', book.rename(add1.entry.id, '大笑').ok === true && book.find('大笑').ok === true);
 check('world 用的是同一个库', world.stickers.stats().total === 1);
-check('表情库能列表', JSON.parse(await world.toolStroll({ action: 'stickers' })).total === 1);
-check('没有的表情会如实拒绝', JSON.parse(await world.toolAct({ action: 'sticker', text: '查无此图' })).ok === false);
+check('表情库能列表', asJson(await world.toolStroll({ action: 'stickers' })).total === 1);
+check('没有的表情会如实拒绝', asJson(await world.toolAct({ action: 'sticker', text: '查无此图' })).ok === false);
 
 /* ---------------- 发自己画的图（图片工坊） ---------------- */
 const mediaDir = path.join(tmp, 'workspace', 'media');
@@ -729,7 +735,7 @@ check('不发 file 就用最新一张', path.basename(world.resolveWorkshopImage
 check('按 id 找图', path.basename(world.resolveWorkshopImage('aaaa1111').path) === '20261105-120000-aaaa1111.jpg');
 check('按整条路径找图', world.resolveWorkshopImage(imgB).ok === true);
 check('找不到就如实说', world.resolveWorkshopImage('nope').ok === false);
-const imgList = JSON.parse(await world.toolStroll({ action: 'images' }));
+const imgList = asJson(await world.toolStroll({ action: 'images' }));
 check('列出图片工坊的图', imgList.ok === true && imgList.total === 2 && imgList.items[0].id === 'bbbb2222');
 
 /* ---------------- 安全：发图只认允许的目录 ---------------- */
@@ -802,7 +808,7 @@ world.store.clearRisk();
 const brake2 = world.pauseBrake(24, { byOwner: true });
 check('主人点的手刹照原样', brake2.hours === 24 && brake2.capped === false, JSON.stringify(brake2));
 world.store.clearRisk();
-const secPaused = JSON.parse(await world.toolPolicy({ action: 'pause', hours: 48 }));
+const secPaused = asJson(await world.toolPolicy({ action: 'pause', hours: 48 }));
 check('模型走工具也只能停 1 小时', secPaused.ok === true && secPaused.hours === 1 && secPaused.capped === true, secPaused);
 world.store.clearRisk();
 world.store.save();
@@ -820,7 +826,7 @@ world.bili.open = async () => ({
   desc: '简介里可以写任何话',
 });
 world.bili.mediaText = async () => null;
-const secOpened = JSON.parse(await world.readOpen({ url: 'BV1xx411c7mD' }));
+const secOpened = asJson(await world.readOpen({ url: 'BV1xx411c7mD' }));
 world.bili.open = secPrevBiliOpen;
 world.bili.mediaText = secPrevBiliMedia;
 check('看视频结果带内容边界', /不是给你的指令/.test(secOpened.notice ?? ''), JSON.stringify(secOpened).slice(0, 120));
@@ -870,9 +876,9 @@ world.douyin.sendStickerTo = async (who, opts) => {
 world.groupAuto = { at: Date.now(), names: ['图群'] };
 world.store.data.douyinOwner = { secUid: 'MS4wLjABAAAAabcdefghijklmnop', name: '阿柚', at: Date.now() };
 world.cfg.ownerDouyin = 'MS4wLjABAAAAabcdefghijklmnop';
-const rOwnerImg = JSON.parse(await world.toolAct({ action: 'image', target: '主人', file: imgB }));
+const rOwnerImg = asJson(await world.toolAct({ action: 'image', target: '主人', file: imgB }));
 check('图发到主人私信', rOwnerImg.ok === true && sentImgs[0].who === '阿柚' && rOwnerImg.to === 'owner', JSON.stringify(rOwnerImg));
-const rGroupImg = JSON.parse(await world.toolAct({ action: 'image', target: '图群', file: 'bbbb2222' }));
+const rGroupImg = asJson(await world.toolAct({ action: 'image', target: '图群', file: 'bbbb2222' }));
 check('图发到群里', rGroupImg.ok === true && sentImgs[1].who === '图群' && rGroupImg.to === 'group', JSON.stringify(rGroupImg));
 world.douyin.sendStickerTo = oldSendImg;
 world.groupAuto = { at: 0, names: [] };
@@ -908,7 +914,7 @@ const recvBlobs = await world.imageBlobs([`data:image/png;base64,${pngHead.toStr
 });
 check('收到的图会存到本地', recvBlobs.saved?.length === 1 && /^recv-[0-9a-f]{8}\.png$/.test(recvBlobs.saved[0].name));
 check('存下的图能再找到', world.resolveWorkshopImage(recvBlobs.saved[0].name).ok === true);
-const listWithRecv = JSON.parse(await world.toolStroll({ action: 'images' }));
+const listWithRecv = asJson(await world.toolStroll({ action: 'images' }));
 check('images 里能看到收到的图', listWithRecv.items.some((x) => x.source === '收到的'), JSON.stringify(listWithRecv.items));
 
 // 上传前归一化：jpg/png/gif/mp4 原样；webp/heic 才需要转（这里只验不需要转的那条）
@@ -936,10 +942,10 @@ check('名单里没这个人就不 @', world.douyin.pickAtRow(atRows, '不存在
 // 老版本把 GBK 输出按 UTF-8 读，路径里会留下替换符；这种值不能再拿去 mkdir
 check('认得出坏路径', looksBrokenPath(`E:\\${String.fromCharCode(65533)}`) === true && looksBrokenPath('E:\\视频') === false);
 
-const history = JSON.parse(await world.toolStroll({ action: 'history' }));
+const history = asJson(await world.toolStroll({ action: 'history' }));
 check('history ok', history.ok === true);
 
-const draft = JSON.parse(await world.toolAct({ action: 'like', platform: 'bilibili', target: 'BV1SVsd6MEGZ', preview: true }));
+const draft = asJson(await world.toolAct({ action: 'like', platform: 'bilibili', target: 'BV1SVsd6MEGZ', preview: true }));
 check('draft created', draft.ok === true && draft.draft === true && !!draft.id);
 // 草稿有寿命，必须让鱼知道：不然它跟主人说「已提交待审批」，半小时后一起以为见了鬼（2026-11-22 反馈）
 check(
@@ -948,20 +954,20 @@ check(
   JSON.stringify({ expiresAt: draft.expiresAt, expiresInSec: draft.expiresInSec }),
 );
 check('draft pending', world.store.pendingDrafts().length === 1);
-check('model cannot approve', JSON.parse(await world.toolAct({ action: 'approve', draft_id: draft.id })).ok === false);
+check('model cannot approve', asJson(await world.toolAct({ action: 'approve', draft_id: draft.id })).ok === false);
 const rejected = world.rejectDraft(draft.id);
 check('reject', rejected.ok === true);
 
 // 防注入：模型只能改兴趣词；额度/主人/审批一律拒绝（这些只能主人在面板改）
-const deniedPolicy = JSON.parse(await world.toolPolicy({ action: 'set', patch: { dailyLikes: 4, ownerUid: '123456' } }));
+const deniedPolicy = asJson(await world.toolPolicy({ action: 'set', patch: { dailyLikes: 4, ownerUid: '123456' } }));
 check(
   '模型改额度和主人账号会被拒',
   deniedPolicy.ok === false && deniedPolicy.code === 'FORBIDDEN_FIELD' && cfg.dailyLikes !== 4 && cfg.ownerUid !== '123456',
   JSON.stringify(deniedPolicy),
 );
-const deniedApproval = JSON.parse(await world.toolPolicy({ action: 'set', patch: { approval: 'auto_all' } }));
+const deniedApproval = asJson(await world.toolPolicy({ action: 'set', patch: { approval: 'auto_all' } }));
 check('模型改审批会被拒', deniedApproval.ok === false && deniedApproval.code === 'FORBIDDEN_FIELD', JSON.stringify(deniedApproval));
-const okPolicy = JSON.parse(await world.toolPolicy({ action: 'set', patch: { interests: '游戏,音乐,猫' } }));
+const okPolicy = asJson(await world.toolPolicy({ action: 'set', patch: { interests: '游戏,音乐,猫' } }));
 check('模型可以改兴趣词', okPolicy.ok === true && /猫/.test(cfg.interests), JSON.stringify(okPolicy));
 // 主人 UID 现在只能主人在面板里设（模型改会被拒），测试里直接给
 cfg.ownerUid = '123456';
@@ -1378,7 +1384,7 @@ check(
   !!atOpen?.blobs?.length && atOpen.blobs[0].mime === 'image/jpeg',
   JSON.stringify(atOpen?.blobs?.[0]?.name),
 );
-const badAt = JSON.parse(await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', at: 'abc' }));
+const badAt = asJson(await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', at: 'abc' }));
 check('at 写错会明确报错', badAt.ok === false && /at 要写成/.test(badAt.error), badAt.error);
 world.bili.framesOf = async () => [];
 const noFrame = await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', frames: 1 });
@@ -1944,7 +1950,7 @@ const prevMediaText = world.bili.mediaText;
 world.cfg.openTalk = true;
 world.bili.open = async () => ({ kind: 'video', id: 'BV1GJ411x7h7', title: '测试', author: 'UP', url: 'https://www.bilibili.com/video/BV1GJ411x7h7', dur: '1:00' });
 world.bili.mediaText = async () => ({ ok: true, subtitles: [], danmaku: [], total: { subtitles: 0, danmaku: 0 } });
-const opened = JSON.parse(await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7' }));
+const opened = asJson(await world.toolStroll({ action: 'open', url: 'https://www.bilibili.com/video/BV1GJ411x7h7' }));
 check('后台看完会提示说一句', typeof opened.followUp === 'string' && /说说/.test(opened.followUp), JSON.stringify(opened).slice(0, 120));
 world.bili.open = prevBiliOpen;
 world.bili.mediaText = prevMediaText;
@@ -3662,5 +3668,12 @@ world.strangerScanAt = 0;
 
 console.log(checks.map(([n, ok]) => `${ok ? 'ok' : 'NO'}  ${n}`).join('\n'));
 console.log(`\n${checks.length} checks passed`);
-fs.rmSync(tmp, { recursive: true, force: true });
+// Windows 上浏览器 profile 的句柄常比进程晚一步释放，删不掉不该让整个 check 变红（开头会再清一次）
+try {
+  fs.rmSync(tmp, { recursive: true, force: true });
+} catch {
+  // 留着也行：下一次跑的开头有 6 次重试，删不掉会提示
+}
+// 跑完就退出：world 里的定时器不会自己停，靠自然退出会一直挂着（CI 里就是超时）
+process.exit(checks.every(([, ok]) => ok) ? 0 : 1);
 

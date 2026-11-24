@@ -1727,6 +1727,24 @@ export class StrollWorld {
       const sameDay = d.toDateString() === now.toDateString();
       return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}-${d.getDate()} ${hm}`;
     };
+    /**
+     * 通知里没带评论正文时，按 cid 去评论区把真话捞回来。
+     *
+     * mapAtNotice 在 `at.content` 为空时会退回**视频标题** —— 那看着像「她说了这句话」，
+     * 其实一个字都不是评论。她照标题猜，就回了楼里最早那条（2026-11-24 实测：
+     * 主人新发的「你会做吗」没看见，回的是更早的「看见了吗」）。
+     */
+    for (const x of picked) {
+      if (x.platform !== 'douyin' || x.source !== 'at' || String(x.textRaw ?? '').trim()) continue;
+      if (!/^[1-9]\d*$/.test(String(x.cid ?? ''))) continue;
+      const got = await this.douyin.commentByCid(x.awemeId, x.cid).catch(() => null);
+      if (got?.text) {
+        x.text = truncate(got.text, 140);
+        if (got.user) x.user = got.user;
+        x.textRaw = got.text;
+        this.log?.info?.('stroll at text filled', { cid: String(x.cid).slice(-6), n: got.text.length });
+      }
+    }
     const lines = picked.map((x, i) => {
       if (x.platform === 'douyin') {
         const canReply = /^[1-9]\d*$/.test(String(x.cid ?? ''));

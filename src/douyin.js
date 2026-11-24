@@ -75,6 +75,15 @@ export function mapAtNotice(item) {
     secUid: String(user.sec_uid ?? ''),
     mid: String(user.uid ?? ''),
     text: truncate(content || title || '（在评论里 @ 了你）', 140),
+    /**
+     * 通知里原始评论正文（可能就是空）。
+     *
+     * `at.content` 空的时候上面会退回视频标题，看着像「她说了这句话」，
+     * 其实一个字都不是评论 —— 她照着标题回，就会挑错那条（2026-11-24 实测：
+     * 回的是楼里最早那句「看见了吗」，最新那句压根没看见）。
+     * 留着原始值，调用方就能按 cid 去评论区把真话捞回来。
+     */
+    textRaw: content,
     quote: '',
     where: truncate(title || `视频 ${awemeId}`, 60),
     at: Number(item.create_time ?? 0) * 1000,
@@ -3918,6 +3927,34 @@ export class DouyinBrowser {
       }
 
       if (isReply) {
+        /**
+         * 接口没给回执时，先回这层楼里找找有没有刚发出去的那句。
+         *
+         * 抖音经常「服务端收了、响应丢了」：她今天两次回复各卡了 241 秒（撞验证码），
+         * 评论实际出现在评论区，但插件既没 cid 也没记录 → 这层楼永远进不了
+         * 「有人回我」的监控，主人在楼里接着说话她再也收不到（2026-11-24）。
+         */
+        const probe = text.replace(/\s+/g, '').slice(0, 12);
+        const kids = await this.commentReplies(id, root).catch(() => []);
+        const mine = kids.find((k) => String(k.text ?? '').replace(/\s+/g, '').includes(probe)) ?? null;
+        if (mine?.cid) {
+          this.lastAction = `comment ${id}`;
+          return {
+            ok: true,
+            confirmed: true,
+            queued: false,
+            text,
+            mentioned: null,
+            cid: mine.cid,
+            status: mine.status,
+            visible: mine.status === 1 ? true : null,
+            note: '',
+            via: 'api-verify',
+            root,
+            parent,
+            url: `https://www.douyin.com/video/${id}`,
+          };
+        }
         const why = fast ? `（HTTP ${fast.http} / 抖音码 ${fast.code} / 签名${fast.signed ? '已带' : '未带'}）` : '';
         throw new DouyinError('REPLY_NOT_CONFIRMED', `未拿到抖音楼中楼回复回执${why}；可能被拒绝或响应丢失，请先查看原评论，不要立即重发。不会改发新评论。`);
       }
@@ -4013,7 +4050,12 @@ export class DouyinBrowser {
         if (tags.length) mentioned = tags.some((e) => Number(e.type) === 0 && (e.sec_uid || e.user_id));
       }
       let confirmed = inList || !!pub;
-      if (!pub) {
+      /**
+       * 回执拿到了却没带 cid（结构变了、或者只回了个 ok）时也要反查一次。
+       * 以前条件是 `!pub`：pub 存在但 cid 为空就跳过了，结果这条评论永远没有 cid，
+       * 它所在的那层楼也就永远进不了「有人回我」的监控名单 —— 楼中楼续聊全哑。
+       */
+      if (!cid) {
         let apiHit = null;
         try {
           const probe = text.replace(/\s+/g, '').slice(0, 12);
@@ -4025,7 +4067,7 @@ export class DouyinBrowser {
         } catch {
           apiHit = null;
         }
-        confirmed = inList || !!apiHit;
+        confirmed = confirmed || !!apiHit;
         if (apiHit) {
           cid = apiHit.cid;
           status = apiHit.status;
@@ -4253,6 +4295,60 @@ export class DouyinBrowser {
   }
 
   /**
+   * 按 cid 取一条评论的原文。
+   *
+   * @ 通知里 `at.content` 有时是空的（mapAtNotice 会退回成视频标题），
+   * 她照着标题猜就会回错那条。拿到 cid 就能把真话捞回来。
+   */
+  async commentByCid(awemeId, cid) {
+    const page = this.page;
+    if (!page || !awemeId || !cid) return null;
+    return page
+      .evaluate(
+        async ({ id, cid }) => {
+          const base = {
+            device_platform: 'webapp',
+            aid: '6383',
+            channel: 'channel_pc_web',
+            aweme_id: String(id),
+            item_type: '0',
+            count: '50',
+            pc_client_type: '1',
+            version_code: '190500',
+            version_name: '19.5.0',
+            cookie_enabled: 'true',
+            platform: 'PC',
+            downlink: '10',
+          };
+          const grab = async (extra) => {
+            const q = new URLSearchParams({ ...base, ...extra });
+            const r = await fetch(`https://www.douyin.com/aweme/v1/web/comment/list/?${q}`, { credentials: 'include' }).catch(() => null);
+            if (!r?.ok) return null;
+            const d = await r.json().catch(() => null);
+            return (d?.comments ?? []).find((c) => String(c.cid) === String(cid)) ?? null;
+          };
+          let hit = await grab({ cursor: '0', insert_ids: String(cid) });
+          if (!hit) {
+            for (const cursor of [0, 20, 40]) {
+              hit = await grab({ cursor: String(cursor) });
+              if (hit) break;
+            }
+          }
+          if (!hit) return null;
+          return {
+            cid: String(hit.cid ?? ''),
+            text: String(hit.text ?? ''),
+            user: String(hit.user?.nickname ?? ''),
+            root: String(hit.reply_id ?? ''),
+            status: Number(hit.status ?? 0),
+          };
+        },
+        { id: String(awemeId), cid: String(cid) },
+      )
+      .catch(() => null);
+  }
+
+  /**
    * 看某条评论的楼里有没有新回复。
    *
    * 抖音**不会**为「有人回复了我的评论」发 @ 通知（notice_group=6 只装 @），
@@ -4274,7 +4370,9 @@ export class DouyinBrowser {
      * `comment/list` 是我们天天在用、确定有数据的接口，主楼对象里还带 2-3 条最新回复，
      * 对我们这种「只想知道刚有人回了什么」的场景够了。
      */
-    const res = await page
+    const evalArgs = { id: String(awemeId), root: String(rootCid), count };
+    const runOnce = () =>
+      page
       .evaluate(
         async ({ id, root, count }) => {
           const base = {
@@ -4312,12 +4410,62 @@ export class DouyinBrowser {
             }
           }
           if (!got.hit) return { http: got.http, code: got.code ?? -1, list: [], found: false };
-          const kids = Array.isArray(got.hit.reply_comment) ? got.hit.reply_comment : [];
+          /**
+           * `reply_comment` 抖音现在多数给的是**单个对象或 null**，不是数组
+           * （2026-11-24 实测：reply_comment_total=30 的那条主评论，reply_comment 是 object）。
+           * 以前只认 Array，于是「有 30 条回复」也读成 0 条，楼中楼永远收不到。
+           */
+          const rawKids = got.hit.reply_comment;
+          const total = Number(got.hit.reply_comment_total ?? 0);
+          let kids = Array.isArray(rawKids) ? rawKids : rawKids && typeof rawKids === 'object' ? [rawKids] : [];
+          let via = 'preview';
+          /**
+           * 预览拿不到（`reply_comment` 是 null、只给 total）时改问官方楼中楼接口。
+           *
+           * 2026-11-24 实测：主人正在聊的那层楼 reply_comment=null、total=3，
+           * 光等预览永远是 0 条 —— 表现就是「她只回楼里最早那句，后面新说的看不见」。
+           */
+          if (!kids.length && total > 0) {
+            const q = new URLSearchParams({
+              ...base,
+              item_id: String(id),
+              comment_id: String(root),
+              cursor: '0',
+              count: String(count),
+            });
+            const r = await fetch(`https://www.douyin.com/aweme/v1/web/comment/list/reply/?${q}`, { credentials: 'include' }).catch(() => null);
+            if (r?.ok) {
+              const d = await r.json().catch(() => null);
+              const arr = d?.comments ?? [];
+              if (arr.length) {
+                kids = arr;
+                via = 'reply_api';
+              } else {
+                via = 'reply_api_empty';
+                // 接口也不给：把现场留给主进程落盘，别只留一句「0 条」
+                try {
+                  window.__strollReplyDump = JSON.stringify({
+                    root: String(root),
+                    total,
+                    preview: rawKids === null ? 'null' : typeof rawKids,
+                    replyKeys: Object.keys(d ?? {}).slice(0, 12),
+                    hasMore: d?.has_more ?? null,
+                  }).slice(0, 2000);
+                } catch {
+                  // 留不下就算了
+                }
+              }
+            } else {
+              via = 'reply_api_fail';
+            }
+          }
           return {
             http: got.http,
             code: got.code ?? 0,
             found: true,
-            total: Number(got.hit.reply_comment_total ?? 0),
+            total,
+            kind: Array.isArray(rawKids) ? 'array' : rawKids === null ? 'null' : typeof rawKids,
+            via,
             list: kids.map((c) => ({
               cid: String(c.cid ?? ''),
               text: String(c.text ?? ''),
@@ -4330,9 +4478,49 @@ export class DouyinBrowser {
             })),
           };
         },
-        { id: String(awemeId), root: String(rootCid), count },
-      )
-      .catch((e) => ({ http: -1, list: [], err: String(e?.message ?? e).slice(0, 60) }));
+        evalArgs,
+      );
+    /**
+     * 页面正在导航/刷新时 evaluate 会抛「Execution context was destroyed」。
+     *
+     * 以前这一下就被 catch 成空数组，等于「这层楼没人回复」——而主人在那边等着她回。
+     * 2026-11-24 实测：正在聊的那层楼 root 464987 一次都没查成，全是这个错。
+     * 等 800ms 重来一次，仍然失败才算真的失败。
+     */
+    let res = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      res = await runOnce().catch((e) => {
+        const msg = String(e?.message ?? e).slice(0, 80);
+        return {
+          http: -1,
+          list: [],
+          err: msg,
+          __retry: /Execution context was destroyed|Target closed|frame was detached/i.test(msg),
+        };
+      });
+      if (!res?.__retry || attempt === 1) break;
+      this.log?.info?.('stroll dy replies retry', { root: String(rootCid).slice(-6), attempt: attempt + 1 });
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    // 接口也读不到时，把页面里留的现场落盘：下一轮改 UI 之前先看清抖音到底回了什么
+    if (res?.via === 'reply_api_empty' || res?.via === 'reply_api_fail') {
+      const dump = await page
+        .evaluate(() => {
+          const v = window.__strollReplyDump ?? '';
+          window.__strollReplyDump = '';
+          return v;
+        })
+        .catch(() => '');
+      if (dump) {
+        try {
+          const dir = path.join(this.dataDir, 'stroll', 'debug');
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, `reply-empty-${Date.now()}.json`), String(dump));
+        } catch {
+          // 落不下就算了
+        }
+      }
+    }
     const out = Array.isArray(res?.list) ? res.list : [];
     this.log?.info?.('stroll dy replies api', {
       http: res?.http ?? -1,
@@ -4341,6 +4529,8 @@ export class DouyinBrowser {
       total: res?.total ?? 0,
       n: out.length,
       err: res?.err ?? '',
+      kind: res?.kind ?? '',
+      via: res?.via ?? '',
     });
     return out;
   }

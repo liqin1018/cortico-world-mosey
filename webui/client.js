@@ -576,28 +576,32 @@ export default {
 
         /* ---------------- 谁找你 ---------------- */
         const inboxSec = el('section', undefined, 'stroll-sec');
-        inboxSec.style.display = 'none';
         const inboxHead = el('div', undefined, 'stroll-sec-head');
         const inboxTitle = el('h3');
-        const inboxCount = el('span', '0', 'stroll-count');
+        const inboxCount = el('span', '', 'stroll-count');
+        inboxCount.style.display = 'none';
         inboxTitle.append(el('span', '谁找你'), inboxCount);
         const inboxHint = el('span', undefined, 'stroll-sec-hint');
         const inboxTools = el('div', undefined, 'stroll-inbox-tools');
+        inboxTools.style.display = 'none';
         const inboxReadAll = button('全部已读', () => markAllSeen(), 'ghost xs');
         const inboxRefresh = button('刷新', () => loadInbox(true), 'ghost xs');
         inboxRefresh.prepend(icon('refresh', 11));
         const inboxDmMe = button('B站私信我', () => dmMe('bilibili'), 'ghost xs');
         const inboxDmDy = button('抖音私信我', () => dmMe('douyin'), 'ghost xs');
         inboxDmDy.style.display = 'none';
-        inboxTools.append(inboxDmMe, inboxDmDy, inboxReadAll, inboxRefresh);
+        inboxTools.append(inboxDmMe, inboxDmDy, inboxReadAll);
         const inboxMeta = el('div', undefined, 'stroll-inbox-meta');
-        inboxMeta.append(inboxHint, inboxTools);
+        inboxMeta.append(inboxHint, inboxTools, button('收到的图片', openReceivedImages, 'ghost xs'), inboxRefresh);
         inboxHead.append(inboxTitle, inboxMeta);
         const inboxLead = el('p', '评论能在面板直接回；私信两边都能看，也能在这儿回。点「去看看」会用你的浏览器打开。', 'stroll-muted');
         const inboxTabs = el('div', undefined, 'stroll-tabs stroll-inbox-tabs');
         const inboxList = el('div', undefined, 'stroll-inbox');
         const inboxMore = el('div', undefined, 'stroll-inbox-more');
-        inboxSec.append(inboxHead, inboxLead, inboxTabs, inboxList, inboxMore);
+        const inboxBody = el('div');
+        inboxBody.hidden = true;
+        inboxBody.append(inboxLead, inboxTabs, inboxList, inboxMore);
+        inboxSec.append(inboxHead, inboxBody);
         root.append(inboxSec);
 
         /* ---------------- 待你点头 ---------------- */
@@ -1364,7 +1368,10 @@ export default {
           { passive: false },
         );
 
-        function openSheet({ title, hint = '', tabs = [], active = '', onTab = null, render }) {
+        let disposeSheet = null;
+        function openSheet({ title, hint = '', tabs = [], active = '', onTab = null, render, dispose = null }) {
+          disposeSheet?.();
+          disposeSheet = dispose;
           sheetTitle.textContent = title;
           sheetHint.textContent = hint;
           sheetTabs.replaceChildren();
@@ -1390,8 +1397,198 @@ export default {
         }
 
         function closeSheet() {
+          disposeSheet?.();
+          disposeSheet = null;
           sheet.classList.remove('show');
           sheet.hidden = true;
+        }
+
+        ctx.signal?.addEventListener('abort', closeSheet, { once: true });
+
+        async function openReceivedImages() {
+          let closed = false;
+          let page = 0;
+          let pageVersion = 0;
+          let saving = false;
+          const pageSize = 6;
+          const urls = new Set();
+          const selected = new Set();
+          const results = new Map();
+          const releasePreviews = () => {
+            for (const url of urls) URL.revokeObjectURL(url);
+            urls.clear();
+          };
+          const body = el('div');
+          const status = el('p', '正在读取图片…', 'stroll-muted');
+          status.setAttribute('role', 'status');
+          body.append(status);
+          openSheet({
+            title: '收到的图片', hint: '从本地缓存收藏为表情',
+            render: (host) => host.append(body),
+            dispose: () => { closed = true; releasePreviews(); },
+          });
+          let data;
+          try {
+            data = await ctx.invoke('received_images');
+            if (!data?.ok) throw new Error(data?.error || '读取图片失败。');
+          } catch (error) {
+            if (!closed) status.textContent = error.message || '读取图片失败。';
+            return;
+          }
+          if (closed) return;
+          const { items, target, batchLimit } = data;
+          const destination = el('div', undefined, 'stroll-received-controls');
+          const pathLabel = el('span', `收藏位置（${target.shared ? '共用图库' : '摸鱼图库'}）：${target.dir}`, 'stroll-muted stroll-received-path');
+          const openStatus = el('span', '', 'stroll-muted');
+          openStatus.setAttribute('role', 'status');
+          const openDir = button('打开表情包目录', async () => {
+            openDir.disabled = true;
+            openStatus.textContent = '正在打开资源管理器…';
+            try {
+              const result = await ctx.invoke('received_stickers_open', [target.dir]);
+              if (!result?.ok) throw new Error(result?.error || '目录打不开。');
+              if (!closed) openStatus.textContent = result.windowState === 'foreground' ? '表情包目录已在前台显示。'
+                : result.windowState === 'raised' ? '表情包目录已打开。'
+                  : result.windowState === 'background' ? '目录已打开，但窗口没有显示到前面。请点任务栏的文件资源管理器。' : '已请求系统打开目录。';
+            } catch (error) {
+              if (!closed) openStatus.textContent = error.message || '目录打不开。';
+            } finally {
+              if (!closed) openDir.disabled = false;
+            }
+          }, 'ghost xs');
+          destination.append(pathLabel, openDir, openStatus);
+          body.prepend(destination);
+          if (!items.length) {
+            status.textContent = '还没有缓存的收到图片。';
+            return;
+          }
+
+          const controls = el('div', undefined, 'stroll-received-controls');
+          const grid = el('div', undefined, 'stroll-received-grid');
+          const position = el('span', undefined, 'stroll-muted');
+          const prev = button('上一页', () => { page--; showPage(); }, 'xs');
+          const next = button('下一页', () => { page++; showPage(); }, 'xs');
+          const saveSelected = button('收藏所选', () => requestSave([...selected]), 'primary xs');
+          const confirmation = el('div', undefined, 'stroll-received-controls');
+          const pages = Math.ceil(items.length / pageSize);
+          const rows = [];
+          controls.append(prev, position, next, saveSelected);
+          status.before(controls, confirmation);
+          body.append(grid);
+          status.textContent = '';
+
+          function syncControls() {
+            saveSelected.textContent = `收藏所选（${selected.size}）`;
+            saveSelected.disabled = saving || !selected.size;
+            prev.disabled = saving || page === 0;
+            next.disabled = saving || page + 1 === pages;
+            for (const { item, checkbox, saveOne } of rows) {
+              const finished = ['saved', 'duplicate'].includes(results.get(item.filename)?.status);
+              checkbox.checked = selected.has(item.filename);
+              checkbox.disabled = saving || !item.canSave || finished || (!checkbox.checked && selected.size >= batchLimit);
+              saveOne.disabled = saving || !item.canSave || finished;
+            }
+          }
+
+          function requestSave(filenames) {
+            if (!filenames.length || saving) return;
+            if (!target.shared) return void saveImages(filenames);
+            const confirm = button('确认写入', () => saveImages(filenames, true), 'primary xs');
+            confirmation.replaceChildren(
+              el('span', `将 ${filenames.length} 张图片收藏到上方共用图库。`),
+              confirm,
+              button('取消', () => confirmation.replaceChildren(), 'ghost xs'),
+            );
+            confirm.focus();
+          }
+
+          async function saveImages(filenames, confirmed = false) {
+            if (saving) return;
+            saving = true;
+            confirmation.replaceChildren();
+            status.textContent = '正在收藏…';
+            syncControls();
+            try {
+              const result = await ctx.invoke('received_stickers_save', [filenames, target.dir, confirmed]);
+              if (closed) return;
+              if (!result?.ok) throw new Error(result?.error || '收藏失败。');
+              const counts = { saved: 0, duplicate: 0, failed: 0 };
+              for (const item of result.items) {
+                results.set(item.filename, item);
+                counts[item.status]++;
+                if (item.status !== 'failed') selected.delete(item.filename);
+              }
+              status.textContent = `已收藏 ${counts.saved} 张，重复 ${counts.duplicate} 张，失败 ${counts.failed} 张。`;
+              for (const { item, outcome } of rows) outcome.textContent = resultText(item);
+            } catch (error) {
+              if (!closed) status.textContent = error.message || '收藏失败。';
+            } finally {
+              saving = false;
+              if (!closed) syncControls();
+            }
+          }
+
+          function resultText(item) {
+            const result = results.get(item.filename);
+            if (result?.status === 'saved') return '已收藏';
+            if (result?.status === 'duplicate') return '图库已有';
+            if (result?.status === 'failed') return result.error;
+            return item.canSave ? '' : '超过 4 MB';
+          }
+
+          function showPage() {
+            const version = ++pageVersion;
+            releasePreviews();
+            confirmation.replaceChildren();
+            grid.replaceChildren();
+            rows.length = 0;
+            position.textContent = `${page + 1} / ${pages} 页 · ${items.length} 张`;
+            for (const [index, item] of items.slice(page * pageSize, (page + 1) * pageSize).entries()) {
+              const number = page * pageSize + index + 1;
+              const card = el('div', undefined, 'stroll-received-card');
+              const preview = el('div', '加载中…', 'stroll-received-preview');
+              const label = el('label');
+              const checkbox = el('input');
+              checkbox.type = 'checkbox';
+              checkbox.addEventListener('change', () => {
+                confirmation.replaceChildren();
+                if (checkbox.checked) selected.add(item.filename);
+                else selected.delete(item.filename);
+                syncControls();
+              });
+              label.append(checkbox, el('span', `图片 ${number}`));
+              const saveOne = button('收藏这张', () => requestSave([item.filename]), 'xs');
+              saveOne.setAttribute('aria-label', `收藏图片 ${number}`);
+              const outcome = el('span', resultText(item), 'stroll-muted');
+              card.append(preview, label, saveOne, outcome);
+              grid.append(card);
+              rows.push({ item, checkbox, saveOne, outcome });
+              void loadPreview(preview, item, number, version);
+            }
+            syncControls();
+          }
+
+          async function loadPreview(host, item, number, version) {
+            try {
+              const blob = await ctx.invokeBinary('received_image_preview', [item.filename]);
+              if (closed || version !== pageVersion) return;
+              if (!/^image\/(jpeg|png|gif|webp)$/.test(blob.type)) {
+                const problem = await blob.text().then(JSON.parse).catch(() => null);
+                throw new Error(problem?.error || '无法预览');
+              }
+              const url = URL.createObjectURL(blob);
+              urls.add(url);
+              const image = el('img');
+              image.alt = `收到的图片 ${number}`;
+              image.addEventListener('error', () => { host.textContent = '图片无法显示'; }, { once: true });
+              image.src = url;
+              host.replaceChildren(image);
+            } catch (error) {
+              if (!closed && version === pageVersion) host.textContent = error.message || '无法预览';
+            }
+          }
+
+          showPage();
         }
 
         /** 一条动作的完整样子：谁、什么时候、原文、在哪条内容上。 */
@@ -2124,11 +2321,14 @@ export default {
         }
 
         function renderInbox() {
-          if (!inboxItems.length) {
-            inboxSec.style.display = 'none';
+          const empty = inboxItems.length === 0;
+          inboxBody.hidden = empty;
+          inboxCount.style.display = empty ? 'none' : '';
+          inboxTools.style.display = empty ? 'none' : '';
+          if (empty) {
+            inboxHint.textContent = '暂无消息';
             return;
           }
-          inboxSec.style.display = '';
           const unread = inboxItems.filter((x) => x.fresh).length;
           inboxCount.textContent = String(inboxItems.length);
           inboxCount.className = `stroll-count ${unread ? 'on' : ''}`.trim();

@@ -8,7 +8,7 @@ import { Policy, approvalFor, clampText } from './policy.js';
 import { Bilibili } from './bilibili.js';
 import { openWatchRoom, readWatchRoom, roomStartLink, roomVideo, watchGuest } from './watch-room.js';
 import { DouyinBrowser, secUidOf, stripLeadingFakeAt, stripRowTime } from './douyin.js';
-import { StickerBook } from './stickers.js';
+import { StickerBook, STICKER_MAX_BYTES } from './stickers.js';
 import { activeToolDecls, BILI_READ_ACTIONS, DY_READ_ACTIONS, DY_WRITE_ACTIONS, LOCAL_READ_ACTIONS } from './tools.js';
 import { CONFIG_GROUPS, DEFAULTS, validatePolicyPatch } from './config.js';
 import {
@@ -66,6 +66,8 @@ const UNTRUSTED_TAIL = '【内容结束】';
 const IMAGE_EXT = /\.(jpe?g|png|webp|gif)$/i;
 /** 单张图片上限。再大上传框会卡，宿主也可能整条丢掉。 */
 const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const RECEIVED_IMAGE_NAME = /^recv-[a-f0-9]{8}\.(jpg|png|webp|gif)$/;
+const RECEIVED_STICKER_BATCH = 20;
 
 /**
  * 看视频 / 看评论拿回来的也是「别人写的内容」——标题、简介、评论、字幕谁都能填。
@@ -3138,6 +3140,79 @@ export class StrollWorld {
   /** 收到的图存这里：和「图片工坊」分开，但发图时两边都能挑。 */
   mediaInbox() {
     return path.join(this.dataDir, 'stroll', 'media');
+  }
+
+  receivedStickerTarget() {
+    this.stickers.dir = path.resolve(String(this.cfg.stickerDir ?? '').trim() || this.stickers.indexDir);
+    const { dir, indexDir } = this.stickers;
+    const shared = path.resolve(dir) !== path.resolve(indexDir) || Boolean(fs.lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink());
+    return { dir: fs.existsSync(dir) ? fs.realpathSync(dir) : path.resolve(dir), shared };
+  }
+
+  receivedImages() {
+    const dir = this.mediaInbox();
+    const items = [];
+    if (fs.lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
+      for (const filename of fs.readdirSync(dir)) {
+        if (!RECEIVED_IMAGE_NAME.test(filename)) continue;
+        const stat = fs.lstatSync(path.join(dir, filename), { throwIfNoEntry: false });
+        if (!stat?.isFile() || stat.size < 12 || stat.size > IMAGE_MAX_BYTES) continue;
+        items.push({ filename, size: stat.size, at: stat.mtimeMs, canSave: stat.size <= STICKER_MAX_BYTES });
+      }
+    }
+    items.sort((left, right) => right.at - left.at || left.filename.localeCompare(right.filename));
+    return { ok: true, items, target: this.receivedStickerTarget(), batchLimit: RECEIVED_STICKER_BATCH };
+  }
+
+  receivedImage(filename, maxBytes = IMAGE_MAX_BYTES) {
+    if (typeof filename !== 'string' || !RECEIVED_IMAGE_NAME.test(filename)) {
+      return { ok: false, error: '只能选择收到的图片。' };
+    }
+    const dir = this.mediaInbox();
+    const file = path.join(dir, filename);
+    if (!fs.lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) return { ok: false, error: '图片缓存已清理。' };
+    const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+    if (!stat?.isFile()) return { ok: false, error: '图片缓存已清理，或文件不可用。' };
+    if (stat.size > maxBytes) return { ok: false, error: `图片超过 ${maxBytes / 1024 / 1024} MB。` };
+    const fd = fs.openSync(file, 'r');
+    let bytes;
+    try {
+      const opened = fs.fstatSync(fd);
+      if (!opened.isFile() || opened.ino !== stat.ino || opened.dev !== stat.dev || opened.size !== stat.size) {
+        return { ok: false, error: '图片缓存已变动，请重新打开。' };
+      }
+      bytes = Buffer.alloc(stat.size);
+      if (fs.readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return { ok: false, error: '图片内容不完整。' };
+    } finally {
+      fs.closeSync(fd);
+    }
+    const mime = imageMimeOf(bytes);
+    const expected = `image/${filename.endsWith('.jpg') ? 'jpeg' : path.extname(filename).slice(1)}`;
+    if (mime !== expected) return { ok: false, error: '图片格式不符。' };
+    return { ok: true, mime, bytes };
+  }
+
+  saveReceivedStickers(filenames, selectedDir, confirmed) {
+    if (!Array.isArray(filenames) || !filenames.length || filenames.length > RECEIVED_STICKER_BATCH) {
+      return { ok: false, error: `请选 1～${RECEIVED_STICKER_BATCH} 张图片。` };
+    }
+    const target = this.receivedStickerTarget();
+    if (target.dir !== selectedDir || (target.shared && confirmed !== true)) {
+      return { ok: false, error: '请重新打开「收到的图片」并确认要写入的表情包文件夹。' };
+    }
+    this.stickers.scanDir(true);
+    const items = [...new Set(filenames)].map((filename) => {
+      try {
+        const image = this.receivedImage(filename, STICKER_MAX_BYTES);
+        if (!image.ok) return { filename, status: 'failed', error: image.error };
+        const saved = this.stickers.addBuffer(image.bytes, { source: 'received' });
+        if (!saved.ok) return { filename, status: 'failed', error: saved.error };
+        return { filename, status: saved.duplicate ? 'duplicate' : 'saved', id: saved.entry.id };
+      } catch (error) {
+        return { filename, status: 'failed', error: error?.code === 'ENOENT' ? '图片缓存已清理，或目录不可用。' : '读取或收藏失败。' };
+      }
+    });
+    return { ok: true, items };
   }
 
   /**
@@ -8334,6 +8409,23 @@ export class StrollWorld {
         ['nudge', 'stranger_scan'].includes(method) && !this.pickPlatform() && this.platformOff();
       if (off) return off;
       if (method === 'status') return await this.panelStatus();
+      if (method === 'received_images') return this.receivedImages();
+      if (method === 'received_stickers_open') {
+        const { dir } = this.receivedStickerTarget();
+        if (args[0] !== dir) return { ok: false, error: '收藏位置已变更，请重新打开「收到的图片」。' };
+        const stat = fs.statSync(dir, { throwIfNoEntry: false });
+        if (!stat) return { ok: false, error: '表情包目录不存在。首次收藏会创建目录；若之前已收藏，请检查图库设置。' };
+        if (!stat.isDirectory()) return { ok: false, error: '当前收藏位置不是文件夹，请检查图库设置。' };
+        const result = await openFolder(dir);
+        this.log?.info?.('stroll sticker folder open', { state: result.windowState ?? (result.ok ? 'requested' : 'unconfirmed') });
+        return result;
+      }
+      if (method === 'received_image_preview') {
+        const image = this.receivedImage(args[0]);
+        if (!image.ok) return image;
+        return { $binary: { mime: image.mime, base64: image.bytes.toString('base64') } };
+      }
+      if (method === 'received_stickers_save') return this.saveReceivedStickers(...args);
       if (method === 'approve') return await this.approveDraft(String(args[0] ?? ''), 'operator');
       if (method === 'approve_all') return this.approveAll();
       if (method === 'reject') return this.rejectDraft(String(args[0] ?? ''));
@@ -8497,7 +8589,7 @@ export class StrollWorld {
             return { ok: false, dir, error: `这个目录打不开：${error?.message ?? error}` };
           }
         }
-        const opened = openFolder(dir);
+        const opened = await openFolder(dir);
         return { ...opened, dir };
       }
       if (method === 'reply_to_comment') {

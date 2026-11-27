@@ -258,19 +258,87 @@ export function pickFolder(description = '选择文件夹') {
 /**
  * 在资源管理器里打开一个目录（不做递归、不动文件）。
  * 以前直接 spawn explorer.exe：路径里带中文/特殊字符时它常常一声不吭地什么都不做，
- * 所以改成让 shell 自己按「双击文件夹」的动作打开（Invoke-Item），路径用 base64 传。
+ * 用 Windows shell 打开并核对目标窗口；路径用 base64 传。
  */
-export function openFolder(dir) {
+export async function openFolder(dir) {
   const target = String(dir ?? '').trim();
   if (!target) return { ok: false, error: '没有目录。' };
   if (process.platform === 'win32') {
-    const script = `$p = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${psEncode(target)}')); if (Test-Path -LiteralPath $p) { Invoke-Item -LiteralPath $p }`;
-    try {
-      execFile('powershell.exe', ['-NoProfile', '-Command', script], { timeout: 8000, windowsHide: true }, () => {});
-      return { ok: true, dir: target };
-    } catch (error) {
-      return { ok: false, error: String(error?.message ?? error) };
+    const script = `
+$ErrorActionPreference = 'Stop'
+$dir = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${psEncode(target)}'))
+if (!(Test-Path -LiteralPath $dir -PathType Container)) { exit 1 }
+$dir = (Get-Item -LiteralPath $dir).FullName
+Add-Type -Name ExplorerWindow -Namespace Stroll -MemberDefinition '
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr hwnd);
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool IsIconic(System.IntPtr hwnd);
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindowAsync(System.IntPtr hwnd, int mode);
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr hwnd);
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool BringWindowToTop(System.IntPtr hwnd);
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr hwnd, System.IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hwnd, out uint processId);
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);'
+$shell = New-Object -ComObject Shell.Application
+function Find-TargetWindow {
+  foreach ($window in $shell.Windows()) {
+    try { $path = $window.Document.Folder.Self.Path; $hwnd = [IntPtr][long]$window.HWND } catch { continue }
+    if (!$path -or $path.TrimEnd([char]92) -ne $dir.TrimEnd([char]92) -or $hwnd -eq [IntPtr]::Zero) { continue }
+    if (![Stroll.ExplorerWindow]::IsWindowVisible($hwnd)) { continue }
+    if ([Stroll.ExplorerWindow]::IsIconic($hwnd)) {
+      [void][Stroll.ExplorerWindow]::ShowWindowAsync($hwnd, 9)
+      Start-Sleep -Milliseconds 120
     }
+    return $hwnd
+  }
+  return [IntPtr]::Zero
+}
+$target = Find-TargetWindow
+if ($target -eq [IntPtr]::Zero) {
+  $arg = '/n,"' + $dir + '"'
+  $explorer = Join-Path $env:SystemRoot 'explorer.exe'
+  Start-Process -FilePath $explorer -ArgumentList $arg -ErrorAction Stop | Out-Null
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    Start-Sleep -Milliseconds 150
+    $target = Find-TargetWindow
+    if ($target -ne [IntPtr]::Zero) { break }
+  }
+}
+if ($target -eq [IntPtr]::Zero) { 'unconfirmed'; exit }
+$foreground = [Stroll.ExplorerWindow]::GetForegroundWindow()
+if ($foreground -ne $target) {
+  $foregroundPid = 0
+  $targetPid = 0
+  $foregroundThread = [Stroll.ExplorerWindow]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+  $targetThread = [Stroll.ExplorerWindow]::GetWindowThreadProcessId($target, [ref]$targetPid)
+  if ($foregroundThread -ne 0 -and $targetThread -ne 0 -and $foregroundThread -ne $targetThread) {
+    [void][Stroll.ExplorerWindow]::AttachThreadInput($foregroundThread, $targetThread, $true)
+    [void][Stroll.ExplorerWindow]::BringWindowToTop($target)
+    [void][Stroll.ExplorerWindow]::SetForegroundWindow($target)
+    [void][Stroll.ExplorerWindow]::AttachThreadInput($foregroundThread, $targetThread, $false)
+  } else {
+    [void][Stroll.ExplorerWindow]::BringWindowToTop($target)
+    [void][Stroll.ExplorerWindow]::SetForegroundWindow($target)
+  }
+}
+Start-Sleep -Milliseconds 150
+if ([Stroll.ExplorerWindow]::GetForegroundWindow() -eq $target -and [Stroll.ExplorerWindow]::IsWindowVisible($target)) { 'foreground'; exit }
+$flags = 0x0001 -bor 0x0002 -bor 0x0040
+$raised = [Stroll.ExplorerWindow]::SetWindowPos($target, [IntPtr](-1), 0, 0, 0, 0, $flags)
+if ($raised) {
+  Start-Sleep -Milliseconds 80
+  $raised = [Stroll.ExplorerWindow]::SetWindowPos($target, [IntPtr](-2), 0, 0, 0, 0, $flags)
+}
+Start-Sleep -Milliseconds 120
+if ([Stroll.ExplorerWindow]::GetForegroundWindow() -eq $target) { 'foreground' } elseif ($raised) { 'raised' } else { 'background' }`;
+    return new Promise((resolve) => {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script], { timeout: 8000, windowsHide: true }, (error, stdout) => {
+        const windowState = stdout.trim();
+        resolve(!error && ['foreground', 'raised', 'background'].includes(windowState)
+          ? { ok: true, dir: target, windowState }
+          : { ok: false, error: '没能确认资源管理器已显示这个目录。请复制上方路径，粘贴到资源管理器地址栏。' });
+      });
+    });
   }
   const [cmd, args] = process.platform === 'darwin' ? ['open', [target]] : ['xdg-open', [target]];
   try {

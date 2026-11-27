@@ -832,6 +832,78 @@ check('world 用的是同一个库', world.stickers.stats().total === 1);
 check('表情库能列表', asJson(await world.toolStroll({ action: 'stickers' })).total === 1);
 check('没有的表情会如实拒绝', asJson(await world.toolAct({ action: 'sticker', text: '查无此图' })).ok === false);
 
+{
+  const dataDir = path.join(tmp, 'received-panel');
+  const fish = new StrollWorld({ cfg: { ...cfg, stickerDir: '' }, dataDir, timezone: 'Asia/Shanghai', persist() {} });
+  const panel = (method, ...args) => fish.invoke('stroll', method, args);
+  const list = () => panel('received_images');
+  const preview = (name) => panel('received_image_preview', name);
+  const save = (names, dir, confirm = false) => panel('received_stickers_save', names, dir, confirm);
+  const empty = await list();
+  check('未收到图片时列表为空且不创建图库', empty.ok && !empty.items.length && !fs.existsSync(empty.target.dir));
+  const openGallery = (dir) => panel('received_stickers_open', dir);
+  check('打开尚不存在的图库有提示且不建目录', /不存在/.test((await openGallery(empty.target.dir)).error) && !fs.existsSync(empty.target.dir));
+  const first = fish.saveImageBytes(png);
+  const second = fish.saveImageBytes(Buffer.concat([png, Buffer.from([2])]));
+  const third = fish.saveImageBytes(Buffer.concat([png, Buffer.from([3])]));
+  const inbox = fish.mediaInbox();
+  const cacheFile = (name) => path.join(inbox, name);
+  fs.writeFileSync(cacheFile('gen-11111111.png'), png);
+  fs.mkdirSync(cacheFile('recv-11111111.png'));
+  const damaged = 'recv-22222222.gif';
+  fs.writeFileSync(cacheFile(damaged), png);
+  const large = 'recv-33333333.png';
+  const huge = 'recv-44444444.png';
+  for (const [name, size] of [[large, 4 * 1024 ** 2 + 1], [huge, 8 * 1024 ** 2 + 1]]) {
+    fs.writeFileSync(cacheFile(name), png);
+    fs.truncateSync(cacheFile(name), size);
+  }
+  const listing = await list();
+  const target = listing.target.dir;
+  check('只列缓存接收图，不列工坊图、目录和超过 8 MB 的图', listing.items.length === 5 &&
+    [first.name, second.name, third.name, damaged, large].every((name) => listing.items.some((item) => item.filename === name)));
+  check('面板列出实际默认图库和批量上限', !listing.target.shared && listing.batchLimit === 20 && target === path.resolve(fish.stickers.indexDir));
+  const image = (await preview(first.name)).$binary;
+  check('二进制预览按原格式返回原字节', image.mime === 'image/png' && Buffer.from(image.base64, 'base64').equals(png));
+  check('越界名称、伪装格式和超过预览上限的文件都不返回字节',
+    (await Promise.all([preview(`../${first.name}`), preview('gen-11111111.png'), preview(damaged), preview(huge)])).every((item) => item.ok === false && !item.$binary));
+  check('4 MB 以上只能预览不能收藏', listing.items.find((item) => item.filename === large)?.canSave === false &&
+    (await preview(large)).$binary.mime === 'image/png' && (await save([large], target)).items[0].status === 'failed');
+  check('空选和超过 20 张整批拒绝且没写图库', !(await save([], target)).ok && !(await save(Array(21).fill(first.name), target)).ok && !fs.existsSync(target));
+  const one = (await save([first.name], target)).items[0];
+  check('面板不能打开图库以外的目录', /已变更/.test((await openGallery(inbox)).error));
+  check('单张收藏保留缓存原图，重载仍能按 id 找到副本', one.status === 'saved' && fs.readFileSync(first.path).equals(png) &&
+    new StickerBook({ dataDir }).find(one.id).entry.source === 'received');
+  fs.unlinkSync(third.path);
+  const mix = (await save([first.name, second.name, damaged, third.name], target)).items;
+  check('混合批量逐张返回重复、成功、坏图、缓存已清理', mix.map((item) => item.status).join() === 'duplicate,saved,failed,failed' && /清理/.test(mix[3].error));
+  const shared = path.join(dataDir, 'shared');
+  fish.applyLiveConfig({ stickerDir: shared });
+  check('换成共用图库后不打开旧的默认目录', /已变更/.test((await openGallery(target)).error));
+  check('切换图库后拒绝旧页面的操作，新目录尚未写入', !(await save([first.name], target, true)).ok && !fs.existsSync(shared));
+  const sharedTarget = (await list()).target;
+  check('共用图库必须明确确认，未确认不建目录', sharedTarget.shared && sharedTarget.dir === shared &&
+    !(await save([first.name], shared, 'true')).ok && !fs.existsSync(shared));
+  const copy = (await save([first.name], shared, true)).items[0];
+  check('确认后复制到所选共用目录，不能把旧目录里的同图当成已存', copy.status === 'saved' &&
+    fs.existsSync(path.join(shared, fish.stickers.get(copy.id).file)) && !fs.existsSync(path.join(shared, 'index.json')));
+  fish.stickers.scanDir();
+  const foreign = path.join(shared, '外部表情.png');
+  fs.copyFileSync(second.path, foreign);
+  const existing = (await save([second.name], shared, true)).items[0];
+  check('共用图库刚加入的同内容异名图片也去重，已有文件不改动', existing.status === 'duplicate' &&
+    fs.readdirSync(shared).length === 2 && fs.readFileSync(foreign).equals(fs.readFileSync(second.path)));
+  const beforeIndex = fs.readFileSync(fish.stickers.file, 'utf8');
+  const retry = fish.saveImageBytes(Buffer.concat([png, Buffer.from([4])]));
+  fish.stickers.file = shared;
+  const rejected = (await save([retry.name], shared, true)).items[0];
+  check('索引落盘失败只回滚新文件，原图和已有图库仍在', rejected.status === 'failed' && /索引/.test(rejected.error) &&
+    fs.existsSync(retry.path) && fs.readdirSync(shared).length === 2 && fs.existsSync(foreign) &&
+    JSON.stringify(JSON.parse(beforeIndex)) === JSON.stringify(fish.stickers.load()));
+  fish.applyLiveConfig({ stickerDir: first.path });
+  check('图库误设为文件时不启动该文件', /不是文件夹/.test((await openGallery(fs.realpathSync(first.path))).error));
+}
+
 /* ---------------- 发自己画的图（图片工坊） ---------------- */
 const mediaDir = path.join(tmp, 'workspace', 'media');
 fs.mkdirSync(mediaDir, { recursive: true });
@@ -1535,8 +1607,9 @@ world.store.data.drafts = Array.from({ length: 8 }, (_, i) => ({
   text: '',
   status: 'pending',
   // pendingDrafts() 用真实时钟判断过期，这里必须用真实 now；
-  // 用 mustNoon（今天 12:00）的话，下午跑 smoke 会被判成过期。
+  // 凌晨跑时 mustNoon 还在未来，给草稿一个跨过它的有效期，避免被 tick 提前判过期。
   createdAt: new Date().toISOString(),
+  expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
 }));
 world.store.data.autoSessions[mustDay] = 0;
 world.store.data.lastAutoAt = Date.now() - 151 * 60 * 1000;

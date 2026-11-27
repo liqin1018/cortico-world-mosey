@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-const MAX_BYTES = 4 * 1024 * 1024;
+export const STICKER_MAX_BYTES = 4 * 1024 * 1024;
 const MAX_ITEMS = 800;
 
 /** 从文件头猜扩展名：抖音表情有 png / webp / gif，存错后缀发出去会失败。 */
@@ -66,11 +66,16 @@ export class StickerBook {
 
   save() {
     this.load();
+    const tmp = `${this.file}.${crypto.randomUUID()}.tmp`;
     try {
-      fs.mkdirSync(this.dir, { recursive: true });
-      fs.writeFileSync(this.file, JSON.stringify(this.data, null, 1));
+      fs.mkdirSync(this.indexDir, { recursive: true });
+      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 1), { flag: 'wx' });
+      fs.renameSync(tmp, this.file);
+      return true;
     } catch (error) {
+      try { fs.unlinkSync(tmp); } catch {}
       this.log.warn?.(`表情库索引存不下来：${error?.message ?? error}`);
+      return false;
     }
   }
 
@@ -85,9 +90,9 @@ export class StickerBook {
    * 别人的图库是「文件名就是全部信息」，所以名字用文件名、没有标签。按目录读一次缓存 60 秒：
    * 每调一次 `stickers` 就 readdir + stat 几千个文件，白白卡住她。
    */
-  scanDir() {
+  scanDir(refresh = false) {
     const now = Date.now();
-    if (this._scan && this._scanDir === this.dir && now - this._scanAt < 60_000) return this._scan;
+    if (!refresh && this._scan && this._scanDir === this.dir && now - this._scanAt < 60_000) return this._scan;
     const out = [];
     let names = [];
     try {
@@ -152,42 +157,47 @@ export class StickerBook {
   /** 存一张。同样的图只留一份（按内容的 sha1 去重），返回 { entry, duplicate }。 */
   addBuffer(buf, meta = {}) {
     if (!Buffer.isBuffer(buf) || !buf.length) return { ok: false, error: '这张图是空的。' };
-    if (buf.length > MAX_BYTES) return { ok: false, error: `图太大了（${Math.round(buf.length / 1024)}KB），只收 4MB 以内的表情包。` };
+    if (buf.length > STICKER_MAX_BYTES) return { ok: false, error: `图太大了（${Math.round(buf.length / 1024)}KB），只收 4MB 以内的表情包。` };
     const ext = extOfBuffer(buf) || (String(meta.ext ?? '').startsWith('.') ? String(meta.ext) : '.png');
     const id = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12);
     const data = this.load();
     const exist = data.items[id];
-    if (exist) {
+    const file = `s_${id}${ext}`;
+    const dest = path.join(this.dir, file);
+    if (exist?.file === file && this.matchesBuffer(meta.source === 'received' ? dest : this.fileOf(exist), buf)) {
+      if (meta.source === 'received') return { ok: true, duplicate: true, entry: exist };
       exist.lastSeenAt = Date.now();
       if (meta.src && !exist.src) exist.src = String(meta.src);
       if (meta.tab && !exist.tab) exist.tab = String(meta.tab);
       this.save();
       return { ok: true, duplicate: true, entry: exist };
     }
-    // 只留最近用过的 800 张，别让目录无限长。
-    // 只算摸鱼自己写进来的（s_ 开头）：共用图库时，别人的文件和登记条目一律不动。
-    const own = Object.values(data.items).filter((x) => /^s_/.test(String(x.file ?? '')));
-    const ids = own
-      .sort((a, b) => Number(b.lastUsed || b.addedAt || 0) - Number(a.lastUsed || a.addedAt || 0))
-      .map((x) => x.id);
-    for (const drop of ids.slice(MAX_ITEMS - 1)) {
-      const victim = data.items[drop];
-      if (!victim) continue;
-      try {
-        fs.unlinkSync(path.join(this.dir, victim.file));
-      } catch {
-        // 文件可能已经被主人删了
+    if (meta.source === 'received') {
+      const duplicate = this.scanDir().find((item) => item.size === buf.length && this.matchesBuffer(path.join(this.dir, item.file), buf));
+      if (duplicate) {
+        const known = Object.values(data.items).find((item) => item.file === duplicate.file);
+        return { ok: true, duplicate: true, entry: known ?? duplicate };
       }
-      delete data.items[drop];
     }
-    const file = `s_${id}${ext}`;
+    const own = meta.source !== 'received' && this.dir === this.indexDir && !fs.lstatSync(this.dir, { throwIfNoEntry: false })?.isSymbolicLink()
+      ? Object.values(data.items).filter((item) => item.id !== id && item.source !== 'received' && /^s_[a-f0-9]{12}\.(png|jpg|gif|webp|bmp)$/.test(item.file))
+      : [];
+    const victims = own
+      .sort((a, b) => Number(b.lastUsed || b.addedAt || 0) - Number(a.lastUsed || a.addedAt || 0))
+      .slice(MAX_ITEMS - 1);
+    let created = false;
     try {
       fs.mkdirSync(this.dir, { recursive: true });
-      fs.writeFileSync(path.join(this.dir, file), buf);
+      if (!this.matchesBuffer(dest, buf)) {
+        const fd = fs.openSync(dest, 'wx');
+        created = true;
+        try { fs.writeFileSync(fd, buf); } finally { fs.closeSync(fd); }
+      }
     } catch (error) {
+      if (created) { try { fs.unlinkSync(dest); } catch {} }
       return { ok: false, error: `存不进表情库：${error?.message ?? error}` };
     }
-    const entry = {
+    const entry = exist?.file === file ? exist : {
       id,
       file,
       ext,
@@ -202,10 +212,35 @@ export class StickerBook {
       lastUsed: 0,
       used: 0,
     };
+    for (const victim of victims) delete data.items[victim.id];
     data.items[id] = entry;
+    if (!this.save()) {
+      if (exist) data.items[id] = exist;
+      else delete data.items[id];
+      for (const victim of victims) data.items[victim.id] = victim;
+      if (created) { try { fs.unlinkSync(dest); } catch {} }
+      return { ok: false, error: '表情库索引写入失败，这张图未收藏。' };
+    }
+    for (const victim of victims) {
+      const old = path.join(this.dir, victim.file);
+      try {
+        const stat = fs.lstatSync(old);
+        if (!stat.isFile() || stat.size > STICKER_MAX_BYTES) continue;
+        const hash = crypto.createHash('sha1').update(fs.readFileSync(old)).digest('hex').slice(0, 12);
+        if (victim.file.startsWith(`s_${hash}.`)) fs.unlinkSync(old);
+      } catch {}
+    }
     this._scan = null; // 新文件进来了，下次重新扫目录
-    this.save();
     return { ok: true, duplicate: false, entry };
+  }
+
+  matchesBuffer(file, buf) {
+    try {
+      const stat = fs.lstatSync(file);
+      return stat.isFile() && stat.size === buf.length && buf.equals(fs.readFileSync(file));
+    } catch {
+      return false;
+    }
   }
 
   list({ query = '', tag = '', limit = 20 } = {}) {

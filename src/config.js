@@ -140,7 +140,7 @@ export const DEFAULTS = {
   dmWatch: true,
   /** 有人在评论区 @ 她时，主动叫她一声（B站/抖音，90 秒查一次）。 */
   mentionWatch: true,
-  /** 分享抖音视频的方式：image=画面+标题（稳，默认）；card=走分享面板（实验）；text=只发链接。 */
+  /** 分享抖音视频的方式：card=走分享面板（默认）；image=画面+标题（稳）；text=只发链接。 */
   shareStyle: 'card',
   /**
    * 多久兜底看一次私信（秒）。
@@ -653,7 +653,7 @@ const OUTING = {
       [P + 'quietTo']: {
         type: 'integer',
         title: '安静时段结束',
-        description: '安静时段结束，默认 7 点。和上面填一样 = 没有安静时段。',
+        description: '安静时段结束，默认 8 点。和上面填一样 = 没有安静时段。',
         minimum: 0,
         maximum: 23,
         'x-suffix': ' 点',
@@ -700,7 +700,7 @@ const ADVANCED = {
       [P + 'commentMaxChars']: {
         type: 'integer',
         title: '评论最多几个字',
-        description: '一条评论最多几个字。默认 100，短一点更像人。',
+        description: '一条评论最多几个字。默认 120，短一点更像人。',
         minimum: 20,
         maximum: 300,
         'x-suffix': ' 字',
@@ -730,7 +730,7 @@ const ADVANCED = {
       [P + 'riskPauseHours']: {
         type: 'integer',
         title: '严格模式停多久',
-        description: '严格模式下撞到风控停几小时。默认 6。',
+        description: '严格模式下撞到风控停几小时。默认 48。',
         minimum: 1,
         maximum: 168,
         'x-suffix': ' 小时',
@@ -757,14 +757,14 @@ const VIEWING = {
       [P + 'openMode']: {
         type: 'string',
         title: '看视频方式',
-        description: '只看文字（默认，最省）/ 文字+9格分镜 / 只看画面。没字幕会自动补 1 帧。',
+        description: '只看文字（最省）/ 文字+分镜（默认）/ 只看画面。没字幕会自动补 1 帧。',
         'x-options': 'stroll-open-mode',
         'x-hot': true,
       },
       [P + 'subtitleOpen']: {
         type: 'integer',
         title: '后台看：带几句字幕',
-        description: '后台看时带几句字幕（按 20 分钟折算，短的可到 72 句）。默认 24。',
+        description: '后台看时带几句字幕（按 20 分钟折算，短的可到 72 句）。默认 48。',
         minimum: 0,
         maximum: 60,
         'x-suffix': ' 句',
@@ -772,7 +772,7 @@ const VIEWING = {
       [P + 'danmakuOpen']: {
         type: 'integer',
         title: '后台看：带几条弹幕',
-        description: '后台看时带几条弹幕，按时间均匀抽。默认 12。',
+        description: '后台看时带几条弹幕，按时间均匀抽。默认 30。',
         minimum: 0,
         maximum: 60,
         'x-suffix': ' 条',
@@ -780,7 +780,7 @@ const VIEWING = {
       [P + 'framesPerOpen']: {
         type: 'integer',
         title: '看视频抽几帧',
-        description: '看视频抽几帧。默认 0（只看文字）；建议 9，B站会拼成一张图约 184 token。',
+        description: '看视频抽几帧。默认 9，B站会拼成一张图约 184 token；0 = 不抽帧（只看文字）。',
         minimum: 0,
         maximum: 9,
         'x-suffix': ' 帧',
@@ -824,7 +824,7 @@ const WATCH = {
       [P + 'watchLines']: {
         type: 'integer',
         title: '一次说几句',
-        description: '每次开口说几句，默认 1。说多了更热闹也更花 token。',
+        description: '每次开口说几句，默认 2。说多了更热闹也更花 token。',
         minimum: 1,
         maximum: 3,
         'x-suffix': ' 句',
@@ -832,7 +832,7 @@ const WATCH = {
       [P + 'watchSpeakSec']: {
         type: 'integer',
         title: '一起看：多久说一句',
-        description: '一起看时两次开口至少隔多久。默认 90 秒，60~120 最自然。',
+        description: '一起看时两次开口至少隔多久。默认 60 秒，60~120 最自然。',
         minimum: 20,
         maximum: 600,
         'x-suffix': ' 秒',
@@ -856,7 +856,7 @@ const WATCH = {
       [P + 'watchWindowSec']: {
         type: 'integer',
         title: '一起看：弹幕窗口多大',
-        description: '取弹幕的时间窗口（当前进度前后各多少秒）。默认 30。',
+        description: '取弹幕的时间窗口（当前进度前后各多少秒）。默认 15。',
         minimum: 5,
         maximum: 120,
         'x-suffix': ' 秒',
@@ -864,7 +864,7 @@ const WATCH = {
       [P + 'watchPollSec']: {
         type: 'integer',
         title: '一起看：多久读一次',
-        description: '多久读一次页面状态。默认 10 秒，不花 token，可以调小。',
+        description: '多久读一次页面状态。默认 15 秒，不花 token，可以调小。',
         minimum: 5,
         maximum: 120,
         'x-suffix': ' 秒',
@@ -920,7 +920,7 @@ const SHORTS = {
       [P + 'watchScrollEvery']: {
         type: 'integer',
         title: '一起刷：隔几条说一句',
-        description: '刷几条说一句。默认 2——像人刷抖音也不是每条都评论。',
+        description: '刷几条说一句。默认 1（每条都说）；调大更省 token，也更像偶尔接话。',
         minimum: 1,
         maximum: 10,
         'x-suffix': ' 条',
@@ -957,7 +957,7 @@ const MESSAGES = {
       [P + 'dmPollSec']: {
         type: 'integer',
         title: '多久看一次私信',
-        description: '多久查一次私信。页面会自己推消息，这个只是掉线兜底。默认 5 秒。',
+        description: '多久查一次私信。页面会自己推消息，这个只是掉线兜底。默认 3 秒。',
         minimum: 3,
         maximum: 300,
         'x-suffix': ' 秒',
@@ -966,7 +966,7 @@ const MESSAGES = {
       [P + 'shareStyle']: {
         type: 'string',
         title: '分享视频怎么发',
-        description: '给你发抖音视频的样子：画面+标题（默认，最稳）/ 真分享卡片 / 只发链接。',
+        description: '给你发抖音视频的样子：画面+标题（稳）/ 真分享卡（默认）/ 只发链接。',
         'x-options': 'stroll-share-style',
         'x-hot': true,
       },
@@ -1009,7 +1009,7 @@ const MESSAGES = {
       [P + 'maxGroups']: {
         type: 'integer',
         title: '最多认几个群',
-        description: '最多同时认几个群。默认 3，群多了会顾不过来。',
+        description: '最多同时认几个群。默认 6，群多了会顾不过来。',
         minimum: 1,
         maximum: 10,
         'x-suffix': ' 个',
@@ -1018,7 +1018,7 @@ const MESSAGES = {
       [P + 'groupTabs']: {
         type: 'integer',
         title: '最多常驻几个群监听页',
-        description: '给几个群开常驻监听页。默认 1，每个约 50~100MB 内存。',
+        description: '给几个群开常驻监听页。默认 3，每个约 50~100MB 内存。',
         minimum: 1,
         maximum: 8,
         'x-suffix': ' 个',

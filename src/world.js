@@ -527,6 +527,8 @@ export class StrollWorld {
 
   async tick(now = Date.now()) {
     if (!this.running || !this.cfg.enabled) return;
+    // 草稿过期是系统回执，不依赖「自己出门」开关；安静时段由 notify 自己延后
+    await this.notifyExpiredDrafts(now);
     // 「自动出门」总开关：关掉就彻底不催（主人手动点单不受影响）
     if (this.cfg.autoOuting === false) return;
     const hour = hourOf(new Date(now), this.timeZone);
@@ -616,6 +618,53 @@ export class StrollWorld {
       { day, used: used + 1, must: pending.length > 0, mode },
       'debounce',
     );
+  }
+
+  /**
+   * 草稿超过 30 分钟没批：作废并主动告诉鱼一次。
+   *
+   * 以前只有面板能看到「已过期」，鱼查 history/status 时什么都没有，
+   * 于是它只能说「那条评论不见了」。这里把同一批过期草稿合成一条事件，
+   * 成功推送后才记 expiredNotifiedAt；失败下一轮 tick 再试，不重复刷屏。
+   */
+  async notifyExpiredDrafts(now = Date.now()) {
+    if (!this.cfg.enabled) return false;
+    const due = this.store.expireDueDrafts(now);
+    if (due.length) {
+      this.log?.info?.('stroll draft expired', { count: due.length, ids: due.map((d) => d.id) });
+    }
+    // 不在安静时段叫醒主人/模型；延后到下一次活跃 tick
+    if (this.policy.isQuiet()) return false;
+    const unnotified = (this.store.data.drafts ?? []).filter(
+      (d) => d.status === 'expired' && !d.expiredNotifiedAt,
+    );
+    if (!unnotified.length) return false;
+
+    const previews = unnotified.slice(-3);
+    const lines = previews.map((d) => `- ${this.previewText(d)}`).join('\n');
+    const more =
+      unnotified.length > previews.length
+        ? `\n还有 ${unnotified.length - previews.length} 条，面板「已过期」里能看到。`
+        : '';
+    const ok = await this.push(
+      'stroll.draft_expired',
+      `有 ${unnotified.length} 条待批草稿超过 30 分钟，已作废、**没有发送**：\n${lines}${more}\n如果还想发，让主人重新提一次；不要自己重发，也不要告诉主人“已提交待审批”。`,
+      { kind: 'DRAFT_EXPIRED', count: unnotified.length, ids: unnotified.map((d) => d.id), sent: false },
+      'flush',
+    );
+    if (!ok) {
+      this.log?.warn?.('stroll draft expired push failed', { count: unnotified.length });
+      return false;
+    }
+    const at = new Date(now).toISOString();
+    for (const d of unnotified) d.expiredNotifiedAt = at;
+    try {
+      this.store.save();
+    } catch (error) {
+      this.log?.warn?.('stroll draft expired save failed', { message: error?.message });
+    }
+    this.log?.info?.('stroll draft expired push', { count: unnotified.length, ids: unnotified.map((d) => d.id) });
+    return true;
   }
 
   /**
@@ -1697,7 +1746,8 @@ export class StrollWorld {
     if (douyinOn) this.rememberDyThreads(douyinItems);
     const items = [
       ...biliItems.map((x) => ({ ...x, platform: 'bilibili', source: 'at' })),
-      ...douyinItems,
+      // 抖音通知原来没带 source，下面的「空正文按 cid 补捞」和待回记录都认不出来
+      ...douyinItems.map((x) => ({ ...x, source: x.source || 'at' })),
       ...biliReplies.map((x) => ({ ...x, platform: 'bilibili', source: 'reply' })),
       ...douyinReplies,
     ];
@@ -1745,12 +1795,36 @@ export class StrollWorld {
         this.log?.info?.('stroll at text filled', { cid: String(x.cid).slice(-6), n: got.text.length });
       }
     }
+    /**
+     * 记下刚推给她的那条抖音 @。
+     *
+     * 2026-11-25 真机：推送里写的是 action=reply，模型却调了
+     * action=comment + mention_owner，发成顶层评论——主人在这条评论下面
+     * 永远等不到回复。提示词管不住，buildPlan 里按这条记录把同一条视频上
+     * 的顶层评论改回楼中楼。
+     */
+    const dyAt = picked.find(
+      (x) =>
+        x.platform === 'douyin' &&
+        x.source === 'at' &&
+        /^\d+$/.test(String(x.awemeId ?? '')) &&
+        /^[1-9]\d*$/.test(String(x.cid ?? '')),
+    );
+    if (dyAt) {
+      this.store.data.dyPendingAt = {
+        awemeId: String(dyAt.awemeId),
+        cid: String(dyAt.cid),
+        root: /^[1-9]\d*$/.test(String(dyAt.rootCid ?? '')) ? String(dyAt.rootCid) : '',
+        at: Date.now(),
+      };
+      this.store.save();
+    }
     const lines = picked.map((x, i) => {
       if (x.platform === 'douyin') {
         const canReply = /^[1-9]\d*$/.test(String(x.cid ?? ''));
         const rootArg = /^[1-9]\d*$/.test(String(x.rootCid ?? '')) ? ` root=${x.rootCid}` : '';
         const replyHint = canReply
-          ? `回他：stroll_act action=reply platform=douyin target=${x.url} reply_to=${x.cid}${rootArg} text=…（正文不用另写 @；回复失败时不要改发新评论）`
+          ? `回他：stroll_act action=reply platform=douyin target=${x.url} reply_to=${x.cid}${rootArg} text=…（正文不用另写 @；不要用 action=comment，回复失败时也不要改发新评论）`
           : '未取得可回复的评论 ID；可先读评论区确认，或私信对方，不要把新评论当作回复。';
         const head = x.source === 'thread'
           ? `${x.user || '有人'} 在你那层楼里回了一句`
@@ -3785,7 +3859,18 @@ export class StrollWorld {
     const plan = await this.buildPlan(action, args, { byOwner: this.ownerNearby() });
     if (!plan.ok) return JSON.stringify(plan);
     if (args.preview === true || approvalFor(this.cfg, plan.action) === 'draft') {
-      const draft = this.makeDraft(plan);
+      let draft;
+      try {
+        draft = this.makeDraft(plan);
+      } catch (error) {
+        this.log?.warn?.('stroll draft save failed', { message: error?.message });
+        return JSON.stringify({
+          ok: false,
+          code: 'DRAFT_SAVE_FAILED',
+          sent: false,
+          error: '草稿没能写入本地，未进入待审批。',
+        });
+      }
       /**
        * 有效期必须写进回执。
        *
@@ -3797,11 +3882,13 @@ export class StrollWorld {
       return JSON.stringify({
         ok: true,
         draft: true,
+        sent: false,
+        status: 'pending_owner_approval',
         id: draft.id,
         preview: this.previewText(draft),
         expiresAt,
         expiresInSec: Math.round(DRAFT_TTL_MS / 1000),
-        message: `已放进草稿箱；等主人在「摸鱼」面板点批准。**${Math.round(DRAFT_TTL_MS / 60000)} 分钟内有效**（到 ${expiresAt}），过期就作废、要重新提一次。不要自己批准，也不要重复提交。`,
+        message: `已创建待审批草稿，**尚未发送**。草稿号 ${draft.id}；**${Math.round(DRAFT_TTL_MS / 60000)} 分钟内有效**（到 ${expiresAt}），过期作废、需要重新提一次。只有主人在「摸鱼」面板点批准后才会发送；不要自己批准，也不要重复提交。`,
       });
     }
     const receipt = await this.executePlan(plan, 'model');
@@ -3921,6 +4008,7 @@ export class StrollWorld {
         };
       })(),
       pending: this.store.pendingDrafts().map((d) => ({ id: d.id, action: d.action, platform: d.platform, preview: this.previewText(d) })),
+      expiredDrafts: this.expiredDraftsView(5),
       last: this.store.lastActions(3),
       interests: this.store.topInterests(6),
       // 出门方式（off/sessions/quota）和「按额度」还剩多少个主动动作
@@ -3977,11 +4065,13 @@ export class StrollWorld {
     this.policy.noteRead(actual, { open: false });
     return {
       ok: true,
+      expiredDrafts: status.expiredDrafts,
       status: {
         bili: status.bili,
         douyin: status.douyin,
         policy: status.policy.summary,
         pending: status.pending.length,
+        expiredDrafts: status.expiredDrafts,
         owner: status.owner,
         // 出门方式：sessions 按次数 / quota 按额度（quotaLeft = 主动动作还剩多少个）/ off 不自己出门
         outingMode: status.outingMode,
@@ -4840,6 +4930,7 @@ export class StrollWorld {
         .filter((x) => x.platform !== 'system')
         .slice(0, 8),
       drafts: this.store.pendingDrafts().map((d) => ({ id: d.id, preview: this.previewText(d), ageSec: d.ageSec })),
+      expiredDrafts: this.expiredDraftsView(5),
       stats: this.store.data.stats,
       interests: this.store.topInterests(8),
       risk: this.store.data.risk,
@@ -6534,9 +6625,35 @@ export class StrollWorld {
       if (platform === 'douyin') {
         target = await this.douyin.idOf(targetRaw);
         if (!target) return { ok: false, error: '给个抖音视频链接/ID。' };
-        const isReply = action === 'reply';
+        let isReply = action === 'reply';
         let root = '';
         let parent = '';
+        /**
+         * 模型把「回这条 @」误走成顶层评论时，按刚推过的 @ 记录改回楼中楼。
+         *
+         * 只在同一条视频、10 分钟内生效：这条 @ 还热着，顶层评论几乎一定是
+         * 想回那条 @。改发顶层评论的话，主人在这条评论下面永远看不到回复。
+         */
+        const pendingAt = this.store.data.dyPendingAt;
+        const pendingFresh =
+          pendingAt &&
+          String(pendingAt.awemeId ?? '') === String(target) &&
+          Date.now() - Number(pendingAt.at ?? 0) < 10 * 60 * 1000 &&
+          /^[1-9]\d*$/.test(String(pendingAt.cid ?? ''));
+        if (!isReply && pendingFresh) {
+          action = 'reply';
+          isReply = true;
+          args = {
+            ...args,
+            reply_to: String(pendingAt.cid),
+            root: /^[1-9]\d*$/.test(String(pendingAt.root ?? '')) ? String(pendingAt.root) : '',
+          };
+          this.log?.info?.('stroll dy at rerouted', {
+            awemeId: String(target),
+            parent: String(pendingAt.cid),
+            root: String(pendingAt.root ?? ''),
+          });
+        }
         if (isReply) {
           parent = String(args.reply_to ?? '').trim();
           root = String(args.root ?? '').trim();
@@ -6946,7 +7063,7 @@ export class StrollWorld {
   }
 
   makeDraft(plan) {
-    return this.store.addDraft({
+    const draft = this.store.addDraft({
       action: plan.action,
       platform: plan.platform,
       target: plan.target,
@@ -6980,6 +7097,14 @@ export class StrollWorld {
       postKind: plan.postKind ?? '',
       postTitle: plan.postTitle ?? '',
     });
+    try {
+      // 草稿创建后立刻落盘：进程重启/崩溃时，面板和鱼都不能对不上账
+      this.store.save();
+    } catch (error) {
+      this.store.data.drafts = this.store.data.drafts.filter((d) => d.id !== draft.id);
+      throw error;
+    }
+    return draft;
   }
 
   previewText(draft) {
@@ -7006,6 +7131,18 @@ export class StrollWorld {
     return `【${p}·${a}】${target}${body}${draft.mentionOwner ? '（@主人）' : ''}`;
   }
 
+  expiredDraftsView(limit = 5) {
+    return this.store.expiredDrafts(limit).map((d) => ({
+      id: d.id,
+      action: d.action,
+      platform: d.platform,
+      preview: this.previewText(d),
+      expiredSec: d.expiredSec,
+      status: 'expired',
+      sent: false,
+    }));
+  }
+
   /** 面板批准后走这里；这是唯一真正执行草稿的入口。 */
   /**
    * 一次批准所有「低风险」草稿。
@@ -7029,7 +7166,22 @@ export class StrollWorld {
 
   async approveDraft(id, source = 'operator') {
     const draft = this.store.draft(id);
-    if (!draft || draft.status !== 'pending') return { ok: false, error: '这条草稿不在了或已处理。' };
+    if (!draft) return { ok: false, error: '这条草稿不在了或已处理。' };
+    if (
+      draft.status === 'expired' ||
+      (draft.status === 'pending' && Date.now() - Date.parse(draft.createdAt) >= DRAFT_TTL_MS)
+    ) {
+      this.store.expireDueDrafts();
+      this.store.save();
+      return {
+        ok: false,
+        code: 'DRAFT_EXPIRED',
+        sent: false,
+        draftId: id,
+        error: '这条草稿已过期，未发送；需要让鱼重新提一次。',
+      };
+    }
+    if (draft.status !== 'pending') return { ok: false, error: '这条草稿不在了或已处理。' };
     const check = this.policy.check(draft.action, draft.platform, draft.target, {
       userInitiated: true,
       quotaAction: draft.quotaAction || this.capAction(draft.action),
@@ -7247,6 +7399,18 @@ export class StrollWorld {
 
       // 「平台没给确认」不能当成功记账：额度扣了会冤枉人，去重键还会把重试挡成 DUPLICATE
       const uncertain = !!result && (result.ok === false || result.confirmed === false);
+      // 这条 @ 已经回过：清掉待回记录，别让同一条视频后面的正常顶层评论被改写成回复
+      if (
+        action === 'reply' &&
+        platform === 'douyin' &&
+        !uncertain &&
+        result?.cid &&
+        String(this.store.data.dyPendingAt?.awemeId ?? '') === String(target) &&
+        String(this.store.data.dyPendingAt?.cid ?? '') === String(plan.parent ?? '')
+      ) {
+        delete this.store.data.dyPendingAt;
+        this.store.save();
+      }
       // 陌生人的回复单独记一笔（推给你几条 / 回了几条分开算）
       if (plan.stranger && !uncertain) {
         this.noteStrangerReply(target);
@@ -7671,18 +7835,25 @@ export class StrollWorld {
       return `${p} ${what}成功`;
     }
     if (action === 'comment' || action === 'reply') {
-      if (platform === 'douyin' && result?.queued) {
-        const tail = result.mentioned === true ? '，@ 已生效' : result.mentioned === false ? '，@ 没生效' : '';
-        return `抖音 评论发出去了，评论区暂时没刷出来，可能审核中${tail}`;
-      }
-    }
-    if (action === 'comment' || action === 'reply') {
       const verb = action === 'reply' ? '回复' : '评论';
+      /**
+       * 没拿到发布回执就不能写「发出去了」。
+       *
+       * 2026-11-25 真机：两条评论都返回 confirmed:false / cid 空，
+       * 回执却写「评论发出去了，@ 已生效」，主人去评论区什么也没看到。
+       */
+      if (result?.confirmed === false || result?.queued) {
+        const bits = [`${p} ${verb}没拿到发布回执，不能确认成功`];
+        if (result?.cid) bits.push(`cid ${result.cid}`);
+        if (result?.mentioned === true) bits.push('编辑器里 @ 插上了，但发布没确认');
+        if (result?.mentioned === false) bits.push('@ 没生效');
+        bits.push('先去原评论/主页看有没有，不要立即重发');
+        return bits.join('，');
+      }
       const bits = [`${p} ${verb}发出去了`];
       if (result?.kind === 'opus') bits.push('动态');
       if (result?.kind === 'article') bits.push('专栏');
       if (result.rpid) bits.push(`rpid ${result.rpid}`);
-      if (result.confirmed === false) bits.push('没拿到发布回执，可能没发出去');
       if (result.mentioned === true) bits.push('@ 已生效');
       if (result.mentioned === false) bits.push('@ 没生效');
       /**
@@ -8441,13 +8612,7 @@ export class StrollWorld {
         expiresInSec: Math.max(0, Math.round(DRAFT_TTL_MS / 1000) - Number(d.ageSec ?? 0)),
       })),
       // 已作废的草稿：不能让它们静默消失，面板要显示「这几条过期了，需要重发」
-      expiredDrafts: this.store.expiredDrafts(5).map((d) => ({
-        id: d.id,
-        action: d.action,
-        platform: d.platform,
-        preview: this.previewText(d),
-        expiredSec: d.expiredSec,
-      })),
+      expiredDrafts: this.expiredDraftsView(5),
       // 「先问我」模式下等主人点头的陌生人私信（面板「待你点头」里显示）
       strangerPending: this.strangerPendingList(),
       // 面板「最近」只放真动作：风控/系统记录单独算，不跟点赞评论抢位置

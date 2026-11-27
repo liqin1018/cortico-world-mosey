@@ -1,22 +1,28 @@
 # 发布流程（给 agent 看的硬规范）
 
-对象：`cortico-world-mosey`（摸鱼）。仓库 `F:/AI/WorkBuddy-workspace/桌宠B站抖音/stroll`。
+对象：`cortico-world-mosey`（摸鱼）。仓库 `F:/AI/agent/Codex/Codex Project/Coopanion插件/摸鱼插件/stroll`。
 
 ---
 
-## 0. 铁律：没听到「发布」两个字，不许发布
+## 0. 两条铁律：发布要亲口说；版本跟成功修改走
 
-用户明确说过很多次。以下动作**只在**他亲口说「发布 / 发吧 / 可以发」之后才允许：
+**发布动作**只在用户亲口说「发布 / 发吧 / 可以发」之后才允许：
 
 | 动作 | 平时能不能做 |
 |---|---|
-| 改 `package.json` 的 `version` | ❌ 不许 |
-| 写 `CHANGELOG.md` | ❌ 不许 |
 | `git push` | ❌ 不许 |
 | `npm publish` | ❌ 不许 |
 | `npm run describe`（会改 `describe.json`） | ❌ 不许（只在发布流程里跑） |
 
-平时改完代码只跑 `npm run check` + `npm run deploy:local`，然后让用户重启 Coopanion 试。
+**版本号 / CHANGELOG** 跟每一次成功修改走，不用等到发布：
+
+| 情况 | 怎么做 |
+|---|---|
+| 用户要求的一次修改验证通过 | 升一个版本位（见第 2 节）+ 写 `CHANGELOG.md` |
+| 修改没通过、回滚、只改文档措辞没动行为 | 不升版本、不写 CHANGELOG |
+| 同一轮里反复修到通过 | 只升一次，不按尝试次数累加 |
+
+平时改完代码跑 `npm run check`；验证通过后升版本、写日志；要让他马上用就跑 `npm run deploy:local`，然后让他重启 Coopanion 试。
 
 如果用户没说要发布，而你说"已发布"，就是最严重的错误。
 
@@ -25,7 +31,7 @@
 ## 1. 动手前先确认「真的有东西可发」
 
 ```bash
-cd "F:/AI/WorkBuddy-workspace/桌宠B站抖音/stroll"
+cd "F:/AI/agent/Codex/Codex Project/Coopanion插件/摸鱼插件/stroll"
 git status -sb                 # 必须是干净的，或者你正要提交的改动
 node -e "console.log(require('./package.json').version)"
 npm view cortico-world-mosey version
@@ -35,7 +41,7 @@ npm view cortico-world-mosey version
 
 - **本地版本 == npm 上的版本，且工作区没有新代码** → 没有可发的内容，停下来告诉用户，不要为了"发一次"而空升版本号。
 - 本地有改动 → 继续。
-- 本地版本 == npm 版本但工作区有改动 → 需要升版本号（下一步）。
+- 本地有改动但版本还等于 npm 版本 → 说明这次修改还没按第 2 节升号；先升号、补 CHANGELOG，再继续。
 
 ---
 
@@ -46,6 +52,8 @@ npm view cortico-world-mosey version
 | 修 bug | 末尾 +1 | 2.12.0 → 2.12.1 |
 | 加功能 | 中间 +1 | 2.12.0 → 2.13.0 |
 | 大更新 / 破坏性改动 | 最前面 +1 | 2.12.0 → 3.0.0 |
+
+一次用户要求的修改只升一个版本位；失败不占号，不要为了「试过了」留一个版本。
 
 同时改三处：
 
@@ -68,7 +76,7 @@ CHANGELOG 格式（`release-check` 按 `## 版本号` 切分）：
 
 ## 3. 七步流程
 
-### ① 回归
+### ① 回归（先验证，后写日志）
 
 ```bash
 npm run check
@@ -76,7 +84,13 @@ npm run check
 
 通过标准：末行 `NNN checks passed`，**退出码 0**。任何一条 `FAILED` 都不许继续。
 
-### ② 重建 describe（只有工具/事件有变动才需要，但每次跑一遍最稳）
+**只有这一步全绿，才做 ② 的升版本和 CHANGELOG；失败就修，修不好就回滚，不升号、不写日志。**
+
+### ② 升版本 + CHANGELOG
+
+按第 2 节改 `package.json` 的 `version`，在 `CHANGELOG.md` 顶部加 `## <新版本号>`。
+
+### ③ 重建 describe（只有工具/事件有变动才需要，但每次跑一遍最稳）
 
 ```bash
 npm run describe
@@ -85,7 +99,7 @@ git diff --stat describe.json    # 看它到底改了什么
 
 新增/修改工具或事件时，`src/tools.js`（`TOOL_DECLS` / `TOOL_SUMMARIES` / `EVENT_DECLS`）和 `src/definition.js` 必须同步。
 
-### ③ 发布前检查（会拦人）
+### ④ 发布前检查（会拦人）
 
 ```bash
 npm run release:check
@@ -95,7 +109,7 @@ npm run release:check
 
 **必须看到全部 `✓`**。有 `✗` 就按提示修，修完重跑，不许绕过。
 
-### ④ 本地部署（让用户马上能试）
+### ⑤ 本地部署（让用户马上能试）
 
 ```bash
 npm run deploy:local
@@ -105,7 +119,7 @@ npm run deploy:local
 
 跑完要提醒用户：**完全退出 Coopanion 再打开**（宿主对前端资源做了 immutable 缓存，刷页面无效）。
 
-### ⑤ 提交
+### ⑥ 提交
 
 ```bash
 git add -A
@@ -114,7 +128,7 @@ git commit -m "2.13.0：<一句话说清这次改了什么>"
 
 只做本地提交，**这一步不推远端**。
 
-### ⑥ 推远端
+### ⑦ 推远端
 
 ```bash
 git pull --rebase origin main
@@ -123,7 +137,7 @@ git push
 
 `pull --rebase` 冲突时：本地一般是超集，取自己的版本（`--theirs` 侧），重跑 ① 的 `npm run check` 再继续。
 
-### ⑦ 发到 npm
+### ⑧ 发到 npm
 
 ```bash
 npm whoami            # 没登录会报 ENEEDAUTH，先 npm login
@@ -168,7 +182,9 @@ tar -tzf cortico-world-mosey-<新版本号>.tgz | head -30
 
 ## 6. 绝对不要做
 
-- ❌ 没听到「发布」就升版本号 / 写 CHANGELOG / push / publish
+- ❌ 没听到「发布」就 push / publish / 跑 describe
+- ❌ 修改还没验证通过就先升版本号 / 写 CHANGELOG
+- ❌ 一次修改升了两位以上，或失败后还留着版本号和日志
 - ❌ 跳过 `npm run check` 或 `npm run release:check`
 - ❌ 直接 `rm -rf` 部署目录
 - ❌ 把 `.probe/`、`scripts/probe-*.mjs`、临时 profile 目录提交进仓库（它们在 `.gitignore` 里，别手动 `git add -f`）
@@ -181,15 +197,15 @@ tar -tzf cortico-world-mosey-<新版本号>.tgz | head -30
 ## 7. 一次性复制版
 
 ```bash
-cd "F:/AI/WorkBuddy-workspace/桌宠B站抖音/stroll"
+cd "F:/AI/agent/Codex/Codex Project/Coopanion插件/摸鱼插件/stroll"
 
 # 0) 确认有东西可发
 git status -sb && node -e "console.log(require('./package.json').version)" && npm view cortico-world-mosey version
 
-# 1) 改 version + CHANGELOG（手动）
-
-# 2) 验证
+# 1) 先验证；全绿后才改 version + CHANGELOG
 npm run check
+
+# 2) 验证通过后再重建元数据、跑发布检查
 npm run describe
 npm run release:check
 

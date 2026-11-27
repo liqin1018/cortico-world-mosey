@@ -146,7 +146,7 @@ export class Policy {
     if (!this.cfg.enabled) return { ok: false, code: 'DISABLED', message: '摸鱼已停用。' };
     if (platform === 'bilibili' && !this.cfg.bilibili) return { ok: false, code: 'PLATFORM_OFF', message: 'B站这边关着。' };
     if (platform === 'douyin' && !this.cfg.douyin) return { ok: false, code: 'PLATFORM_OFF', message: '抖音这边关着。' };
-    if (this.cfg.approval === 'dry_run') return { ok: false, code: 'DRY_RUN', message: '现在是只读模式，动作只会进草稿箱。' };
+    if (this.cfg.approval === 'dry_run') return { ok: false, code: 'DRY_RUN', message: '现在是只读模式，动作会被拦下，不会创建草稿。' };
 
     // 这里原来不看风控，一律拒。现在 paused() 自己按 riskGuard 决定要不要拦：
     // 默认 off 模式下频率限流不再堵任何动作（连试都不用试的那种验证码才拦）。
@@ -445,7 +445,7 @@ export class Policy {
   }
 }
 
-/** 审批矩阵：点赞可自动，公开文字/关注/私信默认要人点头。 */
+/** 审批矩阵：点赞可自动，公开文字/关注默认要人点头；私信主人直发。 */
 export function approvalFor(cfg, action) {
   if (cfg.approval === 'dry_run') return 'draft';
   if (cfg.approval === 'auto_all') return 'auto';

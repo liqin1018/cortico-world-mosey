@@ -59,7 +59,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll_act',
     description:
-      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态；按「动态」组的设置自动带图：图片工坊/本地目录/现画。想指定某张图就把路径放进 file，不传就每次现画）、dm、save（B站稍后再看）、sticker（发表情包）、image（把自己画的图/本地图片发到抖音私信、群聊或评论区）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（B站 rpid / 抖音 cid）和通知给出的 root（主评论 ID）。默认只生成草稿，等主人在面板点批准；点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
+      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态；按「动态」组的设置自动带图：图片工坊/本地目录/现画。想指定某张图就把路径放进 file，不传就每次现画）、dm、save（B站稍后再看）、sticker（发表情包）、image（把自己画的图/本地图片发到抖音私信、群聊或评论区）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（B站 rpid / 抖音 cid）和通知给出的 root（主评论 ID）。默认只生成待审批草稿，草稿不是已发送，30 分钟内有效；等主人在面板点批准后才会发送。点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
     tags: ['act', 'speak'],
     parameters: {
       type: 'object',
@@ -146,6 +146,7 @@ export const TOOL_SUMMARIES = {
 export const EVENT_DECLS = [
   { type: 'stroll.due', description: { zh: '自己该出门溜达了（每天最多几次）。', en: 'A scheduled outing is due.' }, trigger: 'debounce' },
   { type: 'stroll.sent', description: { zh: '主人批准后，公开动作真的发出去了。', en: 'An approved public action was sent.' }, trigger: 'flush' },
+  { type: 'stroll.draft_expired', description: { zh: '待批草稿超过 30 分钟已作废，没有发送；需要重新提一次。', en: 'A draft expired before approval; nothing was sent.' }, trigger: 'flush' },
   { type: 'stroll.risk', description: { zh: '平台风控/验证，已自动停手。', en: 'A platform risk signal paused all writes.' }, trigger: 'flush' },
   { type: 'stroll.reply', description: { zh: '有人回复或 @ 了她，或者主人刚发来私信（会立刻把她叫起来回）。', en: 'Someone replied or mentioned her, or the owner just sent a DM (she is woken to answer right away).' }, trigger: 'debounce' },
   { type: 'stroll.watch', description: { zh: '和主人一起看时，页面/进度/评论区的新情况。', en: 'The shared watch page changed: title, progress or comments.' }, trigger: 'debounce' },

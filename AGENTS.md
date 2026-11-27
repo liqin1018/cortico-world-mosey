@@ -17,21 +17,22 @@ Coopanion（Windows Electron 桌宠）的「摸鱼」插件：让桌宠自己去
 
 ## 1. 三条铁律
 
-1. **改代码只在这个仓库**：`F:/AI/WorkBuddy-workspace/桌宠B站抖音/stroll`。
+1. **改代码只在这个仓库**：`F:/AI/agent/Codex/Codex Project/Coopanion插件/摸鱼插件/stroll`。
    `F:/Coopanion/data/local-extensions/cortico-world-mosey` 是 `npm run deploy:local` 的**部署目标**，
    在那里改代码不会进版本库，下次部署就被覆盖 —— 在这里花的时间等于白花。
-2. **没听到用户亲口说「发布」，不许**：改 `package.json` 的 `version`、写 `CHANGELOG.md`、
-   `git push`、`npm publish`、`npm run describe`。平时只允许 `npm run check` + `npm run deploy:local`。
+2. **发布要亲口说；版本跟成功修改走**：`git push`、`npm publish`、`npm run describe` 只在用户说
+   「发布」后做。每次用户要求的修改，`npm run check` 全绿后升一个版本位并写 `CHANGELOG.md`；
+   没通过就不升号、不写日志。一次修改只升一位（bug 末位、小功能中位、大功能首位）。
 3. **一次只修一个症状**。`world.js` / `douyin.js` 各 ~8.5k 行，捆绑式「顺手清理 + 修复」不可评审，
    也无法定位是哪一步改坏的。
 
 ## 2. 标准循环
 
 ```bash
-cd "F:/AI/WorkBuddy-workspace/桌宠B站抖音/stroll"
+cd "F:/AI/agent/Codex/Codex Project/Coopanion插件/摸鱼插件/stroll"
 
-npm run check            # 482 项离线断言，末行 "482 checks passed" + 退出码 0
-npm run deploy:local     # 同步 src/ webui/ docs/ assets/ 到安装目录
+node scripts/smoke.mjs          # 等同 npm run check；离线断言必须全绿
+node scripts/deploy-local.mjs   # 等同 npm run deploy:local；同步到安装目录
 # 然后必须让人类「完全退出 Coopanion 再打开」
 ```
 
@@ -79,12 +80,33 @@ npm run deploy:local     # 同步 src/ webui/ docs/ assets/ 到安装目录
 读日志时注意：`worlds.fatfish: DSH bridge: connect ECONNREFUSED`、`core.store: 事件分片有损坏`、
 `stroll digest today` 每秒刷屏 —— 这些是宿主噪音，不是插件的 bug。
 
-## 5. 当前状态（2026-11-24）
+## 5. 当前状态（2026-11-27）
 
-- 线上 npm：`2.13.0`；仓库 HEAD 也是 2.13.0，但工作区有**三处未提交的修复**（见下）
-- 这台机器上真正可用的模型只有 `cn:deepseek-v4.1-flash`，其他模型在网关里全是 100% 失败
+- 本地版本：`2.13.4`；HEAD 以 `git log -1 --oneline` 为准。
+- 工作区已有既有未提交修复和本次代码/文档改动，**以 `git status -sb` 为准**。
+- 线上版本发布前另行核对，不要沿用旧文档里的版本号。
+- 这台机器上真正可用的模型只有 `cn:deepseek-v4.1-flash`，其他模型在网关里全是 100% 失败。
 
-### 正在查的 bug：抖音楼中楼续聊
+### B站评论审批链路（当前主线）
+
+- `stroll_act` 返回的 `draft_...` 是草稿号，不是 B站 `rpid`。回执里 `status` 是 `pending_owner_approval`、`sent: false`，并保留 `draft: true`、`id`、`expiresAt`、`expiresInSec`；草稿内部状态是 `pending`，30 分钟有效。
+- 只有主人在面板批准后才会执行 `comment`，成功回执才带 `rpid` 和 `visibility`。草稿创建后立即 `save()`；写盘失败返回 `DRAFT_SAVE_FAILED`，不进入待审批。
+- 创建、查询、审批和 tick 都走 `store.expireDueDrafts()`：过期草稿标 `status: expired`、`sent: false`，保留 3 天，不物理删除。`approveDraft` 对过期草稿返回 `DRAFT_EXPIRED`，不发网络请求、不扣额度。
+- 过期后会推 `stroll.draft_expired`（`trigger: flush`）：tick 一次最多推一条，最多列 3 条预览；安静时段延后；推送成功才写 `expiredNotifiedAt`，失败下轮重试；不使用 `interrupt`。
+- `history` / `status` / `brief` 都带 `expiredDrafts`，字段为 `id` / `action` / `platform` / `preview` / `expiredSec` / `status: 'expired'` / `sent: false`。
+- `visibility=public/hidden/unknown` 是**发送后**的可见性检查，不是审批状态。`hidden/unknown` 不自动重试。
+- 健康检查只看最近一条已发 B站评论在发送时记录的 `extra.visibility`；只有 `hidden` 才报。
+
+### B站评论问题排查顺序
+
+1. `state.json.drafts`：看 `status`、`createdAt`、`expiredAt`，先分清待批、已发、已过期。
+2. `state.json.actions[].extra.visibility`：确认发送后是 `public`、`hidden` 还是 `unknown`。
+3. `core.log`：搜 `stroll draft expired`、`stroll draft expired push`、`stroll account health`。
+4. 确认当前实际部署/加载的版本，再判断代码是否已经生效。
+
+### 历史专项：抖音楼中楼续聊（未完成真机验证）
+
+> 这条不是当前主线，保留供追溯；完整交接见 [`../docs/handoff-2026-11-22.md`](../docs/handoff-2026-11-22.md)。
 
 **症状**：主人在视频评论里 @ 她 → 她能回；但主人**在她那条评论下面接着回**，她永远收不到。
 
@@ -99,7 +121,7 @@ npm run deploy:local     # 同步 src/ webui/ docs/ assets/ 到安装目录
 4. **查的时候页面在导航**：`page.evaluate` 抛 `Execution context was destroyed`，被 catch 成空数组。
    → 已加：等 800ms 重试一次，日志 `stroll dy replies retry`
 
-**还没解决**：以上四处都没经过真机验证。下次接手先看这行日志判断走到哪了：
+**还没解决**：以上四处都没经过真机验证。若回到这条历史专项，先看这行日志判断走到哪了：
 
 ```
 [stroll] stroll dy replies api { http, root, found, total, n, kind, via }
@@ -110,7 +132,7 @@ npm run deploy:local     # 同步 src/ webui/ docs/ assets/ 到安装目录
 - `via: 'reply_api_empty'` → 官方接口也不给，**只剩一条路：点 UI 读 DOM**
   （打开视频页 → 找到主评论 → 点「展开 N 条回复」→ 读新渲染的子评论）。
   照 `douyin.js` 里 `readMessages()` 的写法（`page.evaluate` + `data-e2e` 选择器）抄，
-  约 150 行。这是目前唯一需要大改的方向。
+  约 150 行。这是该历史专项的下一步，不是当前 B站审批主线。
 
 **另一个已知阻塞**：抖音会弹人机验证（`captcha/v2`），日志会写
 `抖音要验证…得主人在手机上过一下验证码`。验证码没过时任何自动化都会卡 4 分钟然后失败 ——
@@ -134,7 +156,7 @@ npm run deploy:local     # 同步 src/ webui/ docs/ assets/ 到安装目录
 
 ```bash
 node --check src/douyin.js && node --check src/world.js   # 语法
-npm run check                                              # 482 项，退出码必须 0
+npm run check                                              # 以末行输出为准，退出码必须 0
 git status --short                                         # 只应有你打算提交的文件
 ```
 

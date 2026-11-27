@@ -6,7 +6,10 @@ import { CONFIG_GROUPS, DEFAULTS } from '../src/config.js';
 import { mapAtNotice, secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
 import { pickFrameTimes } from '../src/bilibili.js';
 import { approvalFor } from '../src/policy.js';
+import { DRAFT_TTL_MS, Store } from '../src/store.js';
 import { StickerBook, extOfBuffer } from '../src/stickers.js';
+import { EVENT_DECLS } from '../src/tools.js';
+import { STROLL } from '../src/definition.js';
 import {
   clockToSec,
   cutChars,
@@ -65,6 +68,14 @@ function check(name, ok, detail) {
 
 check('tools = 3', world.tools().length === 3);
 check('env prompt vars', Object.keys(world.envPromptVars()).length >= 6);
+check(
+  '事件声明包含草稿过期回执',
+  EVENT_DECLS.some((e) => e.type === 'stroll.draft_expired' && e.trigger === 'flush'),
+);
+check(
+  'describe 同步包含草稿过期回执',
+  STROLL.describe.events.some((e) => e.type === 'stroll.draft_expired' && e.trigger === 'flush'),
+);
 
 /* ---- 字幕条数按时长算：长片按基准，短片自动加密 ---- */
 check('时长文本转秒：1:02:03', clockToSec('1:02:03') === 3723);
@@ -947,6 +958,12 @@ check('history ok', history.ok === true);
 
 const draft = asJson(await world.toolAct({ action: 'like', platform: 'bilibili', target: 'BV1SVsd6MEGZ', preview: true }));
 check('draft created', draft.ok === true && draft.draft === true && !!draft.id);
+check('草稿号不是 B站 rpid', /^draft_/.test(draft.id), draft.id);
+check(
+  '草稿回执明确尚未发送',
+  draft.sent === false && draft.status === 'pending_owner_approval' && /尚未发送/.test(draft.message),
+  JSON.stringify(draft),
+);
 // 草稿有寿命，必须让鱼知道：不然它跟主人说「已提交待审批」，半小时后一起以为见了鬼（2026-11-22 反馈）
 check(
   '草稿回执写清 30 分钟有效期',
@@ -954,9 +971,213 @@ check(
   JSON.stringify({ expiresAt: draft.expiresAt, expiresInSec: draft.expiresInSec }),
 );
 check('draft pending', world.store.pendingDrafts().length === 1);
+const reloadedDraft = new Store(world.store.dir, world.store.timeZone).load().draft(draft.id);
+check('草稿创建后立即落盘', !!reloadedDraft && reloadedDraft.status === 'pending');
 check('model cannot approve', asJson(await world.toolAct({ action: 'approve', draft_id: draft.id })).ok === false);
 const rejected = world.rejectDraft(draft.id);
 check('reject', rejected.ok === true);
+
+/* ---------------- B站草稿审批：过期可见、审批拒绝、主动回执 ---------------- */
+const draftSnapshot = world.store.data.drafts;
+const actionsSnapshot = world.store.data.actions;
+const healthSnapshot = world.store.data.health;
+const quietSnapshot = { from: cfg.quietFrom, to: cfg.quietTo };
+const hostSnapshot = world.host;
+const runningSnapshot = world.running;
+const biliStatusSnapshot = world.bili.status;
+const douyinStatusSnapshot = world.douyin.status;
+const biliFeedSnapshot = world.bili.feed;
+const biliInboxSnapshot = world.bili.inbox;
+const biliCommentSnapshot = world.bili.comment;
+const quietSnapshotFn = world.policy.isQuiet;
+
+const expiredAtForTest = new Date(Date.now() - DRAFT_TTL_MS - 1000).toISOString();
+world.store.data.drafts = [
+  {
+    id: 'expired-smoke',
+    status: 'pending',
+    createdAt: expiredAtForTest,
+    action: 'comment',
+    platform: 'bilibili',
+    target: 'BV1SVsd6MEGZ',
+    text: '这条不会发',
+    quotaAction: 'comment',
+  },
+];
+const usageBeforeExpired = JSON.stringify(world.store.data.usage);
+let commentCalls = 0;
+world.bili.comment = async () => {
+  commentCalls += 1;
+  return { ok: true, rpid: '999', visibility: 'public' };
+};
+const expiredReceipt = await world.approveDraft('expired-smoke', 'smoke');
+check(
+  '过期草稿审批明确失败且未发送',
+  expiredReceipt.ok === false && expiredReceipt.code === 'DRAFT_EXPIRED' && expiredReceipt.sent === false,
+  JSON.stringify(expiredReceipt),
+);
+check('过期草稿审批不触发 B站网络请求', commentCalls === 0);
+check('过期草稿审批不扣额度', JSON.stringify(world.store.data.usage) === usageBeforeExpired);
+check('过期草稿状态已落盘为 expired', world.store.draft('expired-smoke')?.status === 'expired');
+
+const expiredHistory = world.history();
+check(
+  'history 能看到过期草稿',
+  expiredHistory.expiredDrafts.some((d) => d.id === 'expired-smoke' && d.sent === false && d.status === 'expired'),
+  JSON.stringify(expiredHistory.expiredDrafts),
+);
+world.bili.status = async () => ({ platform: 'bilibili', ok: true, loggedIn: true });
+world.douyin.status = async () => ({ platform: 'douyin', ok: true, loggedIn: false });
+const expiredStatus = await world.compactStatus();
+check(
+  'status 能看到过期草稿',
+  expiredStatus.expiredDrafts.some((d) => d.id === 'expired-smoke' && d.sent === false),
+  JSON.stringify(expiredStatus.expiredDrafts),
+);
+world.bili.feed = async () => [];
+world.bili.inbox = async () => [];
+const expiredBrief = await world.brief('bilibili');
+check(
+  'brief 能看到过期草稿',
+  expiredBrief.expiredDrafts.some((d) => d.id === 'expired-smoke' && d.sent === false) &&
+    expiredBrief.status.expiredDrafts.some((d) => d.id === 'expired-smoke'),
+  JSON.stringify(expiredBrief),
+);
+
+const realSave = world.store.save;
+world.store.save = () => {
+  throw new Error('disk full');
+};
+const saveFailed = asJson(
+  await world.toolAct({ action: 'like', platform: 'bilibili', target: 'BV1SVsd6MEGZ', preview: true }),
+);
+world.store.save = realSave;
+check(
+  '草稿写盘失败明确返回，不假装待审批',
+  saveFailed.ok === false && saveFailed.code === 'DRAFT_SAVE_FAILED' && saveFailed.sent === false,
+  JSON.stringify(saveFailed),
+);
+check(
+  '草稿写盘失败不留半条草稿',
+  !world.store.data.drafts.some((d) => d.action === 'like' && d.status === 'pending'),
+);
+
+const pushed = [];
+world.host = {
+  pushEvent: async (event, opts) => {
+    pushed.push({ event, opts });
+    return {};
+  },
+};
+world.running = true;
+cfg.quietFrom = 0;
+cfg.quietTo = 0;
+world.store.data.drafts = [
+  {
+    id: 'expired-push-1',
+    status: 'pending',
+    createdAt: expiredAtForTest,
+    action: 'comment',
+    platform: 'bilibili',
+    target: 'BV1SVsd6MEGZ',
+    text: '第一条过期',
+  },
+  {
+    id: 'expired-push-2',
+    status: 'pending',
+    createdAt: expiredAtForTest,
+    action: 'like',
+    platform: 'bilibili',
+    target: 'BV1SVsd6MEGZ',
+  },
+];
+await world.notifyExpiredDrafts(Date.now());
+check(
+  '一次 tick 只推一条草稿过期回执',
+  pushed.length === 1 &&
+    pushed[0].event.type === 'stroll.draft_expired' &&
+    pushed[0].opts.trigger === 'flush',
+  JSON.stringify(pushed.map((x) => x.event.type)),
+);
+check(
+  '过期回执写明未发送并带数量',
+  /没有发送/.test(pushed[0].event.text) &&
+    pushed[0].event.meta?.count === 2 &&
+    pushed[0].event.meta?.sent === false,
+  pushed[0].event.text,
+);
+check(
+  '推送成功后才记 expiredNotifiedAt',
+  world.store.data.drafts.every((d) => !!d.expiredNotifiedAt),
+);
+await world.notifyExpiredDrafts(Date.now());
+check('重复 tick 不重复推过期回执', pushed.length === 1);
+
+world.store.data.drafts = [
+  {
+    id: 'expired-quiet',
+    status: 'pending',
+    createdAt: expiredAtForTest,
+    action: 'comment',
+    platform: 'bilibili',
+    target: 'BV1SVsd6MEGZ',
+    text: '安静时段先别推',
+  },
+];
+world.policy.isQuiet = () => true;
+await world.notifyExpiredDrafts(Date.now());
+check(
+  '安静时段不推草稿过期回执',
+  pushed.length === 1 && !world.store.draft('expired-quiet')?.expiredNotifiedAt,
+);
+world.policy.isQuiet = quietSnapshotFn;
+
+world.store.data.drafts = [
+  {
+    id: 'expired-retry',
+    status: 'pending',
+    createdAt: staleAt,
+    action: 'comment',
+    platform: 'bilibili',
+    target: 'BV1SVsd6MEGZ',
+    text: '推送失败下一轮再试',
+  },
+];
+world.host = {
+  pushEvent: async () => {
+    throw new Error('host down');
+  },
+};
+await world.notifyExpiredDrafts(Date.now());
+check(
+  '推送失败不记 expiredNotifiedAt',
+  !world.store.draft('expired-retry')?.expiredNotifiedAt,
+);
+world.host = {
+  pushEvent: async (event, opts) => {
+    pushed.push({ event, opts });
+    return {};
+  },
+};
+await world.notifyExpiredDrafts(Date.now());
+check(
+  '推送失败后下一轮可以重试',
+  pushed.length === 2 && !!world.store.draft('expired-retry')?.expiredNotifiedAt,
+);
+
+world.store.data.drafts = draftSnapshot;
+world.store.data.actions = actionsSnapshot;
+world.store.data.health = healthSnapshot;
+world.host = hostSnapshot;
+world.running = runningSnapshot;
+world.bili.status = biliStatusSnapshot;
+world.douyin.status = douyinStatusSnapshot;
+world.bili.feed = biliFeedSnapshot;
+world.bili.inbox = biliInboxSnapshot;
+world.bili.comment = biliCommentSnapshot;
+world.policy.isQuiet = quietSnapshotFn;
+cfg.quietFrom = quietSnapshot.from;
+cfg.quietTo = quietSnapshot.to;
 
 // 防注入：模型只能改兴趣词；额度/主人/审批一律拒绝（这些只能主人在面板改）
 const deniedPolicy = asJson(await world.toolPolicy({ action: 'set', patch: { dailyLikes: 4, ownerUid: '123456' } }));
@@ -1166,6 +1387,8 @@ world.store.data.drafts = Array.from({ length: 8 }, (_, i) => ({
   target: `smoke-${i}`,
   text: '',
   status: 'pending',
+  // pendingDrafts() 用真实时钟判断过期，这里必须用真实 now；
+  // 用 mustNoon（今天 12:00）的话，下午跑 smoke 会被判成过期。
   createdAt: new Date().toISOString(),
 }));
 world.store.data.autoSessions[mustDay] = 0;
@@ -1619,6 +1842,14 @@ check(
     /reply_to=7706827662362215209 root=7706827662362215209/.test(mPushes[0].text),
   JSON.stringify(mPushes).slice(0, 200),
 );
+check(
+  '推送后记下待回的抖音 @',
+  world.store.data.dyPendingAt?.awemeId === '7706493792187339619' &&
+    world.store.data.dyPendingAt?.cid === '7706827662362215209' &&
+    world.store.data.dyPendingAt?.root === '7706827662362215209',
+  JSON.stringify(world.store.data.dyPendingAt),
+);
+delete world.store.data.dyPendingAt;
 await world.mentionBeat();
 check('同一条抖音 @ 只叫一次', mPushes.length === 1 && world.store.seenAt('atpush:douyin:dy-at-1'));
 
@@ -1652,6 +1883,39 @@ world.cfg.mentionWatch = prevCfgM.mentionWatch;
   check('root=0 被拒绝', !(await rw.buildPlan('reply', { ...args, root: '0' })).ok);
   const other = await rw.buildPlan('reply', { ...args, reply_to: '333' }, { byOwner: true });
   check('同文回复不同评论不共享去重键', other.ok && other.dedupeKey !== plan.dedupeKey);
+  /**
+   * 2026-11-25 真机：推送写的是 action=reply，模型却调 action=comment，
+   * 发成顶层评论，主人在这条评论下面永远等不到回复。
+   */
+  rw.store.data.dyPendingAt = { awemeId: args.target, cid: '222', root: '111', at: Date.now() };
+  const rerouted = await rw.buildPlan(
+    'comment',
+    { platform: 'douyin', target: args.target, text: '这条解释看明白了', mention_owner: true },
+    { byOwner: true },
+  );
+  check(
+    '刚推过的 @ 会把顶层评论改回楼中楼',
+    rerouted.ok && rerouted.action === 'reply' && rerouted.parent === '222' && rerouted.root === '111' && rerouted.countQuota === false,
+    JSON.stringify(rerouted),
+  );
+  rw.cfg.dailyCommentsDouyin = 5;
+  rw.store.data.dyPendingAt.at = Date.now() - 11 * 60 * 1000;
+  const stale = await rw.buildPlan(
+    'comment',
+    { platform: 'douyin', target: args.target, text: '这是新评论不是回复' },
+    { byOwner: true },
+  );
+  check('过期的 @ 不再改写顶层评论', stale.ok && stale.action === 'comment', JSON.stringify(stale));
+  rw.cfg.dailyCommentsDouyin = 0;
+  delete rw.store.data.dyPendingAt;
+  const unconfirmed = rw.receiptText('comment', 'douyin', { confirmed: false, queued: true, mentioned: true, cid: '' }, {});
+  check(
+    '未确认的评论回执不写「发出去了」',
+    !/发出去了/.test(unconfirmed) && /没拿到发布回执/.test(unconfirmed),
+    unconfirmed,
+  );
+  const confirmed = rw.receiptText('reply', 'douyin', { confirmed: true, mentioned: null, cid: '444' }, {});
+  check('已确认的回复回执照常写发出去了', /回复发出去了/.test(confirmed), confirmed);
 
   const requests = [];
   let responseMode = 'ok';
@@ -1679,8 +1943,10 @@ world.cfg.mentionWatch = prevCfgM.mentionWatch;
   rw.douyin.findCommentInput = async () => { throw new Error('楼中楼不得打开顶层评论输入框'); };
   const invalidDraft = await rw.executePlan({ ...plan, root: '', parent: '' }, 'smoke');
   check('缺失定位的旧回复草稿不能误发新评论', invalidDraft.code === 'BAD_REPLY_TARGET' && requests.length === 0);
+  rw.store.data.dyPendingAt = { awemeId: args.target, cid: '222', root: '111', at: Date.now() };
   const sent = await rw.approveDraft(draft.id, 'smoke');
   check('子回复执行发送主评论与子评论ID', sent.ok && requests.at(-1)?.body.get('reply_id') === '111' && requests.at(-1)?.body.get('reply_to_reply_id') === '222', JSON.stringify(sent));
+  check('回复成功后清掉待回 @', !rw.store.data.dyPendingAt);
   check('楼中楼执行不扣主动评论额度', rw.store.usage('comment:douyin') === 0);
   /**
    * 2026-11-22：楼中楼 20 次尝试 0 次成功，全是 403 / 码 -1 / 码 8。
@@ -1730,11 +1996,68 @@ world.cfg.mentionWatch = prevCfgM.mentionWatch;
   publishStatus = 1;
   for (const mode of ['denied', 'lost']) {
     responseMode = mode;
-    const before = requests.length;
+    const publishes = () => requests.filter((r) => /\/comment\/publish\//.test(String(r.url))).length;
+    const before = publishes();
     let code = '';
     try { await rw.douyin.comment(args.target, args.text, { root: '111', parent: '222' }); } catch (e) { code = e.code; }
-    check(`楼中楼 ${mode} 不重试不降级新评论`, code === 'REPLY_NOT_CONFIRMED' && requests.length === before + 1, code);
+    check(`楼中楼 ${mode} 不重试不降级新评论`, code === 'REPLY_NOT_CONFIRMED' && publishes() === before + 1, code);
   }
+  // 接口被拒 → 改走真实输入框；输入框也找不到目标时如实报错，不降级顶层评论。
+  const prevReplyViaUi = rw.douyin.replyViaUi;
+  responseMode = 'denied';
+  rw.douyin.replyViaUi = async () => ({ ok: true, confirmed: true, cid: '8888', status: 1, via: 'ui' });
+  const uiSent = await rw.douyin.comment(args.target, '走真实输入框发送', { root: '111', parent: '222' });
+  check('接口被拒时改走真实输入框发送', uiSent?.confirmed === true && uiSent?.cid === '8888' && uiSent?.via === 'ui', JSON.stringify(uiSent));
+  rw.douyin.replyViaUi = async () => ({ ok: false, code: 'UI_TARGET_NOT_FOUND' });
+  let uiFailMsg = '';
+  try { await rw.douyin.comment(args.target, '找不到目标要停下', { root: '111', parent: '222' }); } catch (e) { uiFailMsg = `${e.code} ${e.message}`; }
+  check('真实输入框也找不到目标时如实报错', /REPLY_NOT_CONFIRMED/.test(uiFailMsg) && /UI_TARGET_NOT_FOUND/.test(uiFailMsg), uiFailMsg);
+  rw.douyin.replyViaUi = prevReplyViaUi;
+  // 评论定位：cid 埋在 React props 深处、以及正文兜底，两种都要能点上「回复」。
+  const savedDocument = globalThis.document;
+  let replyClicks = 0;
+  const replyBtn = {
+    innerText: '回复',
+    getBoundingClientRect: () => ({ width: 20, height: 12 }),
+    click: () => { replyClicks += 1; },
+  };
+  const commentNode = (cid, txt) => ({
+    innerText: txt,
+    __reactFiber$: { memoizedProps: { nested: { comment: { cid } } }, return: null },
+    querySelectorAll: () => [replyBtn],
+  });
+  try {
+    const evalPage = { evaluate: async (fn, arg) => fn(arg) };
+    globalThis.document = { querySelectorAll: () => [commentNode('222', '好看，什么时候回来')] };
+    const byCid = await rw.douyin.openReplyEditorByCid(evalPage, '222', '');
+    check('cid 埋在深层 props 里也能定位到评论', byCid === 'clicked' && replyClicks === 1, `${byCid} ${replyClicks}`);
+    globalThis.document = { querySelectorAll: () => [commentNode('999', '好看，什么时候回来')] };
+    replyClicks = 0;
+    const byText = await rw.douyin.openReplyEditorByCid(evalPage, '222', '好看，什么时候回来');
+    check('cid 对不上时用评论正文兜底定位', byText === 'clicked' && replyClicks === 1, `${byText} ${replyClicks}`);
+  } finally {
+    globalThis.document = savedDocument;
+  }
+  // 评论区侧栏没开时，先点评论图标；打开后不再重复点。
+  let panelOpened = false;
+  let panelClicks = 0;
+  const panelPage = {
+    locator: (sel) => {
+      if (/feed-comment-icon/.test(sel)) {
+        return { first() { return this; }, count: async () => 1, click: async () => { panelOpened = true; panelClicks += 1; } };
+      }
+      return { first() { return this; }, count: async () => (panelOpened ? 1 : 0) };
+    },
+    waitForTimeout: async () => {},
+  };
+  check('评论区侧栏没开时会点评论图标', await rw.douyin.openCommentPanel(panelPage) === true && panelClicks === 1);
+  check('评论区侧栏已开时不再重复点', await rw.douyin.openCommentPanel(panelPage) === true && panelClicks === 1);
+  const noPanelPage = {
+    locator: () => ({ first() { return this; }, count: async () => 0 }),
+    waitForTimeout: async () => {},
+  };
+  const noPanel = await rw.douyin.replyViaUi(noPanelPage, '111', '找不到面板', { root: '111', parent: '222' });
+  check('评论区侧栏打不开时明确报 UI_NO_PANEL', noPanel.code === 'UI_NO_PANEL', JSON.stringify(noPanel));
   rw.store.data.lastWriteAt = 0;
   rw.store.data.lastWriteByPlat = {};
   const unknownDraft = rw.makeDraft({ ...plan, text: '这次补充也看到了', dedupeKey: 'smoke:reply:unknown' });

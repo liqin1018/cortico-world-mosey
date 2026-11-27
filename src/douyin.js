@@ -3704,12 +3704,30 @@ export class DouyinBrowser {
           } catch {
             // 签不出来就走无签名，和以前一样
           }
-          const res = await fetch(url, {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'content-type': 'application/x-www-form-urlencoded' },
-            body: body.toString(),
-          });
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 12000);
+          let res;
+          try {
+            res = await fetch(url, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'content-type': 'application/x-www-form-urlencoded' },
+              body: body.toString(),
+              signal: ctrl.signal,
+            });
+          } catch (e) {
+            return {
+              http: 0,
+              code: 'NETWORK',
+              msg: String(e?.name === 'AbortError' ? '请求超时' : e?.message ?? e).slice(0, 80),
+              signed,
+              cid: '',
+              status: 0,
+              extra: [],
+            };
+          } finally {
+            clearTimeout(timer);
+          }
           const raw = await res.text();
           let data = null;
           try {
@@ -3838,6 +3856,194 @@ export class DouyinBrowser {
     return h ? h.asElement() : null;
   }
 
+  /**
+   * 在评论区里找到某条评论并点它的「回复」。
+   *
+   * 认人方式两层：先在 React fiber/props 里**深度**找 cid（不能只查 p.comment 这一层，
+   * 实测有些版本评论对象埋在更深处，浅查会报 UI_TARGET_NOT_FOUND），
+   * 找不到再用评论正文前 12 字兜底。返回 'clicked' / 'no-button' / 'not-found:…' / 'no-items'。
+   */
+  async openReplyEditorByCid(page, cid, probe = '') {
+    return await page.evaluate(({ target, probe }) => {
+      const flat = (s) => String(s ?? '').replace(/\s+/g, '');
+      const hasCid = (obj, depth, seen) => {
+        if (!obj || typeof obj !== 'object' || depth > 4 || seen.has(obj)) return false;
+        if (String(obj.cid ?? obj.comment_id ?? '') === target) return true;
+        seen.add(obj);
+        for (const key of Object.keys(obj)) {
+          if (key === 'return' || key === 'stateNode' || key === 'children' || key === '_owner') continue;
+          const v = obj[key];
+          if (v && typeof v === 'object' && hasCid(v, depth + 1, seen)) return true;
+        }
+        return false;
+      };
+      const isTarget = (el) => {
+        for (const key of Object.keys(el)) {
+          if (key.startsWith('__reactProps$') && hasCid(el[key], 0, new Set())) return true;
+          if (!key.startsWith('__reactFiber$')) continue;
+          let f = el[key];
+          for (let i = 0; i < 16 && f; i += 1, f = f.return) {
+            if (hasCid(f.memoizedProps, 0, new Set()) || hasCid(f.pendingProps, 0, new Set())) return true;
+          }
+        }
+        return false;
+      };
+      const want = flat(probe).slice(0, 12);
+      const items = Array.from(document.querySelectorAll('[data-e2e="comment-item"], .comment-item, .reply-item'));
+      const seenText = [];
+      for (const el of items) {
+        const txt = String(el.innerText ?? '').replace(/\s+/g, ' ');
+        if (seenText.length < 4) seenText.push(txt.slice(0, 36));
+        if (!(isTarget(el) || (want && flat(txt).includes(want)))) continue;
+        const btn = Array.from(el.querySelectorAll('[data-e2e="comment-reply"], button, span, div'))
+          .find((n) => {
+            if (String(n.innerText ?? '').trim() !== '回复') return false;
+            const r = n.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          });
+        if (!btn) return 'no-button';
+        btn.click();
+        return 'clicked';
+      }
+      return items.length ? `not-found:${seenText.join(' | ')}` : 'no-items';
+    }, { target: String(cid), probe: String(probe ?? '') }).catch(() => 'error');
+  }
+
+  /** 折叠的楼中楼要展开才渲染得出来：点几个「展开 N 条回复 / 更多回复」。 */
+  async expandCommentReplies(page) {
+    return await page.evaluate(() => {
+      const hits = Array.from(document.querySelectorAll('span, div, button')).filter((n) => {
+        if (n.children.length) return false;
+        const t = String(n.innerText ?? '').trim();
+        if (!/展开.*回复|查看全部|更多回复|共\d+条回复/.test(t)) return false;
+        const r = n.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && r.top < window.innerHeight;
+      });
+      hits.slice(0, 3).forEach((n) => n.click());
+      // 评论区是虚拟滚动：目标在下面时，滚到底才会挂进 DOM
+      const list = document.querySelector('[data-e2e="comment-list"], #comment, [class*="commentList"]');
+      if (list) list.scrollTop = list.scrollHeight;
+      return hits.length || (list ? 1 : 0);
+    }).catch(() => 0);
+  }
+
+  /**
+   * 楼中楼回复前先确认评论区侧栏已经挂上来。
+   *
+   * 2026-11-25：UI 兜底一直报 `no-items`——`ensureVideo(quick)` 只开了视频页，
+   * 评论区还是折叠的，`[data-e2e="comment-item"]` 一个都没有。
+   * 点评论图标后等列表容器/评论项出现；打不开就明确返回 false。
+   */
+  async openCommentPanel(page) {
+    const list = page.locator('[data-e2e="comment-list"], #comment').first();
+    if (await list.count().catch(() => 0)) return true;
+    const icon = page.locator('[data-e2e="feed-comment-icon"]').first();
+    if (await icon.count().catch(() => 0)) {
+      await icon.click({ force: true, timeout: 4000 }).catch(() => {});
+    }
+    for (let i = 0; i < 24; i += 1) {
+      if (await list.count().catch(() => 0)) return true;
+      if (await page.locator('[data-e2e="comment-item"]').count().catch(() => 0)) return true;
+      await page.waitForTimeout(250);
+    }
+    return false;
+  }
+
+  /**
+   * 走真实输入框回楼中楼。
+   *
+   * 手拼 publish 请求会被网关拦（2026-11-18 实测：403 空响应 / 码 8，但同号手动能发），
+   * 让抖音自己的脚本去发就没有这个问题：字段、签名、@ 都由它处理。
+   * 找不到目标评论时如实返回，不降级成顶层评论。
+   */
+  async replyViaUi(page, id, text, { root = '', parent = '' } = {}) {
+    if (!(await this.openCommentPanel(page))) {
+      this.log?.warn?.('stroll douyin ui panel missing', { id, parent });
+      return { ok: false, code: 'UI_NO_PANEL' };
+    }
+    // 能拿到原文就拿来兜底匹配；cid 深扫仍然是主判据
+    const info = await Promise.race([
+      this.commentStatus(id, parent).catch(() => null),
+      new Promise((resolve) => setTimeout(() => resolve(null), 4000)),
+    ]);
+    const probe = String(info?.text ?? '');
+    let state = 'not-found';
+    for (let round = 0; round < 3; round += 1) {
+      state = await this.openReplyEditorByCid(page, parent, probe);
+      if (state === 'clicked') break;
+      if (state === 'no-button') break;
+      if (!(await this.expandCommentReplies(page))) break;
+      await page.waitForTimeout(700).catch(() => {});
+    }
+    if (state !== 'clicked') {
+      // 只认目标那一条，找不到就停：退而回复主楼会通知错人，也不是主人要的那一层。
+      this.log?.warn?.('stroll douyin ui target state', { id, parent, state: String(state).slice(0, 160) });
+      return { ok: false, code: `UI_${state === 'no-button' ? 'NO_BUTTON' : 'TARGET_NOT_FOUND'}` };
+    }
+
+    const replyInput = await page
+      .evaluateHandle(() => {
+        const visible = (n) => {
+          const r = n.getBoundingClientRect();
+          return r.width > 40 && r.height > 10 && r.bottom > 0 && r.top < window.innerHeight;
+        };
+        return (
+          Array.from(document.querySelectorAll('[contenteditable="true"], textarea')).find((n) => {
+            if (!visible(n)) return false;
+            const hint = [
+              n.getAttribute('placeholder'),
+              n.getAttribute('data-placeholder'),
+              n.getAttribute('aria-label'),
+              String(n.innerText ?? '').slice(0, 40),
+            ].join(' ');
+            return /回复\s*@|回复@/.test(hint);
+          }) ?? null
+        );
+      })
+      .catch(() => null);
+    const input = replyInput?.asElement?.() ?? (await this.waitCommentInput(page, 4000)) ?? (await this.findCommentInput(page));
+    if (!input) return { ok: false, code: 'UI_NO_INPUT' };
+    /**
+     * 必须确认编辑器真的进入了「回复 @某人」状态。
+     * 顶层评论框和楼中楼输入框在抖音里是同一个容器，光看「有输入框」是不够的——
+     * 不确认就发，等于把回复发成一条顶层评论（用户明令禁止的降级）。
+     */
+    const replyMode = await page.evaluate(() => {
+      const visible = (n) => {
+        const r = n.getBoundingClientRect();
+        return r.width > 40 && r.height > 10 && r.bottom > 0 && r.top < window.innerHeight;
+      };
+      const nodes = Array.from(document.querySelectorAll('[contenteditable="true"], textarea'));
+      return nodes.some((n) => {
+        if (!visible(n)) return false;
+        const hint = [
+          n.getAttribute('placeholder'),
+          n.getAttribute('data-placeholder'),
+          n.getAttribute('aria-label'),
+          String(n.innerText ?? '').slice(0, 40),
+        ].join(' ');
+        return /回复\s*@|回复@/.test(hint);
+      });
+    }).catch(() => false);
+    if (!replyMode) {
+      await page.keyboard.press('Escape').catch(() => {});
+      return { ok: false, code: 'UI_NOT_REPLY_MODE' };
+    }
+    await input.click({ force: true }).catch(() => {});
+    await input.fill('').catch(() => {});
+    await input.type(text, { delay: 22 + Math.floor(Math.random() * 10) }).catch(async () => {
+      await input.pressSequentially(text, { delay: 22 }).catch(() => {});
+    });
+    const published = page
+      .waitForResponse((r) => /\/comment\/publish/.test(r.url()), { timeout: 15000 })
+      .then(async (r) => (await r.json().catch(() => null))?.comment ?? null)
+      .catch(() => null);
+    await input.press('Enter').catch(() => {});
+    const pub = await Promise.race([published, page.waitForTimeout(6000).then(() => null, () => null)]);
+    if (!pub?.cid) return { ok: false, code: 'UI_NOT_CONFIRMED' };
+    return { ok: true, confirmed: true, cid: String(pub.cid), status: Number(pub.status ?? 0), via: 'ui' };
+  }
+
   async comment(idOrUrl, text, { mention = '', root = '', parent = '' } = {}) {
     root = String(root ?? '').trim();
     parent = String(parent ?? '').trim();
@@ -3935,7 +4141,14 @@ export class DouyinBrowser {
          * 「有人回我」的监控，主人在楼里接着说话她再也收不到（2026-11-24）。
          */
         const probe = text.replace(/\s+/g, '').slice(0, 12);
-        const kids = await this.commentReplies(id, root).catch(() => []);
+        // 4xx 是服务端明确拒绝，肯定没发出去；直接走真实输入框，别再多等一轮探测
+        const rejected = !!fast && Number(fast.http) >= 400 && Number(fast.http) < 500;
+        const kids = rejected
+          ? []
+          : await Promise.race([
+              this.commentReplies(id, root).catch(() => []),
+              new Promise((resolve) => setTimeout(() => resolve([]), 15000)),
+            ]);
         const mine = kids.find((k) => String(k.text ?? '').replace(/\s+/g, '').includes(probe)) ?? null;
         if (mine?.cid) {
           this.lastAction = `comment ${id}`;
@@ -3955,8 +4168,42 @@ export class DouyinBrowser {
             url: `https://www.douyin.com/video/${id}`,
           };
         }
+        /**
+         * 接口被拦（403 / 空响应）时改走真实输入框。
+         *
+         * 2026-11-24：手拼 publish 带 reply_id 一直被 403，读接口却正常；
+         * 让抖音自己的页面脚本发，签名和字段都由它处理。找不到目标就停，
+         * 绝不降级成顶层评论。
+         */
+        const ui = await Promise.race([
+          this.replyViaUi(page, id, text, { root, parent }).catch((e) => ({
+            ok: false,
+            code: e?.code ?? 'UI_ERROR',
+            error: String(e?.message ?? e).slice(0, 80),
+          })),
+          new Promise((resolve) => setTimeout(() => resolve({ ok: false, code: 'UI_TIMEOUT' }), 45000)),
+        ]);
+        if (ui?.cid) {
+          this.lastAction = `comment ${id}`;
+          return {
+            ok: true,
+            confirmed: true,
+            queued: false,
+            text,
+            mentioned: null,
+            cid: ui.cid,
+            status: ui.status,
+            visible: ui.status === 1 ? true : null,
+            note: '',
+            via: 'ui',
+            root,
+            parent,
+            url: `https://www.douyin.com/video/${id}`,
+          };
+        }
         const why = fast ? `（HTTP ${fast.http} / 抖音码 ${fast.code} / 签名${fast.signed ? '已带' : '未带'}）` : '';
-        throw new DouyinError('REPLY_NOT_CONFIRMED', `未拿到抖音楼中楼回复回执${why}；可能被拒绝或响应丢失，请先查看原评论，不要立即重发。不会改发新评论。`);
+        const uiWhy = ui?.code ? `；真实输入框也没走通（${ui.code}）` : '';
+        throw new DouyinError('REPLY_NOT_CONFIRMED', `未拿到抖音楼中楼回复回执${why}${uiWhy}；可能被拒绝或响应丢失，请先查看原评论，不要立即重发。不会改发新评论。`);
       }
 
       // ---- 稳路径：真的去点评论框（带 @ 时只能走这条） ----
@@ -4301,7 +4548,7 @@ export class DouyinBrowser {
    * 她照着标题猜就会回错那条。拿到 cid 就能把真话捞回来。
    */
   async commentByCid(awemeId, cid) {
-    const page = this.page;
+    const page = await this.apiPage({ reason: 'commentByCid' });
     if (!page || !awemeId || !cid) return null;
     return page
       .evaluate(
@@ -4349,6 +4596,41 @@ export class DouyinBrowser {
   }
 
   /**
+   * 读接口用的页面。
+   *
+   * 以前直接拿 `this.page`：窗口被自动收掉、登录页把页面导航走之后，
+   * `page.evaluate` 只会抛 `Target page...closed` / `Execution context was destroyed`，
+   * 上层再 catch 成空数组，看起来就是「这层楼没人回复」。
+   * 这里只负责拿一个可用的抖音页面；拿不到就明确记日志，不假装读到了。
+   */
+  async apiPage({ reason = '' } = {}) {
+    let page = this.page;
+    const usable = () => {
+      if (!page || page.isClosed()) return false;
+      try {
+        return /(^|\.)douyin\.com$/i.test(new URL(page.url()).hostname);
+      } catch {
+        return false;
+      }
+    };
+    try {
+      if (!usable()) page = await this.getPage();
+      if (!page || page.isClosed()) return null;
+      if (!/(^|\.)douyin\.com$/i.test(new URL(page.url()).hostname)) {
+        await page.goto(ORIGIN, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.waitForTimeout(350);
+      }
+      return page;
+    } catch (error) {
+      this.log?.warn?.('stroll dy read page failed', {
+        reason,
+        message: String(error?.message ?? error).slice(0, 120),
+      });
+      return null;
+    }
+  }
+
+  /**
    * 看某条评论的楼里有没有新回复。
    *
    * 抖音**不会**为「有人回复了我的评论」发 @ 通知（notice_group=6 只装 @），
@@ -4357,7 +4639,7 @@ export class DouyinBrowser {
    * 只能自己看他那几条评论下面的楼。
    */
   async commentReplies(awemeId, rootCid, { count = 20 } = {}) {
-    const page = this.page;
+    const page = await this.apiPage({ reason: 'commentReplies' });
     if (!page || !awemeId || !rootCid) {
       this.log?.info?.('stroll dy replies api', { page: !!page, awemeId: !!awemeId, rootCid: !!rootCid });
       return [];
@@ -4371,8 +4653,8 @@ export class DouyinBrowser {
      * 对我们这种「只想知道刚有人回了什么」的场景够了。
      */
     const evalArgs = { id: String(awemeId), root: String(rootCid), count };
-    const runOnce = () =>
-      page
+    const runOnce = (target) =>
+      target
       .evaluate(
         async ({ id, root, count }) => {
           const base = {
@@ -4389,9 +4671,18 @@ export class DouyinBrowser {
             platform: 'PC',
             downlink: '10',
           };
+          const fetchT = async (url) => {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 10000);
+            try {
+              return await fetch(url, { credentials: 'include', signal: ctrl.signal });
+            } finally {
+              clearTimeout(timer);
+            }
+          };
           const grab = async (extra) => {
             const q = new URLSearchParams({ ...base, ...extra });
-            const r = await fetch(`https://www.douyin.com/aweme/v1/web/comment/list/?${q}`, { credentials: 'include' });
+            const r = await fetchT(`https://www.douyin.com/aweme/v1/web/comment/list/?${q}`);
             if (!r.ok) return { http: r.status, hit: null };
             const d = await r.json().catch(() => null);
             const list = d?.comments ?? [];
@@ -4425,7 +4716,14 @@ export class DouyinBrowser {
            * 2026-11-24 实测：主人正在聊的那层楼 reply_comment=null、total=3，
            * 光等预览永远是 0 条 —— 表现就是「她只回楼里最早那句，后面新说的看不见」。
            */
-          if (!kids.length && total > 0) {
+          /**
+           * 预览为空就要问一次楼中楼接口。
+           *
+           * 2026-11-24 实测：`reply_comment=null` 时 `reply_comment_total` 也可能是 0，
+           * 以前只在 `total > 0` 时才问，于是永远停在 `via: 'preview'`，
+           * 连「接口也不给」的现场都留不下来。
+           */
+          if (!kids.length && (total > 0 || rawKids === null)) {
             const q = new URLSearchParams({
               ...base,
               item_id: String(id),
@@ -4433,7 +4731,7 @@ export class DouyinBrowser {
               cursor: '0',
               count: String(count),
             });
-            const r = await fetch(`https://www.douyin.com/aweme/v1/web/comment/list/reply/?${q}`, { credentials: 'include' }).catch(() => null);
+            const r = await fetchT(`https://www.douyin.com/aweme/v1/web/comment/list/reply/?${q}`).catch(() => null);
             if (r?.ok) {
               const d = await r.json().catch(() => null);
               const arr = d?.comments ?? [];
@@ -4448,15 +4746,30 @@ export class DouyinBrowser {
                     root: String(root),
                     total,
                     preview: rawKids === null ? 'null' : typeof rawKids,
+                    http: r.status,
+                    code: Number(d?.status_code ?? -1),
+                    msg: String(d?.status_msg ?? '').slice(0, 120),
                     replyKeys: Object.keys(d ?? {}).slice(0, 12),
+                    commentsLength: arr.length,
                     hasMore: d?.has_more ?? null,
-                  }).slice(0, 2000);
+                  }).slice(0, 4000);
                 } catch {
                   // 留不下就算了
                 }
               }
             } else {
               via = 'reply_api_fail';
+              try {
+                window.__strollReplyDump = JSON.stringify({
+                  root: String(root),
+                  total,
+                  preview: rawKids === null ? 'null' : typeof rawKids,
+                  http: r?.status ?? -1,
+                  reason: 'http',
+                }).slice(0, 4000);
+              } catch {
+                // 留不下就算了
+              }
             }
           }
           return {
@@ -4488,8 +4801,9 @@ export class DouyinBrowser {
      * 等 800ms 重来一次，仍然失败才算真的失败。
      */
     let res = null;
+    let active = page;
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      res = await runOnce().catch((e) => {
+      res = await runOnce(active).catch((e) => {
         const msg = String(e?.message ?? e).slice(0, 80);
         return {
           http: -1,
@@ -4501,10 +4815,12 @@ export class DouyinBrowser {
       if (!res?.__retry || attempt === 1) break;
       this.log?.info?.('stroll dy replies retry', { root: String(rootCid).slice(-6), attempt: attempt + 1 });
       await new Promise((r) => setTimeout(r, 800));
+      const next = await this.apiPage({ reason: 'commentReplies-retry' });
+      if (next) active = next;
     }
     // 接口也读不到时，把页面里留的现场落盘：下一轮改 UI 之前先看清抖音到底回了什么
     if (res?.via === 'reply_api_empty' || res?.via === 'reply_api_fail') {
-      const dump = await page
+      const dump = await active
         .evaluate(() => {
           const v = window.__strollReplyDump ?? '';
           window.__strollReplyDump = '';
@@ -4515,7 +4831,8 @@ export class DouyinBrowser {
         try {
           const dir = path.join(this.dataDir, 'stroll', 'debug');
           fs.mkdirSync(dir, { recursive: true });
-          fs.writeFileSync(path.join(dir, `reply-empty-${Date.now()}.json`), String(dump));
+          // 按楼层覆盖：total=0 的楼每分钟都会查一次，带时间戳会堆出成千上万个文件
+          fs.writeFileSync(path.join(dir, `reply-empty-${String(rootCid)}.json`), String(dump));
         } catch {
           // 落不下就算了
         }

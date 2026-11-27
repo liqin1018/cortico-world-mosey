@@ -117,7 +117,7 @@ export const STROLL = {
     return [
       { value: 'confirm', label: zh ? '全部等我批准（推荐）' : 'Ask me first (recommended)' },
       { value: 'auto_low_risk', label: zh ? '点赞自动，其余问我' : 'Auto like, ask for the rest' },
-      { value: 'dry_run', label: zh ? '只读，只写草稿' : 'Read only, draft only' },
+      { value: 'dry_run', label: zh ? '只读，动作被拦' : 'Read only, actions blocked' },
       { value: 'auto_all', label: zh ? '按额度自动，不再问我' : 'Auto within quota, never ask' },
     ];
   },

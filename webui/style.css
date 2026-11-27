@@ -1248,6 +1248,11 @@
   line-height: 1.45;
   opacity: 0.72;
 }
+.stroll-expired-item {
+  margin-top: 4px;
+  word-break: break-word;
+  opacity: 0.82;
+}
 .stroll-empty {
   padding: 18px 14px;
   border: 1px dashed var(--s-line);

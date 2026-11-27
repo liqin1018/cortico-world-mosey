@@ -122,10 +122,10 @@ const APPROVALS = [
 ];
 
 const APPROVAL_HINT = {
-  dry_run: '只读：所有公开动作都只写草稿，不发送。',
-  confirm: '全批准：点赞/评论/关注/动态/私信都先停在草稿箱，等你点批准。',
-  auto_low_risk: '赞自动：点赞直接发，其余仍等你批准。',
-  auto_all: '按额度：所有公开动作都不再问你，直接按每日额度发。慎用。',
+  dry_run: '只读：所有动作都会被拦下，不创建草稿（连私信也不发）。',
+  confirm: '全批准：点赞/评论/关注/动态先停在草稿箱，等你点批准；私信主人直接发，陌生人/群聊按设置。',
+  auto_low_risk: '赞自动：点赞直接发；评论/关注/动态等你批准；私信主人直接发，陌生人/群聊按设置。',
+  auto_all: '按额度：所有公开动作都不再问你，直接按每日额度发；私信主人直接发，陌生人/群聊按设置。慎用。',
 };
 
 function clock(sec) {
@@ -847,15 +847,20 @@ export default {
               digestCard.append(el('p', `今天做了 ${dg.total} 件事：${bits.join('、') || '（都是聊天）'}`, 'stroll-digest-line'));
               if (dg.top?.length) digestCard.append(el('p', `最常看的是 ${dg.top.join(' 和 ')}`, 'stroll-muted'));
             }
-            // 账号健康：J 的匿名自查结果（一天一次，后端异步查好放缓存里）
+            // 账号健康：最近一条已发评论的发送后可见性（后端异步查好放缓存里）
             const hh = data?.health;
             if (hh?.result && hh.result !== 'none') {
               const label = {
-                public: '上一条评论公开可见',
-                hidden: '上一条评论匿名看不到（可能被压）',
-                unknown: '查不到（接口没返回）',
+                public: '最近一条已发 B站评论：公开可见',
+                hidden: '最近一条已发 B站评论：仅自己可见/审核中',
+                unknown: '最近一条已发 B站评论：暂时查不到',
               }[hh.result] ?? hh.result;
               digestCard.append(el('p', `账号健康：${label}`, 'stroll-muted'));
+              if (hh.result !== 'public') {
+                digestCard.append(
+                  el('p', '这是发送后的可见性检查，不是待审批状态；草稿没批不会发。', 'stroll-muted'),
+                );
+              }
             }
             const ppl = data?.people ?? [];
             digestHint.textContent = ppl.length ? `最近聊过 ${ppl.length} 个人` : '';
@@ -1197,9 +1202,12 @@ export default {
           if (expiredDrafts.length) {
             const box = el('div', undefined, 'stroll-expired');
             box.append(
-              el('strong', `${expiredDrafts.length} 条草稿已过期`),
+              el('strong', `${expiredDrafts.length} 条草稿已过期（未发送）`),
               el('span', '超过 30 分钟没批就作废，不会发出去。还想发就让她重新提一次。'),
             );
+            for (const d of expiredDrafts) {
+              box.append(el('span', `${d.preview} · 未发送 · 已过期`, 'stroll-expired-item'));
+            }
             draftBox.append(box);
           }
           if (!drafts.length) {

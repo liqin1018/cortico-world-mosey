@@ -211,13 +211,7 @@ export class Store {
 
   addDraft(draft) {
     // 超时的旧草稿标 expired，不物理删除：删了面板就「凭空少一条」，主人和鱼对不上账
-    const now = Date.now();
-    for (const d of this.data.drafts) {
-      if (d.status === 'pending' && now - Date.parse(d.createdAt) >= DRAFT_TTL_MS) {
-        d.status = 'expired';
-        d.expiredAt = new Date().toISOString();
-      }
-    }
+    this.expireDueDrafts();
     const item = {
       id: randomCode('draft'),
       status: 'pending',
@@ -228,11 +222,31 @@ export class Store {
     return item;
   }
 
+  /**
+   * 把所有超过 30 分钟还没批的 pending 草稿标成 expired。
+   *
+   * 这是唯一改状态的入口：创建、查询、审批、tick 通知都走它，
+   * 避免有的路径看到「过期」、有的路径还当 pending。
+   */
+  expireDueDrafts(now = Date.now()) {
+    const out = [];
+    for (const d of this.data.drafts) {
+      if (d.status !== 'pending') continue;
+      const at = Date.parse(d.createdAt ?? '');
+      if (!Number.isFinite(at) || now - at < DRAFT_TTL_MS) continue;
+      d.status = 'expired';
+      d.expiredAt = new Date(now).toISOString();
+      out.push(d);
+    }
+    return out;
+  }
+
   draft(id) {
     return this.data.drafts.find((d) => d.id === id) ?? null;
   }
 
   pendingDrafts() {
+    this.expireDueDrafts();
     const now = Date.now();
     return this.data.drafts
       .filter((d) => d.status === 'pending' && now - Date.parse(d.createdAt) < DRAFT_TTL_MS)
@@ -244,18 +258,19 @@ export class Store {
    *
    * 面板拿它显示「N 条已过期，要重发」——以前这批草稿是静默消失的，
    * 主人只知道「刚才明明看到一条」，鱼那边还以为在等审批。
-   * 包含还没被 addDraft 标 expired、但实际已经超时的 pending。
+   * 先把实际已经超时的 pending 标成 expired，再返回最近几条。
    */
   expiredDrafts(limit = 5) {
+    this.expireDueDrafts();
     const now = Date.now();
     return this.data.drafts
-      .filter((d) => d.status === 'expired'
-        || (d.status === 'pending' && now - Date.parse(d.createdAt) >= DRAFT_TTL_MS))
+      .filter((d) => d.status === 'expired')
       .slice(-limit)
       .reverse()
       .map((d) => ({
         ...d,
         status: 'expired',
+        sent: false,
         expiredSec: Math.round((now - Date.parse(d.expiredAt ?? d.createdAt)) / 1000),
       }));
   }

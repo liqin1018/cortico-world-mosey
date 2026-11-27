@@ -389,7 +389,7 @@
 
 - 原子写：`state.json.tmp` → rename。
 - 裁剪：动作 300、草稿 30、seen 2500、usage 90 天、周 26 周。
-- 草稿 30 分钟过期：`store.expireDueDrafts()` 标 `expired`，保留 3 天，不物理删除；面板、`history/status/brief` 可见，并推 `stroll.draft_expired`。
+- 创建时按 `draftTtlMinutes`（默认 30，范围 30–1440）写入 `expiresAt`；旧草稿无该字段时仍按创建后 30 分钟计算。`store.expireDueDrafts()` 到期标 `expired`，保留最多 3 天，面板、`history/status/brief` 可见，并推 `stroll.draft_expired`。
 
 ---
 

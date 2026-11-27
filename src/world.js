@@ -3,12 +3,13 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store, DRAFT_TTL_MS } from './store.js';
+import { Store } from './store.js';
 import { Policy, approvalFor, clampText } from './policy.js';
 import { Bilibili } from './bilibili.js';
-import { DouyinBrowser, secUidOf, stripLeadingFakeAt } from './douyin.js';
+import { openWatchRoom, readWatchRoom, roomStartLink, roomVideo, watchGuest } from './watch-room.js';
+import { DouyinBrowser, secUidOf, stripLeadingFakeAt, stripRowTime } from './douyin.js';
 import { StickerBook } from './stickers.js';
-import { TOOL_DECLS } from './tools.js';
+import { activeToolDecls, BILI_READ_ACTIONS, DY_READ_ACTIONS, DY_WRITE_ACTIONS, LOCAL_READ_ACTIONS } from './tools.js';
 import { CONFIG_GROUPS, DEFAULTS, validatePolicyPatch } from './config.js';
 import {
   cutChars,
@@ -97,28 +98,6 @@ function looksLikePath(s) {
 }
 
 /**
- * 昵称里如果黏着列表上的相对时间（「小鹿 刚刚」「小鹿 9分钟前」），把它剥掉。
- * 旧版本把这种名字写进了 state.json，不清掉的话：
- * 名字每分钟变一次 → 找不到会话 → 发送走最慢的兜底（实测 9 秒）。
- */
-function stripRowTime(name) {
-  /**
-   * 去掉会话名后面的相对时间，得到稳定的「昵称」。
-   *
-   * 2026-11-14 漏了「周六 / 周二」这种写法——抖音列表里用的是「周X」，
-   * 而不是「星期X」，于是 `douyin:海底月 周六` 和 `douyin:海底月` 变成两个键，
-   * 同一个人的消息被当成「新陌生人」反复推送（第十几遍那种）。
-   * 顺手把「今天」「昨天 10:39」这类组合也吃掉。
-   */
-  return String(name ?? '')
-    .replace(
-      /\s+(刚刚|今天|昨天|前天|周[一二三四五六日天]|星期[一二三四五六日天]|\d{1,2}-\d{1,2}|\d{1,2}:\d{2}|\d+\s*(?:秒|分钟|小时|天)前)(\s+\d{1,2}:\d{2})?$/,
-      '',
-    )
-    .trim();
-}
-
-/**
  * 把记录里的 `at` 转成毫秒。
  *
  * `store.addAction` 写的是 **ISO 字符串**（`2026-11-06T16:11:13.327Z`），
@@ -154,6 +133,10 @@ const ACTIVITY_PRESETS = {
   chatty: { label: '话痨', dailyLikes: 24, dailyComments: 10, dailyFollows: 5, dailyPosts: 3, dailyPostsDouyin: 3, dailySaves: 10, autoSessionsPerDay: 8, autoGapMinutes: 60, tokenDailyBudget: 15000 },
 };
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
+const ENV_SECTIONS = Object.fromEntries(['SOCIAL', 'BILIBILI', 'DOUYIN'].map((name) => [name.toLowerCase(),
+  fs.readFileSync(new URL(`./ENV_${name}.md`, import.meta.url), 'utf8').trim(),
+]));
+const BILI_REPLY_WINDOW_MS = 7 * 86400000;
 
 export class StrollWorld {
   constructor({ cfg, timezone, dataDir, persist, log }) {
@@ -194,6 +177,8 @@ export class StrollWorld {
     this.lastImportAt = 0;
     this.lastOpen = null;
     this.inboxCache = [];
+    this.biliReplyNotices = new Map();
+    this.biliRepliesSending = new Set();
     this._dyInbox = null;
     this._dyInboxAt = 0;
     this._cfgLive = null;
@@ -204,6 +189,9 @@ export class StrollWorld {
     this.presence = null;
     this.lastPresenceNotify = 0;
     this.watch = null;
+    this.watchRoom = null;
+    this.watchViewer = crypto.randomBytes(12).toString('hex');
+    this.watchChanging = false;
     /** 一起刷的会话状态：当前视频、进入时间、刷了几条、看过哪些 */
     this.watchScrollState = null;
     this.watchBusy = false;
@@ -497,13 +485,13 @@ export class StrollWorld {
 
   async stop() {
     this.running = false;
+    clearInterval(this.biliLoginTimer);
+    this.biliLoginTimer = null;
+    this.watchChanging = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.stopDmWatch();
-    this.stopWatchTimer();
-    // 世界停了就别留着「正在一起看」，不然面板/status 会一直显示在看
-    this.watch = null;
-    this.watchScrollState = null;
+    await this.watchStop();
     await this.douyin.close().catch(() => {});
     this.store.save();
   }
@@ -526,9 +514,11 @@ export class StrollWorld {
   }
 
   async tick(now = Date.now()) {
+    this.liveConfig();
     if (!this.running || !this.cfg.enabled) return;
     // 草稿过期是系统回执，不依赖「自己出门」开关；安静时段由 notify 自己延后
     await this.notifyExpiredDrafts(now);
+    if (!this.pickPlatform()) return;
     // 「自动出门」总开关：关掉就彻底不催（主人手动点单不受影响）
     if (this.cfg.autoOuting === false) return;
     const hour = hourOf(new Date(now), this.timeZone);
@@ -567,7 +557,7 @@ export class StrollWorld {
        * 还堆着一批草稿等你点头：先别出去。
        * 「等我批准」模式下草稿不涨额度，不拦的话她会一趟趟出去、草稿越堆越多。
        */
-      if (this.store.pendingDrafts().length >= 8) return;
+      if (this.store.pendingDrafts().filter((draft) => !this.platformOff(draft.platform)).length >= 8) return;
       gap = this.autoGapMs();
     } else {
       // 按次数：次数用完就收工；额度仍然拦每个动作
@@ -621,7 +611,7 @@ export class StrollWorld {
   }
 
   /**
-   * 草稿超过 30 分钟没批：作废并主动告诉鱼一次。
+   * 草稿到期没批：作废并主动告诉鱼一次。
    *
    * 以前只有面板能看到「已过期」，鱼查 history/status 时什么都没有，
    * 于是它只能说「那条评论不见了」。这里把同一批过期草稿合成一条事件，
@@ -636,7 +626,7 @@ export class StrollWorld {
     // 不在安静时段叫醒主人/模型；延后到下一次活跃 tick
     if (this.policy.isQuiet()) return false;
     const unnotified = (this.store.data.drafts ?? []).filter(
-      (d) => d.status === 'expired' && !d.expiredNotifiedAt,
+      (d) => d.status === 'expired' && !d.expiredNotifiedAt && !this.platformOff(d.platform),
     );
     if (!unnotified.length) return false;
 
@@ -648,7 +638,7 @@ export class StrollWorld {
         : '';
     const ok = await this.push(
       'stroll.draft_expired',
-      `有 ${unnotified.length} 条待批草稿超过 30 分钟，已作废、**没有发送**：\n${lines}${more}\n如果还想发，让主人重新提一次；不要自己重发，也不要告诉主人“已提交待审批”。`,
+      `有 ${unnotified.length} 条待批草稿已到期，已作废、**没有发送**：\n${lines}${more}\n如果还想发，让主人重新提一次；不要自己重发，也不要告诉主人“已提交待审批”。`,
       { kind: 'DRAFT_EXPIRED', count: unnotified.length, ids: unnotified.map((d) => d.id), sent: false },
       'flush',
     );
@@ -700,7 +690,10 @@ export class StrollWorld {
        * （2026-11-14 用户发现：应该显示 5/31）。
        */
       .flatMap((key) => (key === 'post' ? ['post:bilibili', 'post:douyin'] : [key]))
-      .filter((key) => this.canAct(String(key).split(':')[0]));
+      .filter((key) => {
+        const [action, platform] = key.split(':');
+        return (!platform || !this.platformOff(platform)) && this.canAct(action);
+      });
     if (wanted.length) return wanted;
     // 没勾必做（或者勾了但都做不了）：退回全部主动额度，不然额度模式会永远不出门
     return ['like', 'comment', 'follow', 'post', 'save'].filter((key) => this.canAct(key));
@@ -708,7 +701,8 @@ export class StrollWorld {
 
   /** 这个动作现在还有没有可能做成：开关关掉、只读模式就不算目标。 */
   canAct(key) {
-    if (this.cfg.approval === 'dry_run') return false;
+    if (!this.pickPlatform() || this.cfg.approval === 'dry_run') return false;
+    if (key === 'save' && this.platformOff('bilibili')) return false;
     if (key === 'follow') {
       if (!this.cfg.allowFollow) return false;
       // 两个平台都关注不了才算做不了：B站关掉、抖音关注方式也关掉
@@ -765,7 +759,8 @@ export class StrollWorld {
       ['post', '发动态', 'mustPost', 'dailyPosts', '条'],
     ];
     return items
-      .filter(([, , flag]) => this.cfg[flag] === true)
+      .filter(([action, , flag]) => this.pickPlatform() && this.cfg[flag] === true &&
+        (action !== 'group' || !this.platformOff('douyin')))
       .map(([action, label, , quotaKey, unit]) => {
         /**
          * 动态按平台分了额度（dailyPosts / dailyPostsDouyin，用量记在 post:bilibili / post:douyin）。
@@ -776,11 +771,11 @@ export class StrollWorld {
           // 动态和评论都按平台分了额度：面板显示「两边加起来」
           const first = action === 'post' ? 'dailyPosts' : 'dailyComments';
           const second = action === 'post' ? 'dailyPostsDouyin' : 'dailyCommentsDouyin';
-          const need =
-            Math.max(0, Number(this.cfg[first] ?? 0)) + Math.max(0, Number(this.cfg[second] ?? 0));
+          const need = (this.platformOff('bilibili') ? 0 : Math.max(0, Number(this.cfg[first] ?? 0))) +
+            (this.platformOff('douyin') ? 0 : Math.max(0, Number(this.cfg[second] ?? 0)));
           const done =
-            Number(usage[`${action}:bilibili`] ?? 0) +
-            Number(usage[`${action}:douyin`] ?? 0) +
+            (this.platformOff('bilibili') ? 0 : Number(usage[`${action}:bilibili`] ?? 0)) +
+            (this.platformOff('douyin') ? 0 : Number(usage[`${action}:douyin`] ?? 0)) +
             Number(usage[action] ?? 0);
           return { action, label, unit, need, done, left: Math.max(0, need - done) };
         }
@@ -887,13 +882,13 @@ export class StrollWorld {
    * 页面里的 MutationObserver 一变就回调 onDouyinPoke。
    */
   async armDmPush() {
-    if (this.dmArmBusy) return;
+    if (this.dmArmBusy || this.platformOff('douyin')) return;
     const owner = this.douyinOwner();
     if (!owner.secUid) return;
     this.dmArmBusy = true;
     try {
       const name = owner.name || (await this.douyinOwnerName().catch(() => ''));
-      if (!name) return;
+      if (!name || this.platformOff('douyin')) return;
       // 不在这里判「已经挂好了」：watchDm 自己会判断，而且它还要把回调换成最新的这个
       const res = await this.douyin.watchDm(name, (messages) => this.onDouyinPoke(messages, name)).catch(() => null);
       if (res?.ok) {
@@ -1467,54 +1462,67 @@ export class StrollWorld {
     }
   }
 
-  /**
-   * 评论区有人回复了她的评论：推给她。
-   *
-   * 2026-11-15 用户指出：B站楼中楼里的新留言她收不到推送。
-   * 轮询里原本只有 pushDm（私信）和 pushMentions（@），
-   * 「谁回复了我的评论」这一路从来没接过——她只能自己调 inbox 去查，自然不会一直查。
-   */
-  /**
-   * 从某一层楼里挑出「这次该回谁」。
-   *
-   * 2026-11-15：这套逻辑原来只写在「通知带了 root」那条路上；
-   * 另一条路（reply_to 有、root 为空，走 findReply 定位 root）直接
-   * parent = found.rpid —— 而那个 rpid 往往就是她自己的评论，
-   * 结果又变成「回复 @ 了自己」。两条路都走这里，就不会再有一套「不挑人」的。
-   *
-   * 返回 { parent, name, kids } 或 null（这层里找不到该回的人）。
-   */
-  async pickReplyParent(oid, root) {
-    const kids = await this.bili.replyChildren(oid, root, 20).catch(() => []);
-    // 「我自己是谁」优先用缓存：nav() 偶发失败会让 mine 为空，排不掉自己就只能挂回 root
-    let mine = String(this.store?.data?.selfBiliMid ?? '');
-    if (!mine) {
-      const nav = await this.bili.nav().catch(() => null);
-      mine = String(nav?.mid ?? '');
-      if (mine) {
-        this.store.data.selfBiliMid = mine;
-        this.store.save();
+  biliReplyHint(item) {
+    if (!item.reply_notice_id || !(item.bvid || item.dynamicId || item.cvid)) {
+      return '无法确认这条通知对应的评论，不要猜目标或另发新评论。';
+    }
+    this.biliReplyNotices.set(item.reply_notice_id, item);
+    if (this.biliReplyNotices.size > 32) this.biliReplyNotices.delete(this.biliReplyNotices.keys().next().value);
+    return `回他：stroll_act action=reply platform=bilibili reply_notice_id=${item.reply_notice_id} text=…（正文不用另写 @）`;
+  }
+
+  async resolveBiliReply(type, oid, options) {
+    const anchor = await this.bili.findReplyAnchor(type, oid, options).catch(() => null);
+    if (anchor) this.log?.info?.('stroll reply anchor', { ...anchor, noticeId: options.notice?.reply_notice_id });
+    else this.log?.info?.('stroll reply target not confirmed', { oid, root: options.root, noticeId: options.notice?.reply_notice_id });
+    return anchor;
+  }
+
+  biliReplyKey({ commentType, oid, parent }) {
+    return oid && parent ? `bilibili:reply:rpid:${commentType}:${oid}:${parent}` : '';
+  }
+
+  biliReplyBlock(plan, draftId = '') {
+    const noticeId = plan.reply_notice_id;
+    const key = this.biliReplyKey(plan);
+    if (!noticeId && !key) return null;
+    const now = Date.now();
+    const recent = (at) => at && now - at < BILI_REPLY_WINDOW_MS;
+    const seen = this.store.data.seen;
+    const noticeKey = noticeId && `bilibili:reply_notice:${noticeId}`;
+    let repliedAt = Math.max(this.store.seenAt(noticeKey), this.store.seenAt(key));
+    if (!recent(repliedAt) && key) {
+      const targets = plan.commentType === 1 ? [plan.target, `av${plan.oid}`] : [plan.target];
+      const oldKeys = targets.map((target) => `bilibili:reply:${target}:r${plan.parent}`);
+      for (const oldKey of Object.keys(seen)) {
+        if (oldKeys.some((prefix) => oldKey === prefix || oldKey.startsWith(`${prefix}:`))) {
+          repliedAt = Math.max(repliedAt, seen[oldKey]);
+        }
       }
     }
-    if (!mine) return null;
-    // 按 ctime 排序，别依赖接口返回顺序
-    const notSelf = kids
-      .filter((r) => r.rpid && r.mid && r.mid !== mine)
-      .sort((a, b) => Number(a.ctime ?? 0) - Number(b.ctime ?? 0));
-    // 「正文里提到我」只用来优先，不能用来排除（筛空会让 parent 掉回 root）
-    const myName = String((await this.bili.nav().catch(() => null))?.uname ?? '').trim();
-    const byName = myName ? notSelf.filter((r) => String(r.text ?? '').includes(myName)) : [];
-    const others = byName.length ? byName : notSelf;
-    // 外人优先：主人在旁边说话不算「需要回的外人」
-    const ownerMid = String(this.ownerId('bilibili') ?? this.cfg.biliUid ?? '').trim();
-    const outsiders = ownerMid ? others.filter((r) => String(r.mid) !== ownerMid) : others;
-    const pool = outsiders.length ? outsiders : others;
-    const theirs = pool.length ? pool[pool.length - 1] : null;
-    return theirs ? { parent: theirs.rpid, name: theirs.name ?? '', kids: kids.length } : null;
+    if (recent(repliedAt)) {
+      if (noticeKey && seen[noticeKey] !== repliedAt) {
+        seen[noticeKey] = repliedAt;
+        this.store.saveSoon();
+      }
+      return { ok: false, code: 'DUPLICATE', sent: false, error: '这条 B站评论已经回复过，未重复发送。' };
+    }
+    this.store.expireDueDrafts(now);
+    const pending = this.store.data.drafts.find((draft) => draft.id !== draftId &&
+      draft.action === 'reply' && draft.platform === 'bilibili' && draft.biliReplyTargetVerified &&
+      (draft.status === 'sending' || (!draftId && draft.status === 'pending')) &&
+      ((noticeId && draft.reply_notice_id === noticeId) || (key && this.biliReplyKey(draft) === key)));
+    if (pending || this.biliRepliesSending.has(key)) {
+      return {
+        ok: false, code: 'REPLY_PENDING', sent: false, draftId: pending?.id,
+        error: '这条 B站评论已有回复待审批或正在发送，不要重复提交。',
+      };
+    }
+    return null;
   }
 
   async pushReplies() {
-    if (!this.cfg.bilibili) return;
+    if (this.platformOff('bilibili')) return;
     const items = await this.bili.inbox(8).catch(() => []);
     /**
      * reply 和 at 一起走这条快通道（5 秒一轮）。
@@ -1535,15 +1543,6 @@ export class StrollWorld {
     for (const x of fresh) this.store.markSeen(`atpush:${x.id}`);
     this.store.save();
     const lines = fresh.slice(0, 3).map((x, i) => {
-      const target = x.bvid
-        ? `https://www.bilibili.com/video/${x.bvid}`
-        : x.dynamicId
-          ? `https://t.bilibili.com/${x.dynamicId}`
-          : x.url;
-      // '0' 是真值，必须显式排除，否则她拿到的 reply_to 是 0（2026-11-15）
-      const cand = [x.replyTo, x.rpid, x.rootRpid].map((v) => String(v ?? '').trim());
-      const replyTo = cand.find((v) => v && v !== '0') || '';
-      const rootArg = x.rootRpid && x.rootRpid !== '0' ? ` root=${x.rootRpid}` : '';
       /**
        * 别用 whenOf —— 那是 pushMentions 里的局部函数，这里拿不到。
        * 2026-11-15：写第一版时直接调了它，推送每次抛 ReferenceError 被 catch 吞掉，
@@ -1555,8 +1554,7 @@ export class StrollWorld {
         `   视频：${x.where || '（没读到标题）'}\n` +
         `   他说：${x.text}${x.quote ? `\n   他在回的那条：${x.quote}` : ''}\n` +
         `   链接：${x.url}\n` +
-        `   回他：stroll_act action=reply target=${target} reply_to=${replyTo}${rootArg} text=…\n` +
-        '   正文里不用再写 @他，B站会自动带上。'
+        `   ${this.biliReplyHint(x)}`
       );
     });
     this.log?.info?.('stroll reply push', { n: fresh.length, ids: fresh.map((x) => x.id) });
@@ -1839,11 +1837,6 @@ export class StrollWorld {
           `   ${replyHint}`
         );
       }
-      const target = x.bvid
-        ? `https://www.bilibili.com/video/${x.bvid}`
-        : x.dynamicId
-          ? `https://t.bilibili.com/${x.dynamicId}`
-          : x.url;
       const isReply = x.source === 'reply';
       const head = isReply
         ? `${i + 1}. ${x.user || '有人'} 回复了你的评论（${whenOf(stampOf(x)) || '时间不明'}）`
@@ -1851,30 +1844,7 @@ export class StrollWorld {
       const where = `   视频：${x.where || '（没读到标题）'}`;
       const body = `   评论：${x.text}`;
       const quote = x.quote ? `\n   他在回的那条：${x.quote}` : '';
-      /**
-       * 回复用 target_id（他说的那句），不是 source_id（我那条被回复的）。
-       * 同时把 root 一起给她：楼中楼里对方那条可能不在评论区前 80 条，
-       * 带着 root 就能跳过「翻页找评论」那一步。
-       */
-      /**
-       * 注意 `'0'` 是真值。
-       *
-       * 2026-11-15：x.replyTo 取的是 msg.root_id，没值时是字符串 '0'，
-       * `x.replyTo || x.rpid` 会直接选中这个 '0'，推送里就成了 `reply_to=0`。
-       * 她拿到 0 只能靠 root 参数跳过查找，表现出来就是「我没拿到这条的 id」。
-       * 这里挑第一个「有值且不是 '0'」的，实在没有就给 root（同一条主评论）。
-       */
-      const replyCandidates = [x.replyTo, x.rpid, x.rootRpid].map((v) => String(v ?? '').trim());
-      const replyTo = replyCandidates.find((v) => v && v !== '0') || '';
-      const rootArg = x.rootRpid && x.rootRpid !== '0' ? ` root=${x.rootRpid}` : '';
-      /**
-       * B站不提供「他那条评论的 rpid」，只能挂回主评论下面。
-       * 想让对方收到通知，正文必须自己写 @昵称——这一点得明确告诉她，
-       * 否则她会以为「回了就是回了」，对方其实收不到（2026-11-14）。
-       */
-      // parent 已经精确到对方那条，B站会自动加「回复 @xxx」前缀，正文别再写一遍（2026-11-14 实测重复 @）
-      const atHint = isReply ? '\n   正文里不用再写 @他，B站会自动带上。' : '';
-      return `${head}\n${where}\n${body}${quote}${atHint}\n   链接：${x.url}\n   回他：stroll_act action=reply target=${target} reply_to=${replyTo}${rootArg} text=…`;
+      return `${head}\n${where}\n${body}${quote}\n   链接：${x.url}\n   ${this.biliReplyHint(x)}`;
     });
     const platforms = [...new Set(picked.map((x) => x.platform))];
     const label = platforms.length === 1 ? (platforms[0] === 'douyin' ? '抖音' : 'B站') : 'B站/抖音';
@@ -1890,6 +1860,7 @@ export class StrollWorld {
 
   /** 把「主人发私信了」这件事推给她。攒一批一起推，别一条一条地叫。 */
   async pushDm(fresh) {
+    fresh = fresh?.filter((item) => !this.platformOff(item.platform));
     if (!fresh?.length) return false;
     // 主人在私信里说话了：接下来的回话对象是主人，不再是群
     this.lastGroupPoke = null;
@@ -1914,7 +1885,7 @@ export class StrollWorld {
       : null;
     // 收到的图已存到本地：告诉她文件名，想转发时才能用 action=image file=<名字>
     const savedLine = blobs?.saved?.length
-      ? `\n图已存到本地：${blobs.saved.map((f) => f.name).join('、')}（要转发就用 stroll_act action=image file=<这个名字>）`
+      ? `\n图已存到本地：${blobs.saved.map((f) => f.name).join('、')}${this.platformOff('douyin') ? '' : '（要转发就用 stroll_act action=image file=<这个名字>）'}`
       : '';
     /**
      * 消息里带 B站链接时，别再让她「别查」——那样她只会干巴巴回一句「打不开」。
@@ -1924,7 +1895,7 @@ export class StrollWorld {
      * 直接回「b23.tv 我这边过不去」。指令和内容打架，她只能选指令。
      */
     const said = lines.join(' ');
-    const hasBiliLink = /b23\.tv\/|(?:www\.)?bilibili\.com\/video\/|BV[0-9A-Za-z]{10}/.test(said);
+    const hasBiliLink = !this.platformOff('bilibili') && /b23\.tv\/|(?:www\.)?bilibili\.com\/video\/|BV[0-9A-Za-z]{10}/.test(said);
     /**
      * 表情/图片没拿到画面时必须明说。
      *
@@ -2088,8 +2059,11 @@ export class StrollWorld {
 
   /** 面板点「让她回」：推一条事件让她发，条目从待办里消失。 */
   async approveStranger(id) {
+    this.liveConfig();
     const item = (this.store.data.strangerPending ?? []).find((x) => x.id === id);
     if (!item || item.status !== 'pending') return { ok: false, error: '这条已经处理过了。' };
+    const off = this.platformOff(item.platform);
+    if (off) return off;
     const target = item.uid || item.who;
     const plat = PLATFORM_NAMES[item.platform] ?? item.platform;
     const ok = await this.push(
@@ -2464,7 +2438,7 @@ export class StrollWorld {
       .filter((k) => k.startsWith('douyin:'))
       .map((k) => stripRowTime(k.slice('douyin:'.length)))
       .filter((who) => !this.looksLikeKnownGroup(who, groups));
-    return this.matchStranger(list, wanted);
+    return this.matchStranger(list, stripRowTime(wanted));
   }
 
   /** 按名字在陌生人名单里找人：整串相等优先，其次唯一的包含命中。 */
@@ -2504,7 +2478,7 @@ export class StrollWorld {
         typeof this.douyin.findStranger === 'function'
           ? await this.douyin.findStranger(wanted).catch(() => null)
           : null;
-      who = String(found?.who ?? '').trim();
+      who = stripRowTime(found?.who);
     }
     if (!who) return { ok: false };
     return this.strangerGuard(who);
@@ -2681,6 +2655,7 @@ export class StrollWorld {
 
   /** 抖音：主人那条没变化时，也扫一眼会话列表看有没有陌生人。 */
   async checkDouyinStrangers(ownerName = '') {
+    if (this.platformOff('douyin')) return;
     if (this.strangerDmPolicy().mode === 'off') return;
     if (!this.douyin.dmPage) return;
     // 安静时段不叫她：陌生人不像主人，没必要半夜把人吵起来
@@ -2779,10 +2754,12 @@ export class StrollWorld {
     // 群名这时可能还没识别出来（刚启动）：认得出的群一律不算陌生人，
     // 否则群会话会被写进陌生人名单，后面「target=群名」还会认错人
     const knownGroups = this.groupNames();
-    const seen = this.store.data.strangerSeen ?? {};
-    const seenAt = this.store.data.strangerSeenAt ?? {};
+    const seen = (this.store.data.strangerSeen ??= {});
+    const seenAt = (this.store.data.strangerSeenAt ??= {});
     let dirty = false;
-    for (const row of list) {
+    for (const entry of list) {
+      const row = { ...entry, who: stripRowTime(entry.who) };
+      if (!row.who) continue;
       /**
        * 「看到了但没推」要能查。
        *
@@ -2797,16 +2774,8 @@ export class StrollWorld {
           ...(extra ? { hit: truncate(String(extra), 24) } : {}),
         });
       if (!row.preview || /^\d+分钟内在线$|^在线$/.test(row.preview)) continue;
-      /**
-       * 会话名后面常挂相对时间（「海底月 昨天」→「海底月 10:39」），必须洗掉再用。
-       *
-       * 以前 key 直接用 row.who，时间一过 key 就变 → 同一个陌生人被当成新的 →
-       * 每变一次推一次，正是「海底月一直弹、回了五条还在弹」（2026-11-14）。
-       * 读取那边（recentStrangers）早就 stripRowTime 了，写入这边漏了。
-       */
-      const whoKey = stripRowTime(row.who);
-      if (this.looksLikeKnownGroup(whoKey, knownGroups)) continue;
-      const key = `douyin:${whoKey}`;
+      if (this.looksLikeKnownGroup(row.who, knownGroups)) continue;
+      const key = `douyin:${row.who}`;
       /**
        * 指纹只用正文，**不带时间**。
        * 以前是 `at|preview`，而 at 是「9分钟前 / 刚刚」这种相对文案——
@@ -2838,7 +2807,7 @@ export class StrollWorld {
         continue;
       }
       // 第一次见到、而且是很久以前的：只记基线，别把攒了几天的私信全推
-      if (first && /^昨天$|^前天$|^星期|^\d+\s*(?:小时|天)前$/.test(row.at)) {
+      if (first && /^(?:昨天|前天|\d+\s*(?:小时|天)前)(?:\s+\d{1,2}:\d{2})?$|^(?:周|星期)[一二三四五六日天]/.test(row.at)) {
         skip('old');
         continue;
       }
@@ -2951,6 +2920,7 @@ export class StrollWorld {
 
   /** B站：会话列表里非主人的未读会话。传了 sessions 就复用，省一次请求。 */
   async checkBiliStrangers(given = null, givenOwner = '') {
+    if (this.platformOff('bilibili')) return;
     if (this.strangerDmPolicy().mode === 'off') return;
     const ownerUid = String(givenOwner || this.ownerId('bilibili'));
     const sessions = given?.length ? given : await this.bili.dmSessions(20, { fresh: true }).catch(() => []);
@@ -2984,7 +2954,7 @@ export class StrollWorld {
   }
 
   async onDouyinPoke(messages, name) {
-    if (!this.running || !this.dmWatchOn()) return;
+    if (!this.running || !this.dmWatchOn() || this.platformOff('douyin')) return;
     const paused = this.policy.paused();
     const soft = paused.paused && /-509|-412|429|频繁|rate/i.test(String(paused.reason ?? ''));
     if (paused.paused && !soft) return;
@@ -3127,6 +3097,7 @@ export class StrollWorld {
 
   async push(type, text, meta = {}, trigger = 'debounce', blobs = null) {
     if (!this.host) return false;
+    if (Object.hasOwn(PLATFORM_NAMES, meta.platform) && this.platformOff(meta.platform)) return false;
     try {
       const event = {
         type,
@@ -3301,6 +3272,7 @@ export class StrollWorld {
     const blobs = [];
     const files = [];
     for (const url of list) {
+      if (this.platformOff(platform)) break;
       let bytes = null;
       if (url.startsWith('data:image/')) {
         // 页面里直读出来的 dataURL（blob 图走的就是这条路）
@@ -3416,6 +3388,7 @@ export class StrollWorld {
       }
       return;
     }
+    const wasDouyin = !this.platformOff('douyin');
     const changed = [];
     for (const [k, v] of Object.entries(disk)) {
       const before = this.cfg[k];
@@ -3431,7 +3404,35 @@ export class StrollWorld {
       this.log?.info?.('stroll config live', { changed: changed.slice(0, 8), total: changed.length });
       // 监听开关可能刚被改：让 dmBeat 重新决定要不要挂/收页面
       this._cfgLive = disk;
+      const stopBiliLogin = this.biliLoginTimer && this.platformOff('bilibili');
+      if (stopBiliLogin) {
+        clearInterval(this.biliLoginTimer);
+        this.biliLoginTimer = null;
+        if (!this.platformOff('douyin')) this.douyin.closeLoginPage().catch(() => {});
+      }
+      const useDouyin = !this.platformOff('douyin');
+      if (!wasDouyin && useDouyin) {
+        this.dmArmAt = 0;
+        this.dmArmFails = 0;
+        this.douyin.keepWarm(this.dmWatchOn(disk));
+      }
+      if (!useDouyin && (wasDouyin || stopBiliLogin)) {
+        this.douyin.keepWarm(false);
+        this._dyInbox = null;
+        if (!this.biliLoginTimer) this.douyin.close({ keepWatch: true }).catch(() => {});
+      }
+      if (this.watch?.platform && this.platformOff(this.watch.platform)) this.watchStop().catch(() => {});
+      if (this.presence?.platform && this.platformOff(this.presence.platform)) this.presence = null;
     }
+  }
+
+  platformOff(platform) {
+    if (this.cfg.enabled === false) return { ok: false, code: 'DISABLED', sent: false, error: '摸鱼已停用。' };
+    if (Object.hasOwn(PLATFORM_NAMES, platform)) {
+      return this.cfg[platform] === false ? { ok: false, code: 'PLATFORM_OFF', sent: false, error: `${PLATFORM_NAMES[platform]}已停用。` } : null;
+    }
+    if (platform === 'web' && (this.cfg.bilibili !== false || this.cfg.douyin !== false)) return null;
+    return { ok: false, code: 'PLATFORM_OFF', sent: false, error: '未启用可用平台。' };
   }
 
   /** 主人的账号：优先读磁盘上最新的那份，读不到再用内存里的。 */
@@ -3512,11 +3513,12 @@ export class StrollWorld {
   ownerLine() {
     const bili = this.ownerId('bilibili');
     const dy = this.douyinOwner();
-    const bits = [
+    const bits = this.platformOff('bilibili') ? [] : [
       bili
         ? `B站主人已绑（UID ${bili}${this.cfg.ownerName ? `，${this.cfg.ownerName}` : ''}）`
         : 'B站主人没绑（B站 @ 和私信要用）',
     ];
+    if (this.platformOff('douyin')) return bits.join('；');
     if (dy.bound) {
       bits.push(
         `抖音主人已绑（sec_uid …${dy.secUid.slice(-8)}${dy.name ? `，${dy.name}` : ''}）${dy.sameAsSelf ? '；注意：这个号就是她现在登录的抖音号，抖音不能给自己发私信' : ''}`,
@@ -3597,11 +3599,16 @@ export class StrollWorld {
   }
 
   envPromptVars() {
+    this.liveConfig();
+    if (this.cfg.enabled === false) return null;
+    const bilibili = !this.platformOff('bilibili');
+    const douyin = !this.platformOff('douyin');
     const owner = this.ownerLine();
     const identity = this.lastStatus
-      ? `B站 ${this.lastStatus.bili?.loggedIn ? this.lastStatus.bili.name || '已登录' : '未登录'}；抖音 ${this.lastStatus.douyin?.loggedIn ? '已登录' : '未登录/未开'}`
+      ? [bilibili && `B站 ${this.lastStatus.bili?.loggedIn ? this.lastStatus.bili.name || '已登录' : '未登录'}`,
+        douyin && `抖音 ${this.lastStatus.douyin?.loggedIn ? '已登录' : '未登录'}`].filter(Boolean).join('；')
       : '还没查登录态';
-    const watchLine = this.watch
+    const watchLine = this.watch && !this.platformOff(this.watch.platform)
       ? `正在和主人一起看《${truncate(this.watch.title || this.watch.url, 40)}》${this.watch.last?.time != null ? `（${this.watch.last.time}s）` : ''}`
       : '没在一起看';
     const commentCap = this.policy.cap('comment').daily;
@@ -3615,7 +3622,8 @@ export class StrollWorld {
             : '安静：只看看，不主动评论';
     const present = this.presenceView();
     const book = this.bookView();
-    return {
+    const last = this.store.lastActions(24).find(({ platform }) => !this.platformOff(platform));
+    const vars = {
       'stroll.summary': this.policy.summary(),
       'stroll.activity': activity,
       'stroll.books': book.current
@@ -3623,25 +3631,33 @@ export class StrollWorld {
         : book.empty
           ? '书库是空的（把 txt 放进面板上显示的那个目录）'
           : '书库有书，但还没开始读',
-      'stroll.presence': present
+      'stroll.presence': present && !this.platformOff(present.platform)
         ? `正在${present.platform === 'douyin' ? '抖音' : 'B站'}看《${truncate(present.title || present.url, 40)}》`
         : '现在没在看',
       'stroll.watch': watchLine,
       'stroll.identity': identity,
       'stroll.owner': owner,
-      'stroll.platforms': `${this.cfg.bilibili ? 'B站开' : 'B站关'}，${this.cfg.douyin ? '抖音开' : '抖音关'}`,
+      'stroll.platforms': [bilibili && 'B站', douyin && '抖音'].filter(Boolean).join('和'),
       'stroll.interests': this.cfg.interests || this.store.topInterests(6).join('、') || '还没填',
-      'stroll.last': this.store.lastActions(1)[0]
-        ? `${this.store.lastActions(1)[0].platform} ${this.store.lastActions(1)[0].action} ${this.store.lastActions(1)[0].result}`
+      'stroll.last': last
+        ? `${last.platform} ${last.action} ${last.result}`
         : '还没出过门',
       'stroll.approval': { confirm: '全部等主人批准', auto_low_risk: '点赞自动，其余等批准', auto_all: '按额度自动', dry_run: '只读' }[this.cfg.approval] ?? this.cfg.approval,
+    };
+    return {
+      ...vars,
+      'stroll.social': bilibili || douyin ? ENV_SECTIONS.social.replace(/\{\{(stroll\.[\w.]+)\}\}/g, (match, key) => vars[key] ?? match) : '',
+      'stroll.bilibili': bilibili ? ENV_SECTIONS.bilibili : '',
+      'stroll.douyin': douyin ? ENV_SECTIONS.douyin : '',
     };
   }
 
   /* ---------------- tools ---------------- */
 
   tools() {
-    return TOOL_DECLS.map((decl) => ({
+    this.liveConfig();
+    if (this.cfg.enabled === false) return [];
+    return activeToolDecls({ bilibili: !this.platformOff('bilibili'), douyin: !this.platformOff('douyin') }).map((decl) => ({
       ...decl,
       handler: async (args) => {
         /**
@@ -3689,8 +3705,16 @@ export class StrollWorld {
   }
 
   async toolStroll(args) {
+    this.liveConfig();
     const action = String(args.action ?? 'status');
-    if (action === 'status' || action === 'whoami') return JSON.stringify(await this.compactStatus());
+    if (this.cfg.enabled === false) return JSON.stringify(this.platformOff());
+    const platform = BILI_READ_ACTIONS.includes(action) ? 'bilibili' : DY_READ_ACTIONS.includes(action) ? 'douyin' :
+      args.platform === 'douyin_creator' && action === 'login' ? 'douyin' : args.platform;
+    if (!LOCAL_READ_ACTIONS.includes(action) && action !== 'status' && action !== 'whoami') {
+      const off = platform && !(action === 'following' && platform === 'both') ? this.platformOff(platform) : !this.pickPlatform() && this.platformOff();
+      if (off) return JSON.stringify(off);
+    }
+    if (action === 'status' || action === 'whoami') return JSON.stringify(await this.compactStatus({ model: true }));
     if (action === 'brief') return JSON.stringify(await this.brief(args.platform));
     if (action === 'feed') return JSON.stringify(await this.feed(args.platform, args.n));
     if (action === 'open') return this.readOpen(args);
@@ -3698,7 +3722,9 @@ export class StrollWorld {
     if (action === 'comments') {
       const url = String(args.url ?? args.id ?? args.target ?? '').trim();
       if (!url) return JSON.stringify({ ok: false, error: '给个视频/动态/专栏链接。' });
-      const plat = String(args.platform ?? '').trim() || (/douyin\.com|iesdouyin/i.test(url) ? 'douyin' : 'bilibili');
+      const plat = this.inferPlatform(url, args.platform);
+      const off = this.platformOff(plat);
+      if (off) return JSON.stringify(off);
       if (plat === 'douyin') {
         const id = parseDouyinId(url);
         if (!id) return JSON.stringify({ ok: false, error: '给个抖音视频链接或视频 ID。' });
@@ -3741,6 +3767,9 @@ export class StrollWorld {
     }
     if (action === 'watch') {
       const sub = String(args.watch_action ?? 'status');
+      if (this.watchRoom && sub !== 'status') {
+        return JSON.stringify({ ok: false, error: '多人陪看由主人在摸鱼面板操作，请用 status 查看。' });
+      }
       if (sub === 'start') {
         const url = String(args.url ?? '').trim();
         if (!url) return JSON.stringify({ ok: false, error: '给个要一起看的链接。' });
@@ -3843,7 +3872,11 @@ export class StrollWorld {
   }
 
   async toolAct(args) {
+    this.liveConfig();
     const action = String(args.action ?? '');
+    const off = DY_WRITE_ACTIONS.includes(action) ? this.platformOff('douyin') :
+      action === 'save' ? this.platformOff('bilibili') : args.platform ? this.platformOff(args.platform) : !this.pickPlatform() && this.platformOff();
+    if (off) return JSON.stringify(off);
     if (action === 'approve' || action === 'reject') {
       return JSON.stringify({
         ok: false,
@@ -3859,6 +3892,10 @@ export class StrollWorld {
     const plan = await this.buildPlan(action, args, { byOwner: this.ownerNearby() });
     if (!plan.ok) return JSON.stringify(plan);
     if (args.preview === true || approvalFor(this.cfg, plan.action) === 'draft') {
+      if (plan.action === 'reply' && plan.platform === 'bilibili') {
+        const blocked = this.biliReplyBlock(plan);
+        if (blocked) return JSON.stringify(blocked);
+      }
       let draft;
       try {
         draft = this.makeDraft(plan);
@@ -3871,14 +3908,11 @@ export class StrollWorld {
           error: '草稿没能写入本地，未进入待审批。',
         });
       }
-      /**
-       * 有效期必须写进回执。
-       *
-       * 草稿 30 分钟没人批就作废（以前是静默消失，主人打开面板什么都没有，
-       * 她还以为在等审批——2026-11-22 群友反馈）。把到期时间给她，
-       * 她转告主人时才能说清「半小时内要点，过了得重发」。
-       */
-      const expiresAt = new Date(Date.parse(draft.createdAt) + DRAFT_TTL_MS).toISOString();
+      const { expiresAt } = draft;
+      const expiresInSec = (Date.parse(expiresAt) - Date.parse(draft.createdAt)) / 1000;
+      const deadline = new Date(expiresAt).toLocaleString('zh-CN', {
+        month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      });
       return JSON.stringify({
         ok: true,
         draft: true,
@@ -3887,8 +3921,8 @@ export class StrollWorld {
         id: draft.id,
         preview: this.previewText(draft),
         expiresAt,
-        expiresInSec: Math.round(DRAFT_TTL_MS / 1000),
-        message: `已创建待审批草稿，**尚未发送**。草稿号 ${draft.id}；**${Math.round(DRAFT_TTL_MS / 60000)} 分钟内有效**（到 ${expiresAt}），过期作废、需要重新提一次。只有主人在「摸鱼」面板点批准后才会发送；不要自己批准，也不要重复提交。`,
+        expiresInSec,
+        message: `已创建待审批草稿，**尚未发送**。草稿号 ${draft.id}；**${expiresInSec / 60} 分钟内有效**（${deadline} 前可批准），过期作废、需要重新提一次。只有主人在「摸鱼」面板点批准后才会发送；不要自己批准，也不要重复提交。`,
       });
     }
     const receipt = await this.executePlan(plan, 'model');
@@ -3913,6 +3947,8 @@ export class StrollWorld {
   }
 
   async toolPolicy(args) {
+    this.liveConfig();
+    if (!this.pickPlatform()) return JSON.stringify(this.platformOff());
     const action = String(args.action ?? 'get');
     if (action === 'get') return JSON.stringify(this.policyView());
     if (action === 'pause') {
@@ -3969,10 +4005,11 @@ export class StrollWorld {
 
   /* ---------------- read ---------------- */
 
-  async compactStatus() {
+  async compactStatus({ model = false } = {}) {
+    this.liveConfig();
     // 只有当前没登录、且窗口刚开过时才去收 cookie，避免每次刷新都打 nav
     if (
-      this.cfg.sharedBiliCookie &&
+      !this.platformOff('bilibili') && this.cfg.sharedBiliCookie &&
       this.douyin.context &&
       !this.lastStatus?.bili?.loggedIn &&
       Date.now() - this.lastImportAt > 60 * 1000
@@ -3981,8 +4018,10 @@ export class StrollWorld {
       await this.bili.importFromContext(this.douyin.context).catch(() => null);
     }
     const [bili, douyin] = await Promise.all([
-      this.bili.status().catch((e) => ({ platform: 'bilibili', ok: false, loggedIn: false, note: e.message })),
-      this.douyin.status().catch((e) => ({ platform: 'douyin', ok: false, loggedIn: false, note: e.message })),
+      this.platformOff('bilibili') ? { platform: 'bilibili', enabled: false } :
+        this.bili.status().catch((error) => ({ platform: 'bilibili', ok: false, loggedIn: false, note: error.message })),
+      this.platformOff('douyin') ? { platform: 'douyin', enabled: false } :
+        this.douyin.status().catch((error) => ({ platform: 'douyin', ok: false, loggedIn: false, note: error.message })),
     ]);
     this.lastStatus = { bili, douyin };
     this.lastStatusAt = Date.now();
@@ -3995,19 +4034,21 @@ export class StrollWorld {
         const uid = this.ownerId('bilibili');
         const dy = this.douyinOwner();
         return {
-          uid,
-          name: this.cfg.ownerName || '',
-          douyin: dy.secUid || dy.raw,
-          douyinOk: dy.bound,
-          douyinPending: !!dy.raw && !dy.bound,
-          douyinName: dy.name,
-          douyinSelf: dy.selfSecUid,
-          douyinSelfName: dy.selfName,
-          douyinSelfId: dy.selfDouyinId,
-          douyinSame: dy.sameAsSelf,
+          ...(!model || !this.platformOff('bilibili') ? { uid, name: this.cfg.ownerName || '' } : {}),
+          ...(!model || !this.platformOff('douyin') ? {
+            douyin: dy.secUid || dy.raw,
+            douyinOk: dy.bound,
+            douyinPending: !!dy.raw && !dy.bound,
+            douyinName: dy.name,
+            douyinSelf: dy.selfSecUid,
+            douyinSelfName: dy.selfName,
+            douyinSelfId: dy.selfDouyinId,
+            douyinSame: dy.sameAsSelf,
+          } : {}),
         };
       })(),
-      pending: this.store.pendingDrafts().map((d) => ({ id: d.id, action: d.action, platform: d.platform, preview: this.previewText(d) })),
+      pending: this.store.pendingDrafts().filter((d) => !model || !this.platformOff(d.platform))
+        .map((d) => ({ id: d.id, action: d.action, platform: d.platform, preview: this.previewText(d), expiresAt: d.expiresAt })),
       expiredDrafts: this.expiredDraftsView(5),
       last: this.store.lastActions(3),
       interests: this.store.topInterests(6),
@@ -4021,10 +4062,13 @@ export class StrollWorld {
   }
 
   async brief(platform) {
+    this.liveConfig();
+    const chosen = platform === 'douyin' || platform === 'bilibili' ? platform : this.pickPlatform();
+    const off = this.platformOff(chosen);
+    if (off) return off;
     // 真的开始刷了才算这一趟出门（回应催促的才记账，主人点单不算）
     this.noteRealOuting();
-    const status = await this.compactStatus();
-    const chosen = platform === 'douyin' || platform === 'bilibili' ? platform : this.pickPlatform();
+    const status = await this.compactStatus({ model: true });
     let feed = [];
     let inbox = [];
     const errors = [];
@@ -4053,12 +4097,12 @@ export class StrollWorld {
       }
     }
     try {
-      if (this.cfg.bilibili) inbox = await this.bili.inbox(3);
+      const biliItems = this.cfg.bilibili ? await this.bili.inbox(8) : [];
       // 抖音私信要用浏览器抓，brief 里只用已经热着的缓存（一分钟内），别让主人等十秒
-      if (this.cfg.douyin && this._dyInbox?.length && Date.now() - this._dyInboxAt < 60 * 1000) {
-        inbox = inbox.concat(this._dyInbox).sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0)).slice(0, 5);
-      }
-      if (inbox.length) this.inboxCache = inbox;
+      const dyItems = this.cfg.douyin && Date.now() - this._dyInboxAt < 60 * 1000 ? this._dyInbox ?? [] : [];
+      if (biliItems.length || dyItems.length) this.inboxCache = [...biliItems, ...dyItems];
+      inbox = biliItems.filter(({ reply_notice_id }) => !this.biliReplyBlock({ reply_notice_id })).slice(0, 3);
+      if (dyItems.length) inbox = inbox.concat(dyItems).sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0)).slice(0, 5);
     } catch (error) {
       errors.push({ platform: 'bilibili', error: error.message });
     }
@@ -4093,16 +4137,18 @@ export class StrollWorld {
   }
 
   pickPlatform() {
-    if (!this.cfg.bilibili) return 'douyin';
-    if (!this.cfg.douyin) return 'bilibili';
+    if (this.platformOff('bilibili')) return this.platformOff('douyin') ? '' : 'douyin';
+    if (this.platformOff('douyin')) return 'bilibili';
     const day = dayKey();
     const n = [...day].reduce((a, c) => a + c.charCodeAt(0), 0);
     return n % 3 === 0 ? 'douyin' : 'bilibili';
   }
 
   async feed(platform, n) {
-    this.noteRealOuting();
     const p = platform === 'douyin' || platform === 'bilibili' ? platform : this.pickPlatform();
+    const off = this.platformOff(p);
+    if (off) return off;
+    this.noteRealOuting();
     if (p === 'bilibili') {
       if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
       const cap = Math.min(8, clamp(Number(this.cfg.sessionMaxItems ?? 8), 3, 12));
@@ -4142,6 +4188,8 @@ export class StrollWorld {
     // target 是 act 那边的叫法，她很容易顺手带过来——两个都认，少一次失败
     const raw0 = String(args.url ?? args.id ?? args.target ?? '').trim();
     if (!raw0) return JSON.stringify({ ok: false, error: '给个链接或 ID。' });
+    const off = this.platformOff(this.inferPlatform(raw0, args.platform));
+    if (off) return JSON.stringify(off);
     /**
      * 短链在这里展开。
      *
@@ -4163,6 +4211,8 @@ export class StrollWorld {
       });
     }
     const platform = this.inferPlatform(raw, args.platform);
+    const stopped = this.platformOff(platform);
+    if (stopped) return JSON.stringify(stopped);
     /**
      * 看视频方式：text = 只给字幕（省 token）；both = 字幕 + 分镜图；frames = 只看画面。
      * 文字模式读到没字幕时会在下面兜底补 1 帧，所以这里先给 0。
@@ -4389,8 +4439,10 @@ export class StrollWorld {
   }
 
   async inbox(platform, n) {
-    const p = platform === 'douyin' || platform === 'bilibili' ? platform : 'bilibili';
-    const strangers = this.recentStrangers();
+    const p = platform === 'douyin' || platform === 'bilibili' ? platform : this.cfg.bilibili ? 'bilibili' : this.pickPlatform();
+    const off = this.platformOff(p);
+    if (off) return off;
+    const strangers = this.platformOff('douyin') ? [] : this.recentStrangers();
     if (p === 'bilibili') {
       if (!this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
       const items = await this.bili.inbox(clamp(n ?? 6, 1, 8));
@@ -4572,7 +4624,7 @@ export class StrollWorld {
     this.log?.info?.('stroll link probe', { raw: text.slice(0, 160) });
     // 允许没有 https:// 前缀（App 复制出来常常是 b23.tv/xxxx）
     const m = /(?:https?:\/\/)?b23\.tv\/[A-Za-z0-9]+/i.exec(text);
-    if (!m) return text;
+    if (!m || this.platformOff('bilibili')) return text;
     const url = /^https?:/i.test(m[0]) ? m[0] : `https://${m[0]}`;
     try {
       const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(8000) });
@@ -4664,12 +4716,17 @@ export class StrollWorld {
   }
 
   async login(platform) {
+    this.liveConfig();
+    platform ??= this.cfg.douyin ? 'douyin' : this.pickPlatform();
+    const off = this.platformOff(platform === 'douyin_creator' ? 'douyin' : platform);
+    if (off) return off;
     if (platform === 'bilibili') {
       // 之前点过「退出登录」：开窗时顺手把 B站 cookie 清掉，保证这次看到的是干净二维码
       const wasOut = this.bili.isLoggedOut();
       let info;
       try {
         info = await this.douyin.loginWindow('https://passport.bilibili.com/login', {
+          platform: 'bilibili',
           clearCookies: wasOut ? /bilibili\.com$/i : null,
         });
       } catch (error) {
@@ -4679,13 +4736,18 @@ export class StrollWorld {
           error: `登录窗没打开：${error?.message ?? String(error)}。多半是没装 Edge / Chrome，或者上次的窗口没退干净。`,
         };
       }
+      if (this.platformOff('bilibili')) return this.platformOff('bilibili');
       if (wasOut) this.bili.markLoggedOut(false);
       // 扫码是异步的：后台轮询，登上了就把 cookie 收回来并关窗
       let tries = 0;
-      const timer = setInterval(async () => {
+      clearInterval(this.biliLoginTimer);
+      const timer = this.biliLoginTimer = setInterval(async () => {
+        this.liveConfig();
+        if (this.platformOff('bilibili')) return;
         tries += 1;
         if (tries > 60 || !this.douyin.context) {
           clearInterval(timer);
+          if (this.biliLoginTimer === timer) this.biliLoginTimer = null;
           // 三分钟没扫完就收窗，别让一个有头窗口永远挂在桌面上
           if (tries > 60) await this.douyin.loginWindowClose().catch(() => {});
           return;
@@ -4694,9 +4756,10 @@ export class StrollWorld {
           const got = await this.bili.importFromContext(this.douyin.context).catch(() => null);
           if (got?.ok) {
             clearInterval(timer);
+            if (this.biliLoginTimer === timer) this.biliLoginTimer = null;
             this.lastImportAt = Date.now();
             await this.douyin.loginWindowClose().catch(() => {});
-            await this.push('stroll.sent', `B站登录成功：${got.name || got.uid || '已登录'}。`, { kind: 'bili-login' }, 'flush');
+            await this.push('stroll.sent', `B站登录成功：${got.name || got.uid || '已登录'}。`, { platform: 'bilibili', kind: 'bili-login' }, 'flush');
           }
         } catch {
           // 继续等
@@ -4733,6 +4796,8 @@ export class StrollWorld {
    * 只为「能不能自动发图文」做技术判断，不点任何发布按钮。
    */
   async creatorProbe() {
+    const off = this.platformOff('douyin');
+    if (off) return off;
     const ctx = this.douyin.context;
     if (!ctx) return { ok: false, error: '浏览器还没开。先做 action=login platform=douyin_creator。' };
     const page = await ctx.newPage().catch(() => null);
@@ -4929,7 +4994,7 @@ export class StrollWorld {
         .lastActions(24)
         .filter((x) => x.platform !== 'system')
         .slice(0, 8),
-      drafts: this.store.pendingDrafts().map((d) => ({ id: d.id, preview: this.previewText(d), ageSec: d.ageSec })),
+      drafts: this.store.pendingDrafts().map((d) => ({ id: d.id, preview: this.previewText(d), ageSec: d.ageSec, expiresAt: d.expiresAt })),
       expiredDrafts: this.expiredDraftsView(5),
       stats: this.store.data.stats,
       interests: this.store.topInterests(8),
@@ -4946,13 +5011,14 @@ export class StrollWorld {
    */
   async followingFeed(platform = 'both', n = 8) {
     const want = platform === 'douyin' || platform === 'bilibili' ? platform : 'both';
+    const off = want === 'both' ? !this.pickPlatform() && this.platformOff() : this.platformOff(want);
+    if (off) return off;
     const limit = clamp(n ?? 8, 1, 20);
     const items = [];
     const errors = [];
 
-    if (want !== 'douyin') {
-      if (!this.cfg.bilibili) errors.push({ platform: 'bilibili', error: 'B站关着' });
-      else if (!this.bili.readCredentials()) errors.push({ platform: 'bilibili', error: 'B站没登录，关注流要登录才看得到' });
+    if (want !== 'douyin' && !this.platformOff('bilibili')) {
+      if (!this.bili.readCredentials()) errors.push({ platform: 'bilibili', error: 'B站没登录，关注流要登录才看得到' });
       else {
         try {
           items.push(...(await this.bili.followFeed(limit)));
@@ -4962,16 +5028,13 @@ export class StrollWorld {
       }
     }
 
-    if (want !== 'bilibili') {
-      if (!this.cfg.douyin) errors.push({ platform: 'douyin', error: '抖音关着' });
-      else {
-        try {
-          const got = await this.douyin.following(limit);
-          if (!got.length) errors.push({ platform: 'douyin', error: '抖音关注流读不到（后台页面是空壳）；抖音这边用 feed 刷精选' });
-          items.push(...got);
-        } catch (error) {
-          errors.push({ platform: 'douyin', error: error.message });
-        }
+    if (want !== 'bilibili' && !this.platformOff('douyin')) {
+      try {
+        const got = await this.douyin.following(limit);
+        if (!got.length) errors.push({ platform: 'douyin', error: '抖音关注流读不到（后台页面是空壳）；抖音这边用 feed 刷精选' });
+        items.push(...got);
+      } catch (error) {
+        errors.push({ platform: 'douyin', error: error.message });
       }
     }
 
@@ -5314,9 +5377,9 @@ export class StrollWorld {
 
   /** 陪看浏览器要带的 cookie：B站登录态 + 抖音登录态（不然打开抖音就是未登录，评论区也没有）。 */
   async watchCookies() {
-    const out = [...this.biliCookiesForWatch()];
+    const out = this.platformOff('bilibili') ? [] : this.biliCookiesForWatch();
     const ctx = this.douyin.context;
-    if (ctx) {
+    if (ctx && !this.platformOff('douyin')) {
       const list = await ctx.cookies('https://www.douyin.com').catch(() => []);
       for (const c of list ?? []) {
         if (!c?.name || !c?.value) continue;
@@ -5334,8 +5397,53 @@ export class StrollWorld {
     return out;
   }
 
-  async watchStart(url) {
-    const info = await this.douyin.watchStart(url, { cookies: await this.watchCookies() });
+  async watchStart(url, shared = false) {
+    const platform = this.inferPlatform(url);
+    const off = this.platformOff(platform);
+    if (off) return off;
+    if (this.watchChanging || this.watchBusy || this.watchRoom || (shared && this.watch)) {
+      return { ok: false, error: '请先结束当前陪看，再开新的窗口。' };
+    }
+    if (shared && !roomStartLink(url)) return { ok: false, error: '多人陪看只支持 B 站、抖音的视频链接。' };
+    const changing = Symbol();
+    this.watchChanging = changing;
+    let room;
+    try {
+      if (shared) room = await openWatchRoom();
+      if (this.watchChanging !== changing) return { ok: false, error: '陪看已结束。' };
+      const off = this.platformOff(platform);
+      if (off) return off;
+      const info = await this.douyin.watchStart(url, shared ? { manual: true } : { cookies: await this.watchCookies() });
+      const stopped = this.platformOff(info.platform ?? this.inferPlatform(info.url || url));
+      if (stopped) {
+        await this.douyin.watchStop();
+        return stopped;
+      }
+      if (this.watchChanging !== changing) {
+        await this.douyin.watchStop();
+        return { ok: false, error: '陪看已结束。' };
+      }
+      if (shared) {
+        const page = roomVideo(info.url);
+        if (!page) {
+          await this.douyin.watchStop();
+          return { ok: false, error: '没打开支持的视频页面，未开启多人陪看。' };
+        }
+        this.watchRoom = room;
+        this.lastWatchPush = 0;
+        this.watchMiss = 0;
+        this.applyRoomState(room, { ...page, title: info.title, time: null, duration: null, paused: null });
+        this.startWatchTimer();
+        return { ok: true, note: '窗口已打开。把短码填到另一条鱼的摸鱼面板即可加入。' };
+      }
+      return await this.startSoloWatch(info);
+    } finally {
+      if (room && room !== this.watchRoom) room.close();
+      if (this.watchChanging === changing) this.watchChanging = false;
+    }
+  }
+
+  async startSoloWatch(info) {
     this.watch = { startedAt: Date.now(), url: info.url, title: info.title, platform: info.platform, last: null };
     this.watchScrollState = { id: '', at: Date.now(), count: 0, seen: [], retryAt: 0 };
     this.watchMiss = 0;
@@ -5360,6 +5468,109 @@ export class StrollWorld {
       ...info,
       note: '陪看窗口已打开。主人在窗口里翻页/拖进度，你在后台跟着看；想评论就说，想发到平台就用 stroll_act。',
     };
+  }
+
+  applyRoomState(room, digest) {
+    this.watch = { startedAt: this.watch?.startedAt ?? Date.now(), ...digest, last: digest };
+    if (this.presence?.phase !== 'co-watch' || this.presence.url !== digest.url || this.presence.title !== digest.title) {
+      this.setPresence({ ...digest, phase: 'co-watch', keepMs: 0 });
+    }
+    if (room.role === 'host') room.state(digest);
+  }
+
+  async watchJoin(code) {
+    if (!this.pickPlatform()) return this.platformOff();
+    if (this.watch || this.watchChanging || this.watchBusy) return { ok: false, error: '请先结束当前陪看。' };
+    const guest = watchGuest(code, this.watchViewer);
+    if (!guest) return { ok: false, error: '短码格式不对，请从开房的摸鱼面板重新复制。' };
+    const changing = Symbol();
+    this.watchChanging = changing;
+    try {
+      const packet = await readWatchRoom(guest);
+      if (this.watchChanging !== changing) return { ok: false, error: '陪看已结束。' };
+      if (!packet.state) return { ok: false, error: '房间还没准备好，请稍后重试。' };
+      const off = this.platformOff(packet.state.platform);
+      if (off) return off;
+      guest.after = Math.max(packet.update?.seq ?? 0, packet.mark?.seq ?? 0);
+      this.watchRoom = guest;
+      this.watchMiss = 0;
+      this.applyRoomState(guest, packet.state);
+      this.startWatchTimer();
+      return { ok: true, note: '已加入，跟随主窗口，不另开网页。' };
+    } catch (error) {
+      return { ok: false, error: error.message === 'fetch failed' ? '连不上陪看房间，请检查短码和主窗口。' : error.message };
+    } finally {
+      if (this.watchChanging === changing) this.watchChanging = false;
+    }
+  }
+
+  async roomTick(room) {
+    if (room.role === 'guest') {
+      const packet = await readWatchRoom(room).catch(() => null);
+      if (room !== this.watchRoom) return;
+      if (!packet) {
+        if (++this.watchMiss >= 3) await this.watchStop();
+        return;
+      }
+      this.watchMiss = 0;
+      if (packet.state && this.platformOff(packet.state.platform)) return this.watchStop();
+      if (packet.state) this.applyRoomState(room, packet.state);
+      else if (this.watch.last) {
+        this.watch.last = null;
+        this.watch.title = '主窗口暂未播放支持的视频';
+        this.watch.url = '';
+        this.presence = null;
+      }
+      for (const event of [packet.update, packet.mark].filter(Boolean).sort((left, right) => left.seq - right.seq)) {
+        if (room !== this.watchRoom) return;
+        if (this.platformOff(event.digest.platform)) {
+          room.after = Math.max(room.after, event.seq);
+          continue;
+        }
+        const marked = event === packet.mark;
+        const blobs = event.frame ? [{ bytes: Buffer.from(event.frame, 'base64'), mime: 'image/jpeg', name: '陪看画面', fallbackText: '（主窗口标记的画面）' }] : null;
+        if ((marked || this.cfg.watchTalk === true) && !await this.pushRoomEvent(event.text, event.digest, marked, blobs)) break;
+        room.after = Math.max(room.after, event.seq);
+      }
+      return;
+    }
+
+    const raw = await this.douyin.watchDigest();
+    if (room !== this.watchRoom) return;
+    if (!raw) {
+      if (++this.watchMiss >= 3 || this.douyin.watchPage?.isClosed()) await this.watchStop();
+      return;
+    }
+    this.watchMiss = 0;
+    const page = roomVideo(raw.url);
+    if (page && this.platformOff(page.platform)) return this.watchStop();
+    if (!page || raw.time == null) {
+      room.state(null);
+      this.watch = { startedAt: this.watch.startedAt, title: '主窗口暂未播放支持的视频', url: '', platform: '', last: null };
+      this.presence = null;
+      return;
+    }
+    const digest = { ...page, title: raw.title, time: raw.time, duration: raw.duration, paused: raw.paused };
+    const before = this.watch.last;
+    const changed = !before || digest.url !== before.url;
+    const due = changed || digest.paused !== before?.paused ||
+      (!digest.paused && Date.now() - this.lastWatchPush >= clamp(Number(this.cfg.watchSpeakSec ?? 60), 20, 600) * 1000);
+    this.applyRoomState(room, digest);
+    if (!due) return;
+    this.lastWatchPush = Date.now();
+    const lastPush = this.lastWatchPush;
+    void this.watchMediaLine(digest).then(async (mediaLine) => {
+      if (room !== this.watchRoom || lastPush !== this.lastWatchPush || this.watch.last?.url !== digest.url) return;
+      const text = `多人陪看：《${digest.title}》 ${clockText(digest.time)}${digest.paused ? '（暂停）' : ''}。${mediaLine}`;
+      room.publish(text, digest);
+      if (this.cfg.watchTalk === true) await this.pushRoomEvent(text, digest, false);
+    }).catch(() => {});
+  }
+
+  pushRoomEvent(text, digest, marked, blobs = null) {
+    const instruction = marked ? '主人请你说说这一刻；没看到画面就不要猜。' : '有值得说的再简短回应，不必每次都说。';
+    return this.push('stroll.watch', `${instruction}\n${UNTRUSTED_HEAD}\n${text}\n${UNTRUSTED_TAIL}`,
+      { platform: digest.platform, url: digest.url, shared: true }, marked ? 'flush' : 'debounce', blobs);
   }
 
   /**
@@ -5393,6 +5604,8 @@ export class StrollWorld {
    * 以前只有轮询推「进度变了」，她拿不到「你指的是哪一刻」。
    */
   async watchMark() {
+    const room = this.watchRoom;
+    if (room?.role === 'guest') return { text: JSON.stringify({ ok: false, error: '请在发起陪看的面板点「看这里」。' }) };
     if (!this.watch) {
       return { text: JSON.stringify({ ok: false, error: '现在没在一起看。先 watch_action=start 开一个陪看窗口。' }) };
     }
@@ -5400,11 +5613,13 @@ export class StrollWorld {
     if (!digest) {
       return { text: JSON.stringify({ ok: false, error: '读不到陪看窗口，可能被关了。' }) };
     }
+    const page = room ? roomVideo(digest.url) : digest;
+    if (!page || (room && digest.time == null)) return { text: JSON.stringify({ ok: false, error: '主窗口没有正在播放的受支持视频。' }) };
     const at = Math.max(0, Math.round(Number(digest.time ?? 0)));
-    const platform = String(digest.platform ?? '');
-    const url = String(digest.url ?? '');
+    const platform = String(page.platform ?? '');
+    const url = String(page.url ?? '');
     // 画面：直接截陪看窗口——他看的是什么，就给什么（另开播放页取的是「同一秒」，不是「他看的那一帧」）
-    const shot = await this.douyin.watchShot().catch(() => null);
+    const shot = await (room ? this.douyin.watchRoomShot(digest.url) : this.douyin.watchShot()).catch(() => null);
     // 上下文：B站能读字幕弹幕，抖音只有画面
     let media = null;
     if (platform === 'bilibili' && url) {
@@ -5428,8 +5643,8 @@ export class StrollWorld {
       ...(digest.duration ? { duration: clockText(digest.duration) } : {}),
       ...(media?.ok
         ? {
-            subtitles: media.subtitles,
-            danmaku: media.danmaku,
+            subtitles: room ? media.subtitles?.slice(0, 10).map((entry) => ({ ...entry, text: truncate(entry.text ?? '', 80) })) : media.subtitles,
+            danmaku: room ? media.danmaku?.slice(0, 10).map((entry) => ({ ...entry, text: truncate(entry.text ?? '', 80) })) : media.danmaku,
             mediaNote: `上面是 ${clockText(at)} 前后那一段的字幕和弹幕。`,
           }
         : {}),
@@ -5438,22 +5653,47 @@ export class StrollWorld {
         `主人在 ${clockText(at)} 点了「看这里」——他觉得这一刻有意思，想让你也看看。` +
         '结合画面和上面那段字幕弹幕，说你自己的反应；挑具体的细节说，别泛泛地夸。',
     };
-    if (!shot) return { text: JSON.stringify(body) };
     return {
       text: JSON.stringify(body),
-      blobs: [
+      ...(shot ? { blobs: [
         {
           bytes: shot.bytes,
           mime: 'image/jpeg',
           name: `watch-mark-${at}s.jpg`,
           fallbackText: `主人标记的画面 ${clockText(at)}`,
         },
-      ],
+      ] } : {}),
     };
+  }
+
+  async markWatchRoom() {
+    const room = this.watchRoom;
+    if (room?.role !== 'host' || this.watchChanging || this.watchBusy) {
+      return { ok: false, error: '请在发起陪看的面板操作。如正在读取，稍等再试。' };
+    }
+    this.watchBusy = true;
+    try {
+      const result = await this.watchMark();
+      const body = JSON.parse(result.text);
+      if (!body.ok) return body;
+      if (room !== this.watchRoom) return { ok: false, error: '多人陪看已结束。' };
+      const digest = { platform: body.platform, url: body.url, title: body.title, time: clockToSeconds(body.marked) };
+      const current = await this.douyin.watchDigest();
+      if (room !== this.watchRoom || roomVideo(current?.url)?.url !== digest.url) {
+        return { ok: false, error: '窗口已切换视频，请再点一次。' };
+      }
+      this.applyRoomState(room, { ...digest, time: current.time, duration: current.duration, paused: current.paused });
+      room.publish(result.text, digest, result.blobs?.[0]?.bytes, true);
+      await this.pushRoomEvent(result.text, digest, true, result.blobs);
+      return { ok: true, note: result.blobs ? '已共享「看这里」画面。' : '已共享标记时刻，本次没有截到画面。' };
+    } finally {
+      this.watchBusy = false;
+    }
   }
 
   /** 陪看轮询间隔：开了一起刷就用 4 秒，否则按设置。 */
   watchPollSeconds() {
+    if (this.watchRoom) return 2;
     const base = clamp(Number(this.cfg.watchPollSec ?? 15), 5, 120);
     // 一起刷要跟得上短视频：默认 15 秒读一次太慢，一条 15 秒的视频还没读就播完了
     return this.cfg.watchScroll === true ? Math.min(base, 4) : base;
@@ -5472,8 +5712,9 @@ export class StrollWorld {
   }
 
   async watchTick() {
+    this.liveConfig();
     // 切视频可能卡 20 多秒，而定时器 4 秒一轮：上一轮没跑完就跳过这轮，别叠着来
-    if (this.watchBusy) return;
+    if (this.watchBusy || this.watchChanging) return;
     this.watchBusy = true;
     try {
       await this.watchTickInner();
@@ -5485,6 +5726,7 @@ export class StrollWorld {
   }
 
   async watchTickInner() {
+    if (this.watchRoom) return this.roomTick(this.watchRoom);
     if (!this.watch) {
       this.stopWatchTimer();
       return;
@@ -5503,6 +5745,7 @@ export class StrollWorld {
       return;
     }
     this.watchMiss = 0;
+    if (!this.watch || this.platformOff(digest.platform)) return this.watchStop();
     // 抖音「一起刷」：播完/到点就切下一条
     const scrolled = await this.maybeWatchScroll(digest);
     if (scrolled?.digest) digest = scrolled.digest;
@@ -5550,6 +5793,20 @@ export class StrollWorld {
       : changed
         ? `主人翻到了新页面：${shown(digest.title || digest.url)} ${progress}。`
         : `一起看中：${shown(digest.title)} ${progress}${digest.paused ? '（暂停）' : ''}。`;
+    const mediaLine = await this.watchMediaLine(digest);
+    const tail = comments ? `评论区在说：${comments}` : '评论区还没读到。';
+    const talkLines = clamp(Number(this.cfg.watchLines ?? 2), 1, 3);
+    const talkLine =
+      this.cfg.watchTalk === true ? `\n用 ${talkLines} 句说说你自己的反应（别只报进度，也别复述字幕）。` : '';
+    let blobs = null;
+    if (this.cfg.watchShot === true && digest.platform === 'douyin') {
+      const shot = await this.douyin.watchShot().catch(() => null);
+      if (shot) blobs = [shot];
+    }
+    await this.push('stroll.watch', `${head}${mediaLine}${tail}${talkLine}`, { platform: digest.platform, url: digest.url }, 'debounce', blobs);
+  }
+
+  async watchMediaLine(digest) {
     // B站：按当前进度取这一句字幕 + 前后 15 秒的弹幕；抖音没有弹幕，跳过
     let mediaLine = '';
     const subWatch = clamp(Number(this.cfg.subtitleWatch ?? 2), 0, 5);
@@ -5559,7 +5816,7 @@ export class StrollWorld {
       const bvid = parseBvid(String(digest.url ?? ''));
       if (bvid) {
         const mt = await this.bili
-          .mediaText(bvid, { around: Number(digest.time ?? 0), subtitleLimit: subWatch, danmakuLimit: dmWatch, windowSec: winSec })
+          .mediaText(digest.url, { around: Number(digest.time ?? 0), subtitleLimit: subWatch, danmakuLimit: dmWatch, windowSec: winSec })
           .catch(() => null);
         if (mt?.ok) {
           const subs =
@@ -5586,24 +5843,7 @@ export class StrollWorld {
         }
       }
     }
-    const tail = comments ? `评论区在说：${comments}` : '评论区还没读到。';
-    // 主人在「一起看」里要的是陪看的感觉，不是进度播报：开着就明确要求她说两句
-    const talkLines = clamp(Number(this.cfg.watchLines ?? 2), 1, 3);
-    const talkLine =
-      this.cfg.watchTalk === true ? `\n用 ${talkLines} 句说说你自己的反应（别只报进度，也别复述字幕）。` : '';
-    // 抖音没字幕也没弹幕：她只能靠标题和评论猜画面，开这个就附一张截图
-    let blobs = null;
-    if (this.cfg.watchShot === true && digest.platform === 'douyin') {
-      const shot = await this.douyin.watchShot().catch(() => null);
-      if (shot) blobs = [shot];
-    }
-    await this.push(
-      'stroll.watch',
-      `${head}${mediaLine}${tail}${talkLine}`,
-      { platform: digest.platform, url: digest.url },
-      'debounce',
-      blobs,
-    );
+    return mediaLine;
   }
 
   /**
@@ -5692,6 +5932,7 @@ export class StrollWorld {
 
   async watchStatus() {
     if (!this.watch) return { ok: true, watching: false };
+    if (this.watchRoom) return { ok: true, ...this.watchPanelState(false) };
     const digest = await this.douyin.watchDigest();
     return {
       ok: true,
@@ -5709,11 +5950,25 @@ export class StrollWorld {
 
   async watchStop() {
     this.stopWatchTimer();
+    const room = this.watchRoom;
+    this.watchRoom = null;
+    if (room?.role === 'host') room.close();
     if (this.presence?.phase === 'co-watch') this.presence = null;
     this.watch = null;
     this.watchScrollState = null;
-    await this.douyin.watchStop().catch(() => {});
+    if (room?.role !== 'guest') await this.douyin.watchStop().catch(() => {});
     return { ok: true, watching: false };
+  }
+
+  watchPanelState(invite = true) {
+    if (!this.watch) return { watching: false };
+    return {
+      watching: true, title: this.watch.title, url: this.watch.url, platform: this.watch.platform,
+      startedAt: new Date(this.watch.startedAt).toISOString(), time: this.watch.last?.time ?? null,
+      duration: this.watch.last?.duration ?? null, paused: this.watch.last?.paused ?? null,
+      role: this.watchRoom?.role ?? '',
+      ...(invite && this.watchRoom?.role === 'host' ? { code: this.watchRoom.code } : {}),
+    };
   }
 
   /** 面板上的快捷动作：主人点了就等于批准，直接发；额度照旧。 */
@@ -5735,8 +5990,10 @@ export class StrollWorld {
    * 视频、动态、专栏走同一套：先确认评论区在哪，再带 root/parent 回楼中楼。
    */
   async replyToMessage(id, text) {
-    const item = (this.inboxCache ?? []).find((x) => String(x.id) === String(id));
+    const item = this.inboxCache.find((x) => (x.reply_notice_id || String(x.id)) === id);
     if (!item) return { ok: false, error: '这条消息已经刷新掉了，点「刷新消息」再来。' };
+    const off = this.platformOff(item.platform || 'bilibili');
+    if (off) return off;
     if (!text) return { ok: false, error: '回复要有正文。' };
 
     // 私信：直接往这个会话里接着说话，不用管评论那套 root/parent
@@ -5755,15 +6012,14 @@ export class StrollWorld {
       return receipt;
     }
 
-    if (!item.rpid || item.rpid === '0') {
-      return { ok: false, error: '这条消息没带评论 ID，去网页里回。' };
-    }
-
     let kind = '';
     if (item.type === 'video' && item.bvid) kind = 'video';
     else if (item.type === 'opus' && item.dynamicId) kind = 'opus';
     else if (item.type === 'article' && item.cvid) kind = 'article';
     if (!kind) return { ok: false, error: '这条落在页面里，没有可回复的评论接口；点「去看看」在网页里回。' };
+    const reply_notice_id = item.reply_notice_id;
+    const knownReply = this.biliReplyBlock({ reply_notice_id });
+    if (knownReply) return knownReply;
 
     let target = '';
     let oid = '';
@@ -5775,6 +6031,7 @@ export class StrollWorld {
         target = item.bvid;
         const v = await this.bili.view(target);
         oid = v.aid;
+        target = v.bvid || target;
       } else if (kind === 'opus') {
         dynamicId = item.dynamicId;
         target = `dyn:${dynamicId}`;
@@ -5792,33 +6049,32 @@ export class StrollWorld {
       return { ok: false, code: error?.code ?? 'ERROR', error: error?.message ?? String(error) };
     }
 
-    const dedupeKey = `bilibili:reply:${target}:r${item.rpid}`;
+    const anchor = await this.resolveBiliReply(commentType, oid, { root: item.rootRpid, notice: item });
+    if (!anchor) return { ok: false, code: 'NO_REPLY_TARGET', error: '无法确认这条通知对应的评论，未发送。请到原评论区核对。' };
+    const replyTarget = { target, oid, commentType, reply_notice_id, ...anchor };
+    const blocked = this.biliReplyBlock(replyTarget);
+    if (blocked) return blocked;
     const check = this.policy.check('reply', 'bilibili', target, {
       userInitiated: true,
       quotaAction: 'comment',
-      dedupeKey,
+      noDedupe: true,
     });
     if (!check.ok) return { ok: false, code: check.code, error: check.message ?? '今天额度不够。' };
 
     const plan = {
       action: 'reply',
       platform: 'bilibili',
-      target,
       kind,
       dynamicId,
       articleId,
-      oid,
-      commentType,
-      dedupeKey,
       text,
-      root: item.rootRpid && item.rootRpid !== '0' ? item.rootRpid : item.rpid,
-      parent: item.rpid,
+      ...replyTarget,
     };
     const receipt = await this.executePlan(plan, 'operator');
     if (receipt?.ok) {
-      this.store.markSeen(`msg:${id}`);
+      this.store.markSeen(`msg:${item.id}`);
       this.store.save();
-      this.inboxCache = this.inboxCache.map((x) => (String(x.id) === String(id) ? { ...x, replied: true, fresh: false } : x));
+      this.inboxCache = this.inboxCache.map((x) => (x === item ? { ...x, replied: true, fresh: false } : x));
     }
     return receipt;
   }
@@ -6433,6 +6689,8 @@ export class StrollWorld {
    * url 可以是视频 / 动态 / 专栏；rpid 是弹层里那条评论。
    */
   async replyComment(url, rpid, text) {
+    const off = this.platformOff('bilibili');
+    if (off) return off;
     const raw = String(url ?? '').trim();
     if (!raw) return { ok: false, error: '没有可回复的链接。' };
     const bvid = parseBvid(raw);
@@ -6472,27 +6730,25 @@ export class StrollWorld {
     const articleId = kind === 'article' ? id : '';
     const found = await this.bili.findReply(commentType, oid, rpid);
     if (!found) return { ok: false, error: '评论区里找不到这条了，刷新一下再试。' };
-    const dedupeKey = `bilibili:reply:${target}:r${rpid}`;
+    const replyTarget = { target, oid, commentType, parent: found.rpid };
+    const blocked = this.biliReplyBlock(replyTarget);
+    if (blocked) return blocked;
     const check = this.policy.check('reply', 'bilibili', target, {
       userInitiated: true,
       quotaAction: 'comment',
-      dedupeKey,
+      noDedupe: true,
     });
     if (!check.ok) return { ok: false, code: check.code, error: check.message };
     return this.executePlan(
       {
         action: 'reply',
         platform: 'bilibili',
-        target,
         kind,
         dynamicId,
         articleId,
-        oid,
-        commentType,
-        dedupeKey,
         text,
+        ...replyTarget,
         root: found.root && found.root !== '0' ? found.root : found.rpid,
-        parent: found.rpid,
       },
       'operator',
     );
@@ -6501,19 +6757,37 @@ export class StrollWorld {
   /* ---------------- write planning ---------------- */
 
   inferPlatform(raw, hint) {
-    if (hint === 'bilibili' || hint === 'douyin') return hint;
     const text = String(raw ?? '').toLowerCase();
     if (text.includes('douyin.com') || text.includes('iesdouyin.com')) return 'douyin';
+    if (/(?:bilibili\.com|b23\.tv)\//i.test(text)) return 'bilibili';
+    if (hint === 'bilibili' || hint === 'douyin') return hint;
     // 纯 sec_uid（MS4w 开头）：抖音主页的另一种写法，别被下面的兜底判成 B站
     if (/^ms4wljab/i.test(text)) return 'douyin';
-    if (text.includes('bilibili.com') || /^bv[0-9a-z]{10}$/i.test(text) || /^av\d+$/i.test(text)) return 'bilibili';
+    if (/bilibili\.com|b23\.tv|\bbv[0-9a-z]{10}\b|\bav\d+\b|^(dyn:|cv)/i.test(text)) return 'bilibili';
     if (/^\d{10,24}$/.test(text)) return 'douyin';
     return 'bilibili';
   }
 
   async buildPlan(action, args, { byOwner = false } = {}) {
-    const platform = this.inferPlatform(args.target ?? args.url ?? '', args.platform);
-    const targetRaw = await this.expandBiliLink(String(args.target ?? args.url ?? '').trim());
+    this.liveConfig();
+    const noticeId = action === 'reply' ? String(args.reply_notice_id ?? '').trim() : '';
+    if (noticeId && this.platformOff('bilibili')) return this.platformOff('bilibili');
+    const notice = noticeId && (this.biliReplyNotices.get(noticeId) ?? this.inboxCache.find((item) => item.reply_notice_id === noticeId));
+    const noticeTarget = notice && (notice.bvid || (notice.dynamicId && `dyn:${notice.dynamicId}`) || (notice.cvid && `cv:${notice.cvid}`));
+    if (noticeId && (!noticeTarget || args.platform === 'douyin' || args.reply_to || args.root)) {
+      return { ok: false, code: 'NO_REPLY_TARGET', error: 'B站回复通知不可用；请重新打开收件箱，只用这条通知的 reply_notice_id 定位。未发送。' };
+    }
+    const knownReply = this.biliReplyBlock({ reply_notice_id: noticeId });
+    if (knownReply) return knownReply;
+    const rawTarget = String(args.target ?? args.url ?? '').trim();
+    const hint = args.platform || (action === 'dm' && this.platformOff('bilibili') && !this.platformOff('douyin') &&
+      /^(主人|主人私信|私信|私聊|owner|dm|你|您)?$/i.test(rawTarget) ? 'douyin' : '');
+    const platform = notice ? 'bilibili' : this.inferPlatform(rawTarget, hint);
+    const off = this.platformOff(platform);
+    if (off) return off;
+    const targetRaw = platform === 'bilibili' ? await this.expandBiliLink(noticeTarget || rawTarget) : rawTarget;
+    const stopped = this.platformOff(platform);
+    if (stopped) return stopped;
     const text = String(args.text ?? '').trim();
     /**
      * 「评论时 @ 主人」。
@@ -6537,10 +6811,6 @@ export class StrollWorld {
     // 这一点以前漏了：回完私信紧接着评论，永远撞 90 秒的 TOO_FAST，
     // 表现就是「每次让她评论都要等一两分钟」。
     const asked = byOwner || this.policy.ownerActive();
-
-    if (!this.cfg.enabled) return { ok: false, error: '摸鱼 已停用。' };
-    if (platform === 'bilibili' && !this.cfg.bilibili) return { ok: false, error: 'B站关着。' };
-    if (platform === 'douyin' && !this.cfg.douyin) return { ok: false, error: '抖音关着。' };
 
     if (action === 'like' || action === 'unlike') {
       let target;
@@ -6716,6 +6986,7 @@ export class StrollWorld {
       } else {
         const v = await this.bili.view(target);
         oid = v.aid;
+        if (action === 'reply') target = v.bvid || target;
       }
 
       let root = '';
@@ -6723,42 +6994,23 @@ export class StrollWorld {
       let dedupeKey = '';
       if (action === 'reply') {
         const rpid = String(args.reply_to ?? '').trim();
-        if (!rpid) return { ok: false, error: '回复要给 reply_to（评论 ID）。' };
-        /**
-         * 通知里带了 root 就直接用，不再去评论区翻。
-         * 楼中楼里对方那条常常排在前 80 条之外，findReply 找不到就白跑一趟
-         * （2026-11-14：为了让「有人回复我的评论」能接着往下聊）。
-         */
-        const providedRoot = String(args.root ?? '').trim();
-        /**
-         * 两条来源只负责「root 是谁」，挑「回谁」统一交给 pickReplyParent。
-         *
-         * 2026-11-15：以前这两条路各写一套——
-         *   有 root：查子回复、排自己、排除主人、挑最新（对）
-         *   没 root：找到 root 之后直接 parent = found.rpid（= reply_to 那条，
-         *            往往就是她自己的评论）→ 又变成「回复 @ 了自己」。
-         * 用户看到的就是「回了，但没挂到我下面」。
-         */
-        if (providedRoot) {
-          root = providedRoot;
-        } else {
-          const found = await this.bili.findReply(commentType, oid, rpid);
-          if (!found) return { ok: false, error: '在评论区里没找到这条评论；可能删了，或再往前翻一页（也可以带上 root 参数跳过查找）。' };
-          root = found.root && found.root !== '0' ? found.root : found.rpid;
+        const requestedRoot = String(notice ? notice.rootRpid : args.root ?? '').trim();
+        if ((!notice && !/^[1-9]\d*$/.test(rpid)) || (requestedRoot && !/^\d+$/.test(requestedRoot))) {
+          return { ok: false, code: 'NO_REPLY_TARGET', error: '请提供对方那条评论的有效 reply_to（不是楼层编号），或使用该条通知的 reply_notice_id。' };
         }
-        const picked = await this.pickReplyParent(oid, root);
-        if (!picked?.parent) {
+        const anchor = await this.resolveBiliReply(commentType, oid, { root: requestedRoot, rpid, notice });
+        if (!anchor) {
           return {
             ok: false,
             code: 'NO_REPLY_TARGET',
-            error: '这层楼里暂时找不到「该回谁」——可能对方还没在这条下面留言。先别回，等有明确对象再发。',
+            error: '无法确认唯一的 B站回复目标，未发送。请刷新通知或到原评论区核对；不要改发新评论。',
           };
         }
-        parent = picked.parent;
-        this.log?.info?.('stroll reply anchor', { root, parent, kids: picked.kids, picked: picked.name });
-        // 回执/去重都带上正文：同一层里说不同的话算不同的事
-        const contentTag = action === 'reply' ? `:${String(text ?? '').slice(0, 24).replace(/\s+/g, '')}` : '';
-        dedupeKey = `${platform}:${action}:${target}:r${rpid}${contentTag}`;
+        ({ root, parent } = anchor);
+        const replyTarget = { target, oid, commentType, parent, reply_notice_id: noticeId };
+        const blocked = this.biliReplyBlock(replyTarget);
+        if (blocked) return blocked;
+        dedupeKey = this.biliReplyKey(replyTarget);
       }
       /**
        * 发新评论没有 rpid，键里必须带上内容。
@@ -6780,7 +7032,7 @@ export class StrollWorld {
         userInitiated: asked,
       });
       if (!check.ok) return check;
-      return { ok: true, action, platform, target, text, mentionOwner, mentionName, root, parent, kind, dynamicId, articleId, oid, commentType, dedupeKey, countQuota: !isReply };
+      return { ok: true, action, platform, target, text, mentionOwner, mentionName, root, parent, kind, dynamicId, articleId, oid, commentType, dedupeKey, countQuota: !isReply, ...(noticeId ? { reply_notice_id: noticeId } : {}) };
     }
 
     if (action === 'post') {
@@ -7063,6 +7315,9 @@ export class StrollWorld {
   }
 
   makeDraft(plan) {
+    const { draftTtlMinutes = DEFAULTS.draftTtlMinutes } = validatePolicyPatch({
+      draftTtlMinutes: this.liveConfig()?.draftTtlMinutes ?? this.cfg.draftTtlMinutes,
+    });
     const draft = this.store.addDraft({
       action: plan.action,
       platform: plan.platform,
@@ -7084,6 +7339,9 @@ export class StrollWorld {
       mention: String(plan.mention ?? ''),
       root: plan.root ?? '',
       parent: plan.parent ?? '',
+      ...(plan.action === 'reply' && plan.platform === 'bilibili' ? {
+        biliReplyTargetVerified: true, reply_notice_id: plan.reply_notice_id,
+      } : {}),
       /**
        * 配图相关必须跟着草稿一起存。
        *
@@ -7096,7 +7354,7 @@ export class StrollWorld {
       imagePath: plan.imagePath ?? '',
       postKind: plan.postKind ?? '',
       postTitle: plan.postTitle ?? '',
-    });
+    }, draftTtlMinutes * 60_000);
     try {
       // 草稿创建后立刻落盘：进程重启/崩溃时，面板和鱼都不能对不上账
       this.store.save();
@@ -7152,7 +7410,7 @@ export class StrollWorld {
    */
   async approveAll() {
     const pending = this.store.pendingDrafts();
-    const safe = pending.filter((d) => ['like', 'save', 'follow'].includes(d.action));
+    const safe = pending.filter((d) => ['like', 'save', 'follow'].includes(d.action) && !this.platformOff(d.platform));
     if (!safe.length) return { ok: false, error: '没有可以批量批准的（点赞 / 稍后再看 / 关注）。' };
     const done = [];
     const failed = [];
@@ -7165,13 +7423,11 @@ export class StrollWorld {
   }
 
   async approveDraft(id, source = 'operator') {
+    this.liveConfig();
     const draft = this.store.draft(id);
     if (!draft) return { ok: false, error: '这条草稿不在了或已处理。' };
-    if (
-      draft.status === 'expired' ||
-      (draft.status === 'pending' && Date.now() - Date.parse(draft.createdAt) >= DRAFT_TTL_MS)
-    ) {
-      this.store.expireDueDrafts();
+    this.store.expireDueDrafts();
+    if (draft.status === 'expired') {
       this.store.save();
       return {
         ok: false,
@@ -7182,6 +7438,21 @@ export class StrollWorld {
       };
     }
     if (draft.status !== 'pending') return { ok: false, error: '这条草稿不在了或已处理。' };
+    const off = this.platformOff(draft.platform);
+    if (off) return { ...off, draftId: id };
+    if (draft.action === 'reply' && draft.platform === 'bilibili' && !draft.biliReplyTargetVerified) {
+      const error = '这条旧草稿的 B站回复目标未经核对，未发送；请从原通知重新生成草稿。';
+      this.store.closeDraft(id, 'rejected', { reason: error });
+      this.store.save();
+      return { ok: false, code: 'NO_REPLY_TARGET', sent: false, error };
+    }
+    const biliReply = draft.action === 'reply' && draft.platform === 'bilibili';
+    const blocked = biliReply && this.biliReplyBlock(draft, id);
+    if (blocked) {
+      this.store.closeDraft(id, 'rejected', { reason: blocked.error });
+      this.store.save();
+      return blocked;
+    }
     const check = this.policy.check(draft.action, draft.platform, draft.target, {
       userInitiated: true,
       quotaAction: draft.quotaAction || this.capAction(draft.action),
@@ -7189,7 +7460,7 @@ export class StrollWorld {
       dedupeKey: draft.dedupeKey,
       free: draft.action === 'dm' && !draft.countQuota,
       fast: !!draft.chat,
-      noDedupe: !!draft.chat,
+      noDedupe: biliReply || !!draft.chat,
     });
     if (!check.ok) {
       this.store.closeDraft(id, 'rejected', { reason: check.message });
@@ -7220,12 +7491,13 @@ export class StrollWorld {
       mention: draft.mention ?? '',
       root: draft.root,
       parent: draft.parent,
+      reply_notice_id: draft.reply_notice_id,
       // 从草稿带回来：少了这两个，审批后图文会丢图 / 抖音直接失败
       imagePath: draft.imagePath ?? '',
       postKind: draft.postKind ?? '',
       postTitle: draft.postTitle ?? '',
     };
-    const receipt = await this.executePlan(plan, source);
+    const receipt = await this.executePlan(plan, source, id);
     const draftState =
       receipt.uncertain || receipt.code === 'WRITE_UNCERTAIN' ? 'unknown' : receipt.ok ? 'sent' : 'failed';
     this.store.closeDraft(id, draftState, { receipt });
@@ -7239,8 +7511,16 @@ export class StrollWorld {
     return draft ? { ok: true, rejected: id } : { ok: false, error: '没这条草稿。' };
   }
 
-  async executePlan(plan, source) {
+  async executePlan(plan, source, draftId = '') {
     const { action, platform, target, text } = plan;
+    const off = this.platformOff(platform);
+    if (off) return off;
+    const replyKey = action === 'reply' && platform === 'bilibili' ? this.biliReplyKey(plan) : '';
+    if (replyKey) {
+      const blocked = this.biliReplyBlock(plan, draftId);
+      if (blocked) return blocked;
+      this.biliRepliesSending.add(replyKey);
+    }
     const t0 = Date.now();
     try {
       let result;
@@ -7325,10 +7605,8 @@ export class StrollWorld {
         result =
           platform === 'bilibili'
             ? await this.bili.dm(target, text)
-            // 陌生人：直接按昵称在聊天页回（主列表找不到就点「陌生人消息」文件夹）
-            // strict：标题认不出来就不发，宁可报没发也不发错人
             : plan.stranger
-              ? await this.douyin.replyDm(target, text, { strict: true })
+              ? await this.douyin.replyDm(target, text, { stranger: true })
               : plan.group
                 ? /**
                    * 群里发抖音视频链接：先试着发原生卡片（走抖音自己的「分享给朋友」，
@@ -7423,6 +7701,9 @@ export class StrollWorld {
         this.closeStrangerPendingFor(platform, target);
       }
       try {
+        if (replyKey && !uncertain && plan.reply_notice_id) {
+          this.store.markSeen(`bilibili:reply_notice:${plan.reply_notice_id}`);
+        }
         this.policy.consume(action, platform, target, {
           quotaAction: plan.quotaAction || this.capAction(action),
           // 群聊 / 回陌生人都要占额度（群聊走「群聊」，私信走「私信」）；只有回主人私信不占
@@ -7433,7 +7714,7 @@ export class StrollWorld {
             result?.visibility !== 'hidden' &&
             action !== 'unfollow' &&
             action !== 'unlike',
-          dedupeKey: plan.free || plan.chat || uncertain ? '' : plan.dedupeKey,
+          dedupeKey: plan.free || plan.chat || uncertain ? '' : replyKey || plan.dedupeKey,
           // free / chat：都只算「聊天」，不动公开动作的 20 秒节奏
           free: !!plan.free || !!plan.chat,
           text,
@@ -7497,6 +7778,8 @@ export class StrollWorld {
           .catch(() => {});
       }
       return { ok: false, code, action, platform, target, ...(uncertain ? { uncertain: true } : {}), error: error?.message ?? String(error) };
+    } finally {
+      if (replyKey) this.biliRepliesSending.delete(replyKey);
     }
   }
 
@@ -8031,6 +8314,9 @@ export class StrollWorld {
             { name: 'stroll.last', description: '上次动作' },
             { name: 'stroll.watch', description: '一起看的当前页面' },
             { name: 'stroll.books', description: '在读哪本书、读到百分之几' },
+            { name: 'stroll.social', description: '启用平台时显示的通用提示' },
+            { name: 'stroll.bilibili', description: '只在启用 B站时显示' },
+            { name: 'stroll.douyin', description: '只在启用抖音时显示' },
           ],
         },
       ],
@@ -8040,6 +8326,13 @@ export class StrollWorld {
 
   async invoke(panel, method, args = []) {
     try {
+      this.liveConfig();
+      const platform = ['search', 'list', 'comments', 'reply_comment', 'refreshBili'].includes(method) ? 'bilibili' :
+        ['bind_douyin_owner', 'douyin_self'].includes(method) ? 'douyin' :
+          method === 'dm_me' ? args[1] || 'bilibili' : method === 'inbox' ? args[1] : '';
+      const off = platform ? this.platformOff(platform) :
+        ['nudge', 'stranger_scan'].includes(method) && !this.pickPlatform() && this.platformOff();
+      if (off) return off;
       if (method === 'status') return await this.panelStatus();
       if (method === 'approve') return await this.approveDraft(String(args[0] ?? ''), 'operator');
       if (method === 'approve_all') return this.approveAll();
@@ -8279,10 +8572,12 @@ export class StrollWorld {
       if (method === 'watch_start') {
         const url = String(args[0] ?? '').trim();
         if (!url) return { ok: false, error: '给个要一起看的链接。' };
-        return await this.watchStart(url);
+        return await this.watchStart(url, args[1] === 'shared');
       }
-      if (method === 'watch_stop') return await this.watchStop();
-      if (method === 'watch_status') return await this.watchStatus();
+      if (method === 'watch_join') return await this.watchJoin(args[0]);
+      if (method === 'watch_mark') return await this.markWatchRoom();
+      if (method === 'watch_stop') return this.watchChanging ? { ok: false, error: '请等陪看连接完成后再结束。' } : await this.watchStop();
+      if (method === 'watch_status') return args[0] === 'panel' ? { ok: true, ...this.watchPanelState() } : await this.watchStatus();
       if (method === 'quick_like') return await this.quickAct('like', '', String(args[0] ?? ''));
       if (method === 'quick_unlike') return await this.quickAct('unlike', '', String(args[0] ?? ''));
       if (method === 'quick_comment') {
@@ -8291,7 +8586,7 @@ export class StrollWorld {
         return await this.quickAct('comment', text, String(args[1] ?? ''));
       }
       if (method === 'quick_follow') return await this.quickAct('follow', '', String(args[0] ?? ''));
-      if (method === 'login') return await this.login(String(args[0] ?? 'douyin'));
+      if (method === 'login') return await this.login(args[0]);
       if (method === 'dm_me') {
         // 主人自己点的「B站私信我」：不发公开内容、不占额度，就是验证链路通不通
         const text = String(args[0] ?? '').trim() || '在的，看到这条就说明私信通了。';
@@ -8385,7 +8680,8 @@ export class StrollWorld {
   /** 下一次自动出门大概什么时候；今天收工或关着就返回 null。 */
   autoNextView() {
     const mode = this.outingMode();
-    if (!this.cfg.enabled || mode === 'off') return null;
+    if (!this.pickPlatform() || mode === 'off') return null;
+
     const budgetCap = Math.max(0, Math.floor(Number(this.cfg.tokenDailyBudget ?? DEFAULTS.tokenDailyBudget) / 1500));
     const day = dayKey(new Date(), this.timeZone);
     const used = Number(this.store.data.autoSessions[day] ?? 0);
@@ -8609,7 +8905,9 @@ export class StrollWorld {
         platform: d.platform,
         preview: this.previewText(d),
         ageSec: d.ageSec,
-        expiresInSec: Math.max(0, Math.round(DRAFT_TTL_MS / 1000) - Number(d.ageSec ?? 0)),
+        expiresAt: d.expiresAt,
+        expiresInSec: d.expiresInSec,
+        platformOff: !!this.platformOff(d.platform),
       })),
       // 已作废的草稿：不能让它们静默消失，面板要显示「这几条过期了，需要重发」
       expiredDrafts: this.expiredDraftsView(5),
@@ -8674,17 +8972,7 @@ export class StrollWorld {
         commentMaxChars: Number(this.cfg.commentMaxChars ?? 120),
         newAccountRamp: this.cfg.newAccountRamp !== false,
       },
-      watch: this.watch
-        ? {
-            watching: true,
-            title: this.watch.title,
-            url: this.watch.url,
-            platform: this.watch.platform,
-            startedAt: new Date(this.watch.startedAt).toISOString(),
-            time: this.watch.last?.time ?? null,
-            duration: this.watch.last?.duration ?? null,
-          }
-        : { watching: false },
+      watch: this.watchPanelState(),
     };
   }
 }

@@ -1,20 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { cutChars, formatDuration, humanPause, imageMimeOf, parseDouyinId, parseKeywords, stripAtName, stripAtPlaceholder, truncate } from './util.js';
-
-/**
- * 去掉会话名后面的相对时间（「海底月 周六」→「海底月」）。
- * world.js 里有个同名函数；这边要独立用（常驻页按昵称做键），所以复制一份。
- */
-function stripRowTime(name) {
-  return String(name ?? '')
-    .replace(
-      /\s+(刚刚|今天|昨天|前天|周[一二三四五六日天]|星期[一二三四五六日天]|\d{1,2}-\d{1,2}|\d{1,2}:\d{2}|\d+\s*(?:秒|分钟|小时|天)前)(\s+\d{1,2}:\d{2})?$/,
-      '',
-    )
-    .trim();
-}
 import { loadPlaywright } from './browser.js';
+
+const ROW_TIME = /(?:刚刚|今天|昨天|前天|周[一二三四五六日天]|星期[一二三四五六日天]|\d{1,2}[-/]\d{1,2}|\d{1,2}:\d{2}|\d+\s*(?:秒|分钟|小时|天)前|\d+\s*天后消失)(?:\s+\d{1,2}:\d{2})?/;
+const ROW_TIME_SUFFIX = new RegExp(`\\s+(${ROW_TIME.source})(?:\\s+(?:在线|离线))?$`);
+const REPLY_ROW_ATTR = 'data-stroll-dm-reply';
+const REPLY_ROW = `[data-e2e="conversation-item"][${REPLY_ROW_ATTR}]`;
+const ACTIVE_REPLY_ROW = `${REPLY_ROW}[class~="conversationConversationItemcurConversation"]`;
+export function stripRowTime(name) {
+  return String(name ?? '').replace(ROW_TIME_SUFFIX, '').trim();
+}
 
 const ORIGIN = 'https://www.douyin.com';
 
@@ -153,7 +149,7 @@ const stateScript = String.raw`(() => {
   };
 })()`;
 
-const watchScript = String.raw`(() => {
+const watchPlayer = String.raw`(() => {
   const visible = (el) => {
     if (!el) return false;
     const r = el.getBoundingClientRect();
@@ -162,7 +158,11 @@ const watchScript = String.raw`(() => {
   const videos = Array.from(document.querySelectorAll('video'));
   // 抖音会预加载下一条，页面里可能同时有两个 video：优先「可见且没暂停」的那个，
   // 不然读到的可能是上一条的进度（一起刷时尤其明显）
-  const v = videos.find((x) => visible(x) && !x.paused) || videos.find(visible) || videos[0] || null;
+  return videos.find((video) => visible(video) && !video.paused) || videos.find(visible) || videos[0] || null;
+})()`;
+
+const watchScript = String.raw`(() => {
+  const v = ${watchPlayer};
   const pick = (sels) => {
     for (const sel of sels) {
       const nodes = Array.from(document.querySelectorAll(sel)).slice(0, 6);
@@ -208,7 +208,7 @@ const watchScript = String.raw`(() => {
     paused: v ? !!v.paused : null,
     ended: v ? !!v.ended : null,
     loop: v ? !!v.loop : null,
-    videoCount: videos.length,
+    videoCount: document.querySelectorAll('video').length,
     comments: pick(['[data-e2e="comment-item"]', '#comment .reply-item', '.reply-item', '.comment-item', '.danmaku-item']),
     loginHint: /登录后|请先登录|扫码登录|立即登录/.test(text),
   };
@@ -780,10 +780,22 @@ export class DouyinBrowser {
    * 默认后台（headless）。只有扫码登录和「一起看」才开窗。
    * 模式变了就重开一个上下文，免得把 headless 进程当有头用。
    */
-  async launch({ headless = this.cfg.background !== false, force = false, skipSave = false } = {}) {
+  assertPlatformOn(platform = 'douyin') {
+    if (this.cfg.enabled === false || this.cfg[platform] === false) {
+      throw new DouyinError('PLATFORM_OFF', `${platform === 'bilibili' ? 'B站' : '抖音'}已停用。`);
+    }
+  }
+
+  async launch({ headless = this.cfg.background !== false, force = false, skipSave = false, platform = 'douyin' } = {}) {
+    this.assertPlatformOn(platform);
     if (this.context && !force && this.headless === headless) return this.context;
-    if (this.context && (force || this.headless !== headless)) await this.close({ skipSave });
-    if (this.launching) return this.launching;
+    if (this.context && (force || this.headless !== headless)) await this.close({ skipSave, keepWatch: true });
+    this.assertPlatformOn(platform);
+    if (this.launching) {
+      const context = await this.launching;
+      this.assertPlatformOn(platform);
+      return context;
+    }
     this.launching = (async () => {
       const mod = await this.loadPlaywright();
       const chromium = mod.chromium ?? mod.default?.chromium;
@@ -815,16 +827,19 @@ export class DouyinBrowser {
       // 注意：Edge 和 Chrome 的 cookie 加密密钥是绑应用身份的（App-Bound Encryption），
       // 换一个浏览器读同一个 profile 会「没登录」——所以探针/调试要认准当初建库那个。
       const launchOnce = async () => {
+        this.assertPlatformOn(platform);
         try {
           return await chromium.launchPersistentContext(this.profileDir, { ...options, channel: this.channel ?? 'msedge' });
         } catch (error) {
           if (this.channel) throw error;
+          this.assertPlatformOn(platform);
           return await chromium.launchPersistentContext(this.profileDir, { ...options, channel: 'chrome' });
         }
       };
       try {
         context = await launchOnce();
       } catch (error) {
+        this.assertPlatformOn(platform);
         // 上次没收干净：profile 还锁着（exit 21 / ProcessSingleton），
         // 先把自己这个 profile 的残留进程清掉再试一次；不清的话会一直「浏览器起不来」。
         const reaped = await this.reapOrphans();
@@ -833,6 +848,10 @@ export class DouyinBrowser {
         context = await launchOnce();
       }
       if (context.pages().length === 0) await context.newPage().catch(() => {});
+      if (this.cfg.enabled === false || this.cfg[platform] === false) {
+        await context.close().catch(() => {});
+        throw new DouyinError('PLATFORM_OFF', '平台已停用。');
+      }
       context.on('close', () => {
         // 旧窗口的 close 可能比新窗口的赋值还晚到，只处理自己的那一个
         if (this.context !== context) return;
@@ -845,11 +864,13 @@ export class DouyinBrowser {
       this.context = context;
       this.headless = headless !== false;
       // 上次进程被强杀、cookie 没来得及落盘时，用备份补一次（缺 sessionid 才补）
-      await this.restoreCookies().catch(() => {});
+      if (platform === 'douyin') await this.restoreCookies().catch(() => {});
+      this.assertPlatformOn(platform);
       return context;
     })()
       .catch((error) => {
         this.launching = null;
+        if (error?.code === 'PLATFORM_OFF') throw error;
         throw new DouyinError('BROWSER_LAUNCH', `浏览器没起来：${error.message}`);
       })
       .finally(() => {
@@ -883,7 +904,7 @@ export class DouyinBrowser {
     });
   }
 
-  async getPage({ forLogin = false } = {}) {
+  async getPage({ forLogin = false, platform = 'douyin' } = {}) {
     /**
      * 登录窗开着的时候，谁也别来抢这个浏览器。
      * 以前只靠 holdOpen 在任务**执行到**那一步才拦，排在队列里的还得一个个跑完；
@@ -893,7 +914,7 @@ export class DouyinBrowser {
       throw new DouyinError('BUSY_WINDOW', '登录窗开着，先扫码或关掉它');
     }
     // 沿用当前的窗口模式：开着的登录窗不能被一次隐式 launch 关掉重开
-    const context = await this.launch({ headless: this.headless ?? (this.cfg.background !== false) });
+    const context = await this.launch({ headless: this.headless ?? (this.cfg.background !== false), platform });
     if (this.page && !this.page.isClosed() && !this.page.__strollRole) return this.page;
     if (this.page?.__strollRole) this.page = null;
     /**
@@ -972,7 +993,9 @@ export class DouyinBrowser {
    * 草稿模式仍然用主窗口（他要自己点「继续编辑 → 发布」、填验证码）。
    */
   async launchPostProfile() {
+    this.assertPlatformOn();
     const mod = await this.loadPlaywright();
+    this.assertPlatformOn();
     const chromium = mod.chromium ?? mod.default?.chromium;
     const dir = path.join(this.dataDir, 'stroll', 'post-profile');
     fs.mkdirSync(dir, { recursive: true });
@@ -2223,10 +2246,10 @@ export class DouyinBrowser {
   async conversationRows(page = this.dmPage) {
     if (!page || page.isClosed()) return [];
     return await page
-      .evaluate(() => {
+      .evaluate(({ time, suffix }) => {
         const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
-        const TIME = /^(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/;
-        const TRAIL = /\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/;
+        const TIME = new RegExp(`^(?:${time})(?:\\s+(?:在线|离线))?$`);
+        const TRAIL = new RegExp(suffix);
         return Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'))
           .filter((el) => !el.closest('[class*="StrangerConversationList"]'))
           .slice(0, 40)
@@ -2253,7 +2276,7 @@ export class DouyinBrowser {
             return { name, at, preview };
           })
           .filter((row) => row.name);
-      })
+      }, { time: ROW_TIME.source, suffix: ROW_TIME_SUFFIX.source })
       .catch(() => []);
   }
 
@@ -2276,17 +2299,16 @@ export class DouyinBrowser {
       })
       .catch(() => '');
     if (!raw) return null;
-    const TIME = /(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})/;
     // 「陌生人消息 刚刚 小鹿：你好」→ 名字取「时间」后面、冒号前面那段
     const afterTime = raw.replace(/^.*?陌生人消息\s*/, '');
-    const m = TIME.exec(afterTime);
+    const m = ROW_TIME.exec(afterTime);
     const tail = m ? afterTime.slice(m.index + m[0].length).trim() : afterTime;
     const nameHit = /^([^:：]{1,30})[:：]\s*(.*)$/.exec(tail);
     const who = (nameHit?.[1] ?? '').trim();
     const preview = (nameHit?.[2] ?? '').trim();
     return {
       who,
-      at: m ? m[1] : '',
+      at: m?.[0] ?? '',
       preview: preview || tail,
       raw,
     };
@@ -2468,7 +2490,7 @@ export class DouyinBrowser {
    * （选择器全落空），严格核对会让这条路永远失败——调用方必须自己核对内容
    * （`readStrangerThread` 会拿列表预览和读到的消息比对）。
    */
-  async clickStrangerThread(page, name, { blind = false } = {}) {
+  async clickStrangerThread(page, name, { blind = false, exactOnly = false } = {}) {
     const want = String(name ?? '').trim();
     if (!want || !page || page.isClosed()) return false;
     const norm = (s) => String(s ?? '').replace(/[\s\u3000]+/g, '').toLowerCase();
@@ -2480,10 +2502,11 @@ export class DouyinBrowser {
     // 按昵称整串点，不用 hasText 子串：行里还有消息预览，可能正好含这个名字
     const hit = await page
       .evaluate(
-        ({ w }) => {
+        ({ w, exactOnly, timeSuffix, rowAttr }) => {
           const box = document.querySelector('[class*="StrangerConversationListlistWrapper"]');
           if (!box) return null;
-          const flat = (s) => String(s ?? '').replace(/\s+/g, '').toLowerCase();
+          const flat = (s) =>
+            exactOnly ? s.replace(/\s+/g, ' ').trim() : s.replace(/\s+/g, '').toLowerCase();
           const rows = Array.from(box.querySelectorAll('[data-e2e="conversation-item"]'));
           const nameOf = (el) => {
             const t = el.querySelector('[class*="ConversationItemtitle"]');
@@ -2492,29 +2515,33 @@ export class DouyinBrowser {
              * 抖音把时间也塞进标题：「小鹿 刚刚」「小鹿 10:55」。
              * 不剥掉的话整串相等永远不成立，blind 点击会一直判「点不到」。
              */
-            return raw
-              .replace(
-                /\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/,
-                '',
-              )
-              .trim();
+            return raw.replace(new RegExp(timeSuffix), '').trim();
           };
-          let el = rows.find((r) => flat(nameOf(r)) === w) ?? null;
+          const matches = rows.filter((row) => flat(nameOf(row)) === w);
+          if (exactOnly && matches.length > 1) return { ambiguous: true };
+          if (exactOnly && !matches.length) return null;
+          let el = matches[0] ?? null;
           const exact = !!el;
           if (!el) {
             const partial = rows.filter((r) => flat(nameOf(r)).includes(w) || w.includes(flat(nameOf(r))));
             if (partial.length === 1) el = partial[0];
           }
           if (!el) return null;
+          if (exactOnly) {
+            el.setAttribute(rowAttr, '');
+            return { exact };
+          }
           el.scrollIntoView({ block: 'nearest' });
           const r = el.getBoundingClientRect();
           if (r.width < 10 || r.height < 10) return null;
           return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), exact };
         },
-        { w: norm(want) },
+        { w: exactOnly ? want.replace(/\s+/g, ' ').trim() : norm(want), exactOnly, timeSuffix: ROW_TIME_SUFFIX.source, rowAttr: REPLY_ROW_ATTR },
       )
       .catch(() => null);
+    if (hit?.ambiguous) throw new DouyinError('THREAD_DRIFT', '有多个同名陌生人会话，无法确认收件人，没发。');
     if (!hit) return false;
+    if (exactOnly) return this.clickMarkedReplyRow(page);
     await page.mouse.click(hit.x, hit.y).catch(() => {});
     /**
      * 先看一眼标题读不读得出来：这个布局经常整块读不到。
@@ -2533,6 +2560,13 @@ export class DouyinBrowser {
       await page.waitForTimeout(50);
     }
     return false;
+  }
+
+  async clickMarkedReplyRow(page) {
+    await page.locator(REPLY_ROW).click({ timeout: 1500 }).catch(() => {
+      throw new DouyinError('THREAD_DRIFT', '会话行没能打开，无法确认收件人，没发。');
+    });
+    return true;
   }
 
   /** 诊断用：最近两条「谁说的 + 类型 + 开头」，读错会话时一眼能看出来。 */
@@ -2579,7 +2613,7 @@ export class DouyinBrowser {
       })
       .catch(() => []);
 
-    const TIME = /^(.*?)\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})\s+(.*)$/;
+    const TIME = new RegExp(`^(.*?)\\s+(${ROW_TIME.source})\\s+(.*)$`);
     const ownerName = String(owner ?? '').trim();
     const skip = new Set((groups ?? []).map((g) => String(g ?? '').trim()).filter(Boolean));
     const out = [];
@@ -5457,7 +5491,7 @@ export class DouyinBrowser {
     }
   }
 
-  async sendInChat(page, input, text, { mention = '' } = {}) {
+  async sendInChat(page, input, text, { mention = '', verifyRecipient } = {}) {
     // 刚被限流过：直接告诉她还要等多久，别再去页面上试（越试越糟）
     if (Number(this.rateUntil ?? 0) > Date.now()) {
       const left = Math.ceil((Number(this.rateUntil) - Date.now()) / 1000);
@@ -5503,6 +5537,7 @@ export class DouyinBrowser {
       const typedNow = await read();
       if (!typedNow) throw new DouyinError('NOT_TYPED', '正文没进输入框，没发。');
     }
+    if (verifyRecipient) await verifyRecipient();
     await page.keyboard.press('Enter');
     // 轮询「输入框清空了没有」：正常 200-300ms 就发完了。每 25ms 问一次，
     // 比原来 60ms 平均快 35ms，比死等 1.5 秒快一个数量级。
@@ -5518,6 +5553,7 @@ export class DouyinBrowser {
         .locator('[data-e2e="msg-send"], .e2e-send-msg-btn, [class*="publishBtn"], button:has-text("发送")')
         .first();
       if ((await sendBtn.count().catch(() => 0)) > 0 && (await sendBtn.isVisible().catch(() => false))) {
+        if (verifyRecipient) await verifyRecipient();
         await sendBtn.click({ timeout: 4000 }).catch(() => {});
         for (let i = 0; i < 12; i += 1) {
           await page.waitForTimeout(25);
@@ -7250,9 +7286,9 @@ export class DouyinBrowser {
   }
 
   /** 读会话列表里的行（纯 DOM，不导航、不点击）。 */
-  async readThreadRows(page) {
+  async readThreadRows(page, replyOnly = false) {
     return await page
-      .evaluate(() => {
+      .evaluate((replyRow) => {
         const clean = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
         /**
          * 私信会话的 React props 里有 `toParticipantSecUserId`（对方 sec_uid），
@@ -7293,14 +7329,14 @@ export class DouyinBrowser {
           }
           return acc.hasSec || acc.cid ? acc : null;
         };
-        return Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'))
+        return Array.from(document.querySelectorAll(replyRow || '[data-e2e="conversation-item"]'))
           .slice(0, 60)
           .map((el) => {
             const lines = (el.innerText || '').split('\n').map(clean).filter(Boolean);
             const badge = el.querySelector('[class*="unread"], [class*="Unread"]');
             const unread = Number(clean(badge?.innerText).replace(/\D/g, '')) || 0;
             const meta = conversationMeta(el);
-            const name = lines[0] || '';
+            const name = (replyRow && clean(el.querySelector('[class*="ConversationItemtitle"]')?.innerText)) || lines[0] || '';
             /**
              * 群判据（按可靠程度）：
              * 1) props 里 toParticipantSecUserId 是空串 —— 实测最准；
@@ -7329,7 +7365,7 @@ export class DouyinBrowser {
             };
           })
           .filter((x) => x.name);
-      })
+      }, replyOnly ? ACTIVE_REPLY_ROW : '')
       .catch(() => []);
   }
 
@@ -7546,13 +7582,60 @@ export class DouyinBrowser {
   }
 
   /** 在抖音聊天页回一条私信：按昵称找到会话，点进去输入。 */
-  /**
-   * 在聊天页发一条。mention 是「要真的 @ 到的昵称」（群里才有意义）：
-   * 传了就会先从候选面板插一个真 chip，再写正文。
-   */
-  async replyDm(name, text, { mention = '', strict = false, requireTitle = false } = {}) {
+  async replyStrangerDm(name, text) {
+    const who = stripRowTime(name).replace(/\s+/g, ' ');
+    if (!who) throw new DouyinError('BAD_TARGET', '没有会话昵称，回不了');
+    return this.serialize(async () => {
+      const page = await this.chatPageForSend();
+      if (!(await this.isLoggedIn())) throw new DouyinError('LOGIN_REQUIRED', '抖音还没登录，发不了私信');
+      const options = { exactOnly: true };
+      let via = 'folder';
+      const clearMark = () => page.evaluate(({ selector, attr }) => {
+        document.querySelectorAll(selector).forEach((row) => row.removeAttribute(attr));
+      }, { selector: REPLY_ROW, attr: REPLY_ROW_ATTR }).catch(() => {});
+      const verified = async () => {
+        const rows = await this.readThreadRows(page, true);
+        return rows.length === 1 && rows[0].kind === 'dm' && stripRowTime(rows[0].name) === who;
+      };
+      const verifyRecipient = async () => {
+        if (!(await verified())) throw new DouyinError('THREAD_DRIFT', '无法确认当前收件人，没发。');
+      };
+      try {
+        if (!/\/chat/.test(page.url())) await this.gotoChat(page);
+        this.chatThread = '';
+        await clearMark();
+        if (!(await this.clickStrangerThread(page, who, options))) {
+          via = 'main';
+          if (await this.strangerInboxOpen(page)) await this.closeStrangerInbox(page);
+          if (!(await this.clickThread(page, who, options))) {
+            throw new DouyinError('NO_DM', '聊天列表和「陌生人消息」里都找不到这个会话，没发。');
+          }
+        }
+        await page.locator(ACTIVE_REPLY_ROW).waitFor({ state: 'attached', timeout: 1800 }).catch(() => {});
+        await verifyRecipient();
+        const input = await this.waitMsgInput(page, 6000);
+        if (!input) throw new DouyinError('NO_INPUT', '已找到陌生人会话，但没找到输入框，没发。');
+        await verifyRecipient();
+        await this.sendInChat(page, input, text, { verifyRecipient });
+        this.lastAction = `dm ${who}`;
+        this.log?.info?.('stroll stranger dm reply', { via, sent: true });
+        return { ok: true, sent: true };
+      } catch (error) {
+        this.log?.info?.('stroll stranger dm reply', { via, code: error?.code ?? 'ERROR' });
+        throw error;
+      } finally {
+        await clearMark();
+        if (await this.strangerInboxOpen(page)) await this.closeStrangerInbox(page).catch(() => {});
+        this.scheduleClose(60);
+      }
+    });
+  }
+
+  /** 在聊天页发一条；群聊的 mention 会通过候选面板插入真正的 @。 */
+  async replyDm(name, text, { mention = '', stranger = false } = {}) {
     const who = String(name ?? '').trim();
     if (!who) throw new DouyinError('BAD_TARGET', '没有会话昵称，回不了');
+    if (stranger) return this.replyStrangerDm(who, text);
     // 各段耗时带上：主人在追「一秒内」，得知道慢在哪一段（挂在回执里，不额外打日志）
     const t0 = Date.now();
     // 私信页正停在这个会话上：不用跳转、不用点会话，直接打字回车。
@@ -7728,7 +7811,7 @@ export class DouyinBrowser {
    * 不能用 hasText 直接点：群名常常是「主人名, 另一个人, 再一个」，按子串找会
    * 把发给主人的私信点成群聊。先按标题整串相等找，再退回包含。
    */
-  async clickThread(page, name) {
+  async clickThread(page, name, { exactOnly = false } = {}) {
     const want = String(name ?? '').trim();
     if (!want) return false;
     /**
@@ -7736,15 +7819,16 @@ export class DouyinBrowser {
      * 光凭标题永远点不到第二个。resolveGroups 会给它们加「#2」后缀，
      * 并在读列表时把会话 id 打到 DOM 上——这里优先按会话 id 点。
      */
-    const m = /^(.*?)\s*#(\d+)$/.exec(want);
+    const m = exactOnly ? null : /^(.*?)\s*#(\d+)$/.exec(want);
     const base = (m ? m[1] : want).trim();
     const nth = m ? Math.max(1, Number(m[2])) : 0;
-    const cid = String(this.threadCids?.[want] ?? '');
-    const box = await page
+    const cid = exactOnly ? '' : String(this.threadCids?.[want] ?? '');
+    const find = () => page
       .evaluate(
-        ({ target, nth, cid }) => {
+        ({ target, nth, cid, exactOnly, timeSuffix, rowAttr }) => {
           const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
-          const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
+          const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'))
+            .filter((el) => !exactOnly || !el.closest('[class*="StrangerConversationList"]'));
           const titleOf = (el) => {
             const t = el.querySelector('[class*="ConversationItemtitle"]');
             const line = String((el.innerText || '').split('\n')[0] || '');
@@ -7755,80 +7839,43 @@ export class DouyinBrowser {
              * （`群A、小鹿`），包含就会同时命中两条 → 判成歧义 → 直接返回 false，
              * 表现就是「列表里明明看得见，发的时候说找不到」。
              */
-            return raw
-              .replace(
-                /\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/,
-                '',
-              )
-              .trim();
+            return raw.replace(new RegExp(timeSuffix), '').trim();
           };
           let hit = null;
           if (cid) hit = items.find((el) => el.getAttribute('data-stroll-cid') === cid) ?? null;
           if (!hit) {
             const exact = items.filter((el) => titleOf(el) === norm(target));
+            if (exactOnly && exact.length > 1) return { ambiguous: true };
             if (nth > 0) hit = exact[nth - 1] ?? null;
             else hit = exact[0] ?? null;
           }
-          if (!hit) {
+          if (!hit && !exactOnly) {
             // 群名可能被截断（列表里显示不全），这时才用包含
             const partial = items.filter((el) => titleOf(el).includes(norm(target)));
             if (partial.length === 1) hit = partial[0];
           }
           if (!hit) return null;
+          if (exactOnly) {
+            hit.setAttribute(rowAttr, '');
+            return { exact: true };
+          }
           hit.scrollIntoView({ block: 'nearest' });
           const r = hit.getBoundingClientRect();
           if (r.width < 10 || r.height < 10) return null;
           return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
         },
-        { target: base, nth, cid },
+        { target: base, nth, cid, exactOnly, timeSuffix: ROW_TIME_SUFFIX.source, rowAttr: REPLY_ROW_ATTR },
       )
       .catch(() => null);
-    if (box) {
-      await page.mouse.click(box.x, box.y).catch(() => {});
-      return true;
-    }
     /**
      * 还没找到：会话可能在列表很下面（昨晚的消息，中间刷了十几个小时）。
      * 抖音的会话列表是**虚拟滚动**，屏幕外的行根本不在 DOM 里，`querySelectorAll`
      * 看不到——所以先滚到顶，再一屏一屏往下找。
      */
-    const found = await this.scrollConversationList(page, async () =>
-      page
-        .evaluate(
-          ({ target, nth, cid }) => {
-            const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
-            const items = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
-            const titleOf = (el) => {
-              const t = el.querySelector('[class*="ConversationItemtitle"]');
-              const line = String((el.innerText || '').split('\n')[0] || '');
-              return norm(t?.innerText || line)
-                .replace(
-                  /\s+(刚刚|\d{1,2}:\d{2}|昨天|前天|星期[一二三四五六日]|\d+\s*(?:秒|分钟|小时|天)前|\d{1,2}-\d{1,2})$/,
-                  '',
-                )
-                .trim();
-            };
-            let hit = null;
-            if (cid) hit = items.find((el) => el.getAttribute('data-stroll-cid') === cid) ?? null;
-            if (!hit) {
-              const exact = items.filter((el) => titleOf(el) === norm(target));
-              hit = (nth > 0 ? exact[nth - 1] : exact[0]) ?? null;
-            }
-            if (!hit) {
-              const partial = items.filter((el) => titleOf(el).includes(norm(target)));
-              if (partial.length === 1) hit = partial[0];
-            }
-            if (!hit) return null;
-            hit.scrollIntoView({ block: 'nearest' });
-            const r = hit.getBoundingClientRect();
-            if (r.width < 10 || r.height < 10) return null;
-            return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-          },
-          { target: base, nth, cid },
-        )
-        .catch(() => null),
-    );
+    const found = (await find()) ?? (await this.scrollConversationList(page, find));
+    if (found?.ambiguous) throw new DouyinError('THREAD_DRIFT', '有多个同名会话，无法确认收件人，没发。');
     if (!found) return false;
+    if (exactOnly) return this.clickMarkedReplyRow(page);
     await page.mouse.click(found.x, found.y).catch(() => {});
     return true;
   }
@@ -7867,6 +7914,8 @@ export class DouyinBrowser {
     // 先回到顶部：目标可能在上面，从当前位置往下滚永远到不了
     await page.evaluate(toTop).catch(() => {});
     await page.waitForTimeout(120);
+    const first = await find();
+    if (first) return first;
     for (let i = 0; i < tries; i += 1) {
       const moved = await page.evaluate(step).catch(() => false);
       if (!moved) break;
@@ -8549,7 +8598,8 @@ export class DouyinBrowser {
    * 专门用来登录的窗口：开一个有头窗口停在登录页，期间不自动关页。
    * 不复用「一起看」，免得扫码扫到一半被 scheduleClose 关掉。
    */
-  async loginWindow(url, { clearCookies = null } = {}) {
+  async loginWindow(url, { clearCookies = null, platform = 'douyin' } = {}) {
+    this.assertPlatformOn(platform);
     // 先在队列外面把窗口占住：排在后面的后台任务一执行就会立刻退出
     this.holdOpen = true;
     if (this.closeTimer) clearTimeout(this.closeTimer);
@@ -8560,7 +8610,7 @@ export class DouyinBrowser {
       this.closeTimer = null;
       this.holdOpen = true;
       try {
-        await this.launch({ headless: false, force: true, skipSave: true });
+        await this.launch({ headless: false, force: true, skipSave: true, platform });
         // launch 内部的 close() 会把 holdOpen 清掉，这里补回来：
         // 不然扫码期间只要来一次 inbox/feed，60 秒后登录窗就被自动关掉（看起来就是「网页闪一下没了」）
         this.holdOpen = true;
@@ -8577,10 +8627,11 @@ export class DouyinBrowser {
         const ctx = this.context;
         if (!ctx) throw new DouyinError('NO_CONTEXT', '浏览器没起来，再点一次「登录」。');
         // 先把主页面占住（后台任务要用它），登录窗才是额外的那一个
-        await this.getPage({ forLogin: true }).catch(() => null);
+        await this.getPage({ forLogin: true, platform }).catch(() => null);
         await this.closeLoginPage();
         const page = await ctx.newPage();
         this.loginPage = page;
+        this.assertPlatformOn(platform);
         if (url) await this.goto(page, url, 2200);
         return { ok: true, url: page.url() };
       } catch (error) {
@@ -8593,7 +8644,7 @@ export class DouyinBrowser {
   async loginWindowClose() {
     this.holdOpen = false;
     await this.closeLoginPage().catch(() => {});
-    await this.close().catch(() => {});
+    await this.close({ keepWatch: true }).catch(() => {});
     return { ok: true };
   }
 
@@ -8606,8 +8657,10 @@ export class DouyinBrowser {
 
   /** 一起看：开一个有头窗口，主人可以自己在这个窗口里翻页，桌宠读同一个页面。 */
   /** 一起看：单独起一个有窗口的浏览器，主浏览器（私信/群）不露头。 */
-  async watchStart(url, { cookies = [] } = {}) {
+  async watchStart(url, { cookies = [], manual = false } = {}) {
     return this.serialize(async () => {
+      const platform = this.platformOf(url);
+      if (platform !== 'web') this.assertPlatformOn(platform);
       await this.closeWatch();
       const browser = await this.launchWatchBrowser();
       this.watchBrowser = browser;
@@ -8625,6 +8678,7 @@ export class DouyinBrowser {
         page.setDefaultTimeout(20000);
         this.watchPage = page;
         await this.applyWatchWindow(browser, page);
+        if (platform !== 'web') this.assertPlatformOn(platform);
         if (url) await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
         const hasVideo = await page
           .waitForSelector('video', { timeout: 12000 })
@@ -8637,7 +8691,7 @@ export class DouyinBrowser {
         }
         this.watchStartedAt = Date.now();
         // 抖音打开后常常停在暂停态（浏览器拦自动播放）：主动播一下，不然「一起刷」第一轮就卡住
-        if (hasVideo && this.platformOf(finalUrl) === 'douyin') await this.ensureWatchPlaying(page);
+        if (!manual && hasVideo && this.platformOf(finalUrl) === 'douyin') await this.ensureWatchPlaying(page);
         const digest = await page.evaluate(watchScript).catch(() => null);
         return {
           ok: true,
@@ -8721,6 +8775,23 @@ export class DouyinBrowser {
     } catch {
       return null;
     }
+  }
+
+  async watchRoomShot(url) {
+    const page = this.watchPage;
+    if (!page || page.isClosed() || page.url() !== url) return null;
+    const clip = await page.evaluate(`(() => {
+      const rect = (${watchPlayer})?.getBoundingClientRect();
+      if (!rect) return null;
+      const x = Math.max(0, Math.ceil(rect.left));
+      const y = Math.max(0, Math.ceil(rect.top));
+      const width = Math.floor(Math.min(innerWidth, rect.right)) - x;
+      const height = Math.floor(Math.min(innerHeight, rect.bottom)) - y;
+      return width >= 120 && height >= 90 ? { x, y, width, height } : null;
+    })()`);
+    if (!clip || page.url() !== url) return null;
+    const bytes = await page.screenshot({ type: 'jpeg', quality: 55, scale: 'css', timeout: 2000, clip });
+    return page === this.watchPage && page.url() === url && bytes.length <= 512 * 1024 ? { bytes } : null;
   }
 
   /**
@@ -8876,7 +8947,7 @@ export class DouyinBrowser {
     return { ok: true };
   }
 
-  async close({ skipSave = false } = {}) {
+  async close({ skipSave = false, keepWatch = false } = {}) {
     if (this.closeTimer) clearTimeout(this.closeTimer);
     this.closeTimer = null;
     this.holdOpen = false;
@@ -8885,7 +8956,7 @@ export class DouyinBrowser {
     // 关窗之前先备份登录态：进程被强杀时 Chromium 不一定来得及把 cookie 落盘。
     // 登录窗这条路不用存——马上要用新窗口重新扫码，存一次反而多等一两秒。
     if (!skipSave) await this.saveCookies({ force: true }).catch(() => {});
-    await this.closeWatch().catch(() => {});
+    if (!keepWatch) await this.closeWatch().catch(() => {});
     // 分享用的离屏窗口是常驻的（为了省冷启动），这里必须一起收掉
     await this.closeShareWindow().catch(() => {});
     await this.page?.close().catch(() => {});

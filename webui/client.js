@@ -424,12 +424,35 @@ export default {
         const watchBtn = button('一起看', () => startWatch(), 'primary');
         watchBtn.prepend(icon('play', 12));
         watchRow.append(watchInput, watchBtn);
+        watchInput.setAttribute('aria-label', '陪看视频链接');
+        const watchSharedBtn = button('多人陪看', () => startWatch(true), 'ghost xs');
+        watchRow.append(watchSharedBtn);
+        const watchJoinRow = el('div', undefined, 'stroll-inline');
+        const watchCodeInput = el('input', undefined, 'stroll-input');
+        watchCodeInput.type = 'text';
+        watchCodeInput.placeholder = '输入另一条鱼的短码';
+        watchCodeInput.setAttribute('aria-label', '多人陪看短码');
+        watchCodeInput.autocomplete = 'off';
+        watchCodeInput.spellcheck = false;
+        watchCodeInput.maxLength = 20;
+        const watchJoinBtn = button('加入', () => joinWatch(), 'ghost xs');
+        watchJoinRow.append(watchCodeInput, watchJoinBtn);
+
+        const watchInviteRow = el('div', undefined, 'stroll-inline');
+        watchInviteRow.style.display = 'none';
+        const watchInvite = el('input', undefined, 'stroll-input');
+        watchInvite.type = 'text';
+        watchInvite.readOnly = true;
+        watchInvite.setAttribute('aria-label', '本次房间短码，复制给同机另一条鱼');
+        watchInvite.addEventListener('focus', () => watchInvite.select());
+        const watchMarkBtn = button('看这里', () => markWatch(), 'ghost xs');
+        watchInviteRow.append(watchInvite, watchMarkBtn);
 
         const watchFoot = el('div', undefined, 'stroll-card-foot');
         const watchHint = el('span', undefined, 'stroll-token');
         const watchStopBtn = button('结束', () => stopWatch(), 'ghost xs');
         watchFoot.append(watchHint, watchStopBtn);
-        watch.append(watchHead, watchDesc, watchBody, watchRow, watchFoot);
+        watch.append(watchHead, watchDesc, watchBody, watchRow, watchJoinRow, watchInviteRow, watchFoot);
 
         duo.append(browse, watch);
         root.append(duo);
@@ -776,6 +799,7 @@ export default {
         let lastData = null;
         let liveData = null;
         let liveWatch = null;
+        let watchPending = false;
         let toastTimer = null;
         let lastPresenceKey = '';
         // 关掉「自己出门」再打开时，恢复上次的次数/方式，而不是硬塞成 1 次
@@ -813,6 +837,8 @@ export default {
           const caps = p.caps ?? {};
           const bili = s.bili ?? {};
           const dy = s.douyin ?? {};
+          const biliOff = bili.enabled === false;
+          const dyOff = dy.enabled === false;
           // 「最近异常」：有才显示，没有就整块隐藏（不占版面）
           {
             const list = data?.anomalies ?? [];
@@ -887,8 +913,8 @@ export default {
           if (paused) {
             lede.textContent = `手刹拉着：${p.paused.reason || '暂停中'}。解除了再出门。`;
           } else {
-            const b = bili.loggedIn ? 'B站已登录' : 'B站未登录';
-            const d = dy.loggedIn ? '抖音已登录' : '抖音未登录';
+            const b = biliOff ? 'B站已停用' : bili.loggedIn ? 'B站已登录' : 'B站未登录';
+            const d = dyOff ? '抖音已停用' : dy.loggedIn ? '抖音已登录' : '抖音未登录';
             const quotaLine = (key, name) =>
               left(key) > 0 ? `还能${name} ${left(key)} 次` : `${name}今天用完了`;
             lede.textContent = `${b} · ${d}；${quotaLine('like', '赞')}，${quotaLine('comment', '评')}。`;
@@ -896,10 +922,10 @@ export default {
 
           chips.replaceChildren(
             ...[
-              chip(bili.loggedIn ? `B站 ${cut(bili.name || '已登录', 12)}` : 'B站 未登录', bili.loggedIn ? 'ok' : 'off'),
+              chip(biliOff ? 'B站 已停用' : bili.loggedIn ? `B站 ${cut(bili.name || '已登录', 12)}` : 'B站 未登录', bili.loggedIn ? 'ok' : 'off'),
               chip(
-                dy.loggedIn ? `抖音 ${dy.running && dy.headless ? '后台待命' : '已登录'}` : '抖音 待登录',
-                dy.loggedIn ? 'ok' : 'warn',
+                dyOff ? '抖音 已停用' : dy.loggedIn ? `抖音 ${dy.running && dy.headless ? '后台待命' : '已登录'}` : '抖音 待登录',
+                dyOff ? 'off' : dy.loggedIn ? 'ok' : 'warn',
               ),
               chip(paused ? '风控 手刹中' : p.quiet ? '安静时段' : '风控 正常', paused ? 'bad' : p.quiet ? 'warn' : 'ok'),
               chip(`审批 ${APPROVALS.find((a) => a.value === p.approval)?.label ?? '—'}`, 'off'),
@@ -1063,22 +1089,7 @@ export default {
           tokenHint.textContent = '预算只决定每天出门几次，不是已用量';
 
           // 一起看
-          const watching = data?.watch?.watching === true;
-          watchState.textContent = watching ? '进行中' : '未开始';
-          watchState.className = `stroll-state ${watching ? 'live' : ''}`.trim();
-          watchEmpty.style.display = watching ? 'none' : '';
-          watchLive.style.display = watching ? '' : 'none';
-          watchStopBtn.disabled = !watching;
-          if (watching) {
-            const t = Number(data.watch.time ?? 0);
-            const d = Number(data.watch.duration ?? 0);
-            watchNowTitle.textContent = data.watch.title || data.watch.url || '正在看';
-            watchBar.style.width = d > 0 ? `${Math.min(100, Math.round((t / d) * 100))}%` : '0%';
-            watchTime.textContent = d > 0 ? `${clock(t)} / ${clock(d)}` : '进度未知';
-            watchComment.textContent = data.watch.platform === 'douyin' ? '抖音页面' : 'B站页面';
-          }
-          watchHint.textContent = `她最多每 ${Number(cfg.watchSpeakSec ?? 60)} 秒说一句`;
-          liveWatch = watching ? data.watch : null;
+          renderWatch(data?.watch, cfg);
           applyPresence(data?.presence);
 
           // 她的生活
@@ -1137,11 +1148,12 @@ export default {
 
           // 账号
           biliName.textContent = bili.loggedIn ? bili.name || '已登录' : 'B站';
-          biliSub.textContent = bili.loggedIn ? `UID ${bili.uid || '—'} · 写动作可用` : '未登录 · 能看不能赞';
+          biliSub.textContent = biliOff ? '已停用 · 登录态保留' : bili.loggedIn ? `UID ${bili.uid || '—'} · 写动作可用` : '未登录 · 能看不能赞';
           biliBtn.textContent = bili.loggedIn ? '重新登录' : '登录 B站';
+          biliBtn.disabled = biliOff;
           biliOut.style.display = bili.loggedIn ? '' : 'none';
-          dyName.textContent = dy.loggedIn ? '抖音' : '抖音（未登录）';
-          dySub.textContent = dy.loggedIn
+          dyName.textContent = dy.loggedIn || dyOff ? '抖音' : '抖音（未登录）';
+          dySub.textContent = dyOff ? '已停用 · 登录态保留' : dy.loggedIn
             ? dy.running
               ? dy.headless
                 ? '已登录 · 后台运行'
@@ -1149,10 +1161,11 @@ export default {
               : '已登录 · 后台待命'
             : '未登录：扫码 / 过验证';
           dyBtn.textContent = dy.loggedIn ? '重新登录' : '登录 / 验证';
+          dyBtn.disabled = dyOff;
           dyOut.style.display = dy.loggedIn ? '' : 'none';
           // 填了抖音号/链接还没解析时，优先给「绑定这个号」；已绑才给「查登录号」
           const pending = s.owner?.douyinPending === true;
-          dyResolve.style.display = pending ? '' : 'none';
+          dyResolve.style.display = !dyOff && pending ? '' : 'none';
           dyBind.style.display = !pending && dy.loggedIn ? '' : 'none';
 
           // 主人绑定：两边说法一致，一眼看出哪边没绑
@@ -1181,7 +1194,7 @@ export default {
             : owner.douyinPending
               ? '抖音号在后台常常搜不出结果；点「绑定这个号」会说明，主页链接最稳'
               : '把 sec_uid、主页链接或抖音号填到设置里的「主人抖音」';          dyOwner.classList.toggle('is-warn', !dyBound);
-          inboxDmDy.style.display = dyBound && !owner.douyinSame ? '' : 'none';
+          inboxDmDy.style.display = !dyOff && dyBound && !owner.douyinSame ? '' : 'none';
 
           // 待批（草稿 + 等你点头的陌生人私信，一起算进这个数字）
           const drafts = data?.drafts ?? [];
@@ -1196,14 +1209,14 @@ export default {
            * 已过期的草稿要露出来。
            *
            * 2026-11-22 群友反馈：明明看到过一条待批，过一会儿没了，
-           * 桌宠那边还以为在等她批。实际是草稿 30 分钟就作废——
+           * 桌宠那边还以为在等她批。实际是草稿到期就作废——
            * 以前连痕迹都不留，现在至少告诉她「这几条作废了，要重发」。
            */
           if (expiredDrafts.length) {
             const box = el('div', undefined, 'stroll-expired');
             box.append(
               el('strong', `${expiredDrafts.length} 条草稿已过期（未发送）`),
-              el('span', '超过 30 分钟没批就作废，不会发出去。还想发就让她重新提一次。'),
+              el('span', '到期未批准，不会发出去。还想发就让她重新提一次。'),
             );
             for (const d of expiredDrafts) {
               box.append(el('span', `${d.preview} · 未发送 · 已过期`, 'stroll-expired-item'));
@@ -1771,17 +1784,23 @@ export default {
           const iconBox = el('div', ACTION_LABEL[draft.action]?.slice(0, 1) ?? '·', 'stroll-draft-icon');
           iconBox.style.setProperty('--tone', tone);
           const body = el('div', undefined, 'stroll-draft-body');
+          const expires = draft.expiresAt ? new Date(draft.expiresAt) : null;
+          const deadline = draft.platformOff ? ' · 平台已停用，未发送' : expires && !Number.isNaN(expires.getTime())
+            ? ` · ${expires.toDateString() === new Date().toDateString() ? '今天' : whenShort(draft.expiresAt) + ' '}${hhmm(draft.expiresAt)} 前可批准`
+            : '';
           body.append(el('p', draft.preview));
           body.append(
             el(
               'span',
-              `${PLATFORM_LABEL[draft.platform] ?? draft.platform} · ${ACTION_LABEL[draft.action] ?? draft.action} · ${ago(draft.ageSec)}`,
+              `${PLATFORM_LABEL[draft.platform] ?? draft.platform} · ${ACTION_LABEL[draft.action] ?? draft.action} · ${ago(draft.ageSec)}${deadline}`,
               'stroll-draft-meta',
             ),
           );
           const actions = el('div', undefined, 'stroll-draft-actions');
+          const approve = button('批准', () => act('approve', draft.id), 'solid xs');
+          approve.disabled = draft.platformOff === true;
           actions.append(
-            button('批准', () => act('approve', draft.id), 'solid xs'),
+            approve,
             button('拒绝', () => act('reject', draft.id), 'ghost xs'),
           );
           card.append(iconBox, body, actions);
@@ -2282,7 +2301,7 @@ export default {
           btn.disabled = true;
           hint.textContent = '发送中…';
           try {
-            const result = await ctx.invoke('reply_to_comment', [item.id, text]);
+            const result = await ctx.invoke('reply_to_comment', [item.reply_notice_id || item.id, text]);
             if (result?.ok === false) throw new Error(result.error || '没发出去');
             item.replied = true;
             item.fresh = false;
@@ -2442,37 +2461,83 @@ export default {
           }
         }
 
-        async function startWatch() {
-          const url = watchInput.value.trim();
-          if (!url) {
-            msgSet('贴个要一起看的链接。', true);
-            return;
+        function renderWatch(state, cfg = lastData?.config) {
+          const watching = state?.watching === true;
+          const role = state?.role;
+          watchState.textContent = !watching ? '未开始' : role === 'host' ? '多人 · 发起' : role === 'guest' ? '多人 · 跟看' : '进行中';
+          watchState.className = `stroll-state ${watching ? 'live' : ''}`.trim();
+          watchEmpty.style.display = watching ? 'none' : '';
+          watchLive.style.display = watching ? '' : 'none';
+          watchRow.style.display = role ? 'none' : '';
+          watchJoinRow.style.display = watching ? 'none' : '';
+          watchSharedBtn.style.display = watching ? 'none' : '';
+          watchInviteRow.style.display = role === 'host' ? '' : 'none';
+          if (watchInvite.value !== (state?.code || '')) watchInvite.value = state?.code || '';
+          watchBtn.disabled = watchSharedBtn.disabled = watchJoinBtn.disabled = watchPending;
+          watchMarkBtn.disabled = watchPending || state?.time == null;
+          watchStopBtn.disabled = !watching || watchPending;
+          watchStopBtn.textContent = role === 'guest' ? '退出跟看' : '结束';
+          if (watching) {
+            const time = Number(state.time ?? 0);
+            const duration = Number(state.duration ?? 0);
+            watchNowTitle.textContent = state.title || state.url || '正在看';
+            watchBar.style.width = duration > 0 ? `${Math.min(100, Math.round((time / duration) * 100))}%` : '0%';
+            watchTime.textContent = state.time == null ? '进度未知' : `${clock(time)}${duration > 0 ? ` / ${clock(duration)}` : ''}`;
+            watchComment.textContent = state.paused ? '已暂停' : state.platform === 'douyin' ? '抖音' : state.platform === 'bilibili' ? 'B 站' : '';
           }
-          watchBtn.disabled = true;
-          msgSet('正在打开陪看窗口…');
+          watchHint.textContent = role === 'host' ? '短码只给同机另一条鱼' : role === 'guest' ? '只跟看，不控制播放器' : `发起多人前请先贴链接`;
+          if (watching && !role) watchHint.textContent = `观察间隔约 ${Number(cfg?.watchSpeakSec ?? 60)} 秒`;
+          liveWatch = watching ? state : null;
+        }
+
+        async function watchAction(method, args, message, success) {
+          if (watchPending) return false;
+          watchPending = true;
+          renderWatch(liveWatch);
+          msgSet(message);
+          let state = liveWatch;
           try {
-            const result = await ctx.invoke('watch_start', [url]);
-            if (result?.ok === false) throw new Error(result.error || '没打开');
-            msgSet(result?.note || '窗口开了，你在里面翻，她会跟着看。');
-            watchInput.value = '';
-            await refresh();
+            const result = await ctx.invoke(method, args);
+            if (!result?.ok) throw new Error(result?.error || '操作没完成');
+            const latest = await ctx.invoke('watch_status', ['panel']).catch(() => null);
+            if (latest?.ok) state = latest;
+            msgSet(result.note || success);
+            return true;
           } catch (error) {
             msgSet(error.message || String(error), true);
+            return false;
           } finally {
-            watchBtn.disabled = false;
+            watchPending = false;
+            renderWatch(state);
           }
         }
 
-        async function stopWatch() {
-          msgSet('正在结束一起看…');
-          try {
-            const result = await ctx.invoke('watch_stop');
-            msgSet(result?.ok ? '一起看结束了。' : result?.error || '没结束', result?.ok === false);
-            await refresh();
-          } catch (error) {
-            msgSet(error.message || String(error), true);
-          }
+        async function startWatch(shared = false) {
+          const url = watchInput.value.trim();
+          if (!url) return msgSet('先在上面贴一个视频链接。', true);
+          if (await watchAction('watch_start', [url, shared ? 'shared' : 'solo'], '正在打开陪看窗口…', '一起看开始了。')) watchInput.value = '';
         }
+
+        async function joinWatch() {
+          const code = watchCodeInput.value.trim();
+          if (!code) return msgSet('先填入短码。', true);
+          if (await watchAction('watch_join', [code], '正在加入…', '已加入。')) watchCodeInput.value = '';
+        }
+
+        function markWatch() {
+          return watchAction('watch_mark', [], '正在分享这一刻…', '已标记。');
+        }
+
+        function stopWatch() {
+          return watchAction('watch_stop', [], '正在结束…', liveWatch?.role === 'guest' ? '已退出，主窗口不受影响。' : '一起看结束了。');
+        }
+
+        setInterval(() => {
+          if (document.visibilityState !== 'visible' || !watch.isConnected || watchPending || !liveWatch) return;
+          ctx.invoke('watch_status', ['panel']).then((state) => {
+            if (state?.ok && !watchPending) renderWatch(state);
+          }).catch(() => {});
+        }, 2000);
 
         async function brake(hours) {
           msgSet('拉手刹…');

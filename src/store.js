@@ -7,18 +7,17 @@ const MAX_DRAFTS = 30;
 const MAX_SEEN = 2500;
 const MAX_DAYS = 90;
 /**
- * 草稿等主人批的时限。
- *
- * 超过这个时间的草稿不再算「待批」——但它**不删**。
- * 2026-11-22 群友反馈：待审批列表里两条评论凭空消失，鱼那边早就说过「已提交待审批」。
- * 原因就是这里：以前 addDraft 每次新建都把超时的旧草稿 filter 掉（物理删除），
- * pendingDrafts 又只返回 30 分钟内的，于是面板上一个字都没有，谁都不知道发生过什么。
- * 现在改成标 expired，面板能显示「这几条过期了，得重发」。
+ * 旧草稿没有截止时间，保持创建后 30 分钟过期，不跟随设置变化。
  */
-export const DRAFT_TTL_MS = 30 * 60 * 1000;
+export const DRAFT_TTL_MS = 30 * 60_000;
 /** 过期草稿留多久：够主人隔天回来核对，不至于无限堆积。 */
 const DRAFT_EXPIRED_KEEP_MS = 3 * 86400000;
 const STAT_KEYS = { like: 'likes', comment: 'comments', follow: 'follows', post: 'posts', dm: 'dms', save: 'saves' };
+
+function draftDeadline(draft) {
+  const deadline = Date.parse(draft.expiresAt ?? '');
+  return Number.isFinite(deadline) ? deadline : Date.parse(draft.createdAt ?? '') + DRAFT_TTL_MS;
+}
 
 function blank() {
   return {
@@ -209,7 +208,7 @@ export class Store {
     return this.data.actions.slice(-n).reverse();
   }
 
-  addDraft(draft) {
+  addDraft(draft, ttlMs = DRAFT_TTL_MS) {
     // 超时的旧草稿标 expired，不物理删除：删了面板就「凭空少一条」，主人和鱼对不上账
     this.expireDueDrafts();
     const item = {
@@ -218,12 +217,13 @@ export class Store {
       createdAt: new Date().toISOString(),
       ...draft,
     };
+    item.expiresAt = new Date(Date.parse(item.createdAt) + ttlMs).toISOString();
     this.data.drafts.push(item);
     return item;
   }
 
   /**
-   * 把所有超过 30 分钟还没批的 pending 草稿标成 expired。
+   * 把所有已到截止时间还没批的 pending 草稿标成 expired。
    *
    * 这是唯一改状态的入口：创建、查询、审批、tick 通知都走它，
    * 避免有的路径看到「过期」、有的路径还当 pending。
@@ -232,8 +232,8 @@ export class Store {
     const out = [];
     for (const d of this.data.drafts) {
       if (d.status !== 'pending') continue;
-      const at = Date.parse(d.createdAt ?? '');
-      if (!Number.isFinite(at) || now - at < DRAFT_TTL_MS) continue;
+      const deadline = draftDeadline(d);
+      if (!Number.isFinite(deadline) || now < deadline) continue;
       d.status = 'expired';
       d.expiredAt = new Date(now).toISOString();
       out.push(d);
@@ -246,11 +246,19 @@ export class Store {
   }
 
   pendingDrafts() {
-    this.expireDueDrafts();
     const now = Date.now();
+    this.expireDueDrafts(now);
     return this.data.drafts
-      .filter((d) => d.status === 'pending' && now - Date.parse(d.createdAt) < DRAFT_TTL_MS)
-      .map((d) => ({ ...d, ageSec: Math.round((now - Date.parse(d.createdAt)) / 1000) }));
+      .filter((draft) => draft.status === 'pending' && Number.isFinite(Date.parse(draft.createdAt)))
+      .map((draft) => {
+        const deadline = draftDeadline(draft);
+        return {
+          ...draft,
+          ageSec: Math.round((now - Date.parse(draft.createdAt)) / 1000),
+          expiresAt: new Date(deadline).toISOString(),
+          expiresInSec: Math.ceil((deadline - now) / 1000),
+        };
+      });
   }
 
   /**

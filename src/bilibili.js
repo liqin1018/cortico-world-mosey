@@ -87,7 +87,7 @@ export function signWbi(params, imgUrl, subUrl) {
 function parseJson(raw) {
   return JSON.parse(
     raw.replace(
-      /("(?:rpid|rpid_str|root|parent|oid|mid|id_str|dynamic_id|dynamic_id_str|id)"\s*:\s*)(\d{16,})(?=\s*[,}])/g,
+      /("(?:rpid|rpid_str|root|parent|root_id|source_id|target_id|oid|mid|id_str|dynamic_id|dynamic_id_str|id)"\s*:\s*)(\d{16,})(?=\s*[,}])/g,
       '$1"$2"',
     ),
   );
@@ -103,7 +103,7 @@ function mapMsgFeedItem(kind, item) {
   const content = stripTags(msg.source_content || msg.message || msg.desc || '');
   if (!content) return null;
   const link = String(msg.uri ?? '');
-  const rpid = String(msg.source_id ?? '') || String(msg.target_id ?? '') || '0';
+  const commentHints = [msg.source_id, msg.target_id].map(String).filter((id) => /^[1-9]\d*$/.test(id));
   const rootRpid = String(msg.root_id ?? '') || '0';
   return {
     kind,
@@ -118,23 +118,14 @@ function mapMsgFeedItem(kind, item) {
     // @ 通知的时间在 at_time 里，评论通知在 reply_time 里；单位都是秒。
     // 以前只读 reply_time，@ 条目拿到 0 → inbox 排序垫底、被 slice 切掉，等于「收不到 @」。
     at: Number(item.reply_time ?? item.at_time ?? item.time ?? 0),
-    url: commentDeepLink(link, rootRpid, rpid),
+    url: commentDeepLink(link, rootRpid, commentHints[0]),
     bvid: bvidOf(link),
     dynamicId: parseDynamicId(link),
     cvid: parseCvid(link),
-    rpid,
     rootRpid,
-    /**
-     * 楼中楼回复该往哪儿挂。
-     *
-     * 实测（2026-11-14）：B站回复通知里**没有「对方那条评论的 rpid」**——
-     * source_id 是我被回复的那条，target_id 恒等于 root_id（主评论）。
-     * 所以只能回到主评论下面，再靠正文里的 @ 点名，没有更精确的锚点。
-     *
-     * 之前拿 target_id 当 reply_to，碰上「我的评论正好是顶层」就变成 parent=root=我自己，
-     * 结果就是「回复 @了我自己」。
-     */
-    replyTo: String(msg.root_id ?? '') || '',
+    reply_notice_id: item.id ? `${kind}:${item.id}` : '',
+    replyText: stripTags(msg.source_content || msg.message || ''),
+    commentHints,
     likeState: Number(msg.like_state ?? 0) === 1,
   };
 }
@@ -363,6 +354,7 @@ export class Bilibili {
   }
 
   async request(route, params = {}, opts = {}) {
+    if (this.cfg.enabled === false || this.cfg.bilibili === false) throw new BiliError('PLATFORM_OFF', 'B站已停用。');
     const base = opts.base ?? 'https://api.bilibili.com';
     const url = new URL(route, base);
     const allowed = new Set(['api.bilibili.com', 'api.vc.bilibili.com']);
@@ -401,6 +393,7 @@ export class Bilibili {
     // 没必要时时等满 650ms，调用点用 minGapMs 单独给预算。
     const gap = Math.max(0, Number(opts.minGapMs ?? 650));
     await this.takeTurn(gap);
+    if (this.cfg.enabled === false || this.cfg.bilibili === false) throw new BiliError('PLATFORM_OFF', 'B站已停用。');
 
     const headers = {
       'User-Agent': UA,
@@ -671,7 +664,7 @@ export class Bilibili {
     return ids;
   }
 
-  async view(id) {
+  async view(id, part = 1) {
     const key = parseBvid(id);
     if (!key) throw new BiliError('BAD_ID', '不是有效的 BV 号或 av 号');
     const params = key.startsWith('BV') ? { bvid: key } : { aid: key.slice(2) };
@@ -679,7 +672,7 @@ export class Bilibili {
     return {
       aid: String(data.aid),
       /** 弹幕/字幕都要 cid；番剧/直播这里可能没有 */
-      cid: String(data.cid ?? ''),
+      cid: String(part === 1 ? data.cid ?? '' : data.pages?.find((entry) => entry.page === part)?.cid ?? ''),
       bvid: data.bvid,
       title: stripTags(data.title),
       desc: stripTags(data.desc ?? ''),
@@ -709,7 +702,8 @@ export class Bilibili {
     idOrUrl,
     { subtitleLimit = 24, danmakuLimit = 40, around = null, windowSec = 15, aroundSpan = null, maxChars = 1500 } = {},
   ) {
-    const v = await this.view(idOrUrl);
+    const part = Number(/[?&]p=([1-9]\d{0,3})(?:[&#]|$)/.exec(idOrUrl)?.[1] ?? 1);
+    const v = await this.view(idOrUrl, part);
     if (!v.cid) {
       return { ok: false, code: 'NO_CID', error: '这条视频拿不到 cid（可能是番剧/直播），读不了字幕和弹幕', subtitles: [], danmaku: [] };
     }
@@ -1428,9 +1422,9 @@ export class Bilibili {
       { cacheMs },
     );
     return (data.replies ?? []).slice(0, limit).map((r) => ({
-      rpid: String(r.rpid),
+      rpid: String(r.rpid_str ?? r.rpid ?? ''),
       author: stripTags(r.member?.uname ?? ''),
-      uid: String(r.member?.mid ?? ''),
+      uid: String(r.mid ?? r.member?.mid ?? ''),
       text: stripTags(r.content?.message ?? ''),
       like: Number(r.like ?? 0),
       root: String(r.root ?? 0),
@@ -1688,47 +1682,64 @@ export class Bilibili {
     const data = await this.request('/x/msgfeed/reply', { platform: 'web', build: 0, mobi_app: 'web' }, { cacheMs: 0 });
     return (data.items ?? [])
       .map((item) => mapMsgFeedItem('reply', item))
-      .filter((x) => x && x.replyTo)
+      .filter(Boolean)
       .slice(0, Math.max(1, limit));
   }
 
-  /**
-   * 某个主评论下面的子回复（楼中楼）。
-   * 用途：回复通知里没有「对方那条评论的 rpid」，只能拿 root 去查这一串，
-   * 再挑一条不是自己发的，才能精确回在他下面（2026-11-14）。
-   */
-  async replyChildren(oid, root, limit = 20) {
-    const data = await this
-      .request(
-        '/x/v2/reply/reply',
-        { oid: String(oid), type: 1, root: String(root), ps: Math.min(20, Math.max(1, limit)), pn: 1 },
-        /**
-         * 这里不能用长缓存。
-         *
-         * 2026-11-15：楼中楼里刚发出的子回复（40 秒前）读不到——
-         * 30 秒缓存返回的是旧快照，kids 只有 1 条，挑不到「对方那条」，
-         * parent 只能退回 root，看起来就是「她又挂在根评论下了」。
-         * 这个请求只在回复时发一次，关掉缓存代价很小。
-         */
-        { referer: 'https://www.bilibili.com/', cacheMs: 0 },
-      )
-      .catch(() => null);
-    /**
-     * 带上 ctime。
-     *
-     * 2026-11-15：挑「最新一条不是自己发的」时原本靠数组顺序（取最后一条），
-     * 结果日志里 picked 一直是同一个人——说明 B站 返回的顺序不是我以为的正序。
-     * 有 ctime 就按时间排，不再依赖顺序。
-     */
-    return (data?.replies ?? []).map((r) => ({
-      rpid: String(r.rpid ?? ''),
-      mid: String(r.mid ?? ''),
-      name: stripTags(r.member?.uname ?? ''),
-      ctime: Number(r.ctime ?? 0),
-      text: String(r.content?.message ?? ''),
-      state: Number(r.state ?? 0),
-      invisible: r.invisible === true,
-    }));
+  async replyChildren(type, oid, root, page = 1) {
+    const size = 20;
+    const data = await this.request(
+      '/x/v2/reply/reply',
+      { oid: String(oid), type, root: String(root), ps: size, pn: page },
+      { referer: 'https://www.bilibili.com/', cacheMs: 0 },
+    );
+    const toComment = (reply) => ({
+      rpid: String(reply.rpid_str ?? reply.rpid ?? ''),
+      root: String(reply.root ?? '0'),
+      uid: String(reply.mid ?? reply.member?.mid ?? ''),
+      at: Number(reply.ctime ?? 0),
+      text: stripTags(reply.content?.message ?? ''),
+      state: Number(reply.state ?? 0),
+      invisible: reply.invisible === true,
+    });
+    const items = (data.replies ?? []).map(toComment);
+    const count = data.page?.count;
+    return {
+      top: data.root ? toComment(data.root) : null,
+      items,
+      more: count == null ? items.length >= size : Number(count) > page * size,
+    };
+  }
+
+  async findReplyAnchor(type, oid, { root, rpid, notice }) {
+    if (notice && (!/^[1-9]\d*$/.test(notice.mid) || !notice.replyText || !(notice.at > 0))) return null;
+    const matches = (reply) => reply && /^[1-9]\d*$/.test(reply.rpid) && (notice
+      ? reply.uid === notice.mid && reply.text === notice.replyText && reply.at === notice.at
+      : reply.rpid === rpid);
+    if (!root || root === '0' || (!notice && rpid === root)) {
+      const hits = new Map();
+      for (const id of new Set(notice ? notice.commentHints : [rpid])) {
+        const reply = await this.findReply(type, oid, id);
+        if (matches(reply) && (!root || root === '0' || reply.root === '0')) {
+          hits.set(reply.rpid, { root: reply.root === '0' ? reply.rpid : reply.root, parent: reply.rpid });
+        }
+      }
+      return hits.size === 1 ? hits.values().next().value : null;
+    }
+    const hits = new Set();
+    // shortcut: 最多查 10 页，超过即不确认；需要覆盖更深的楼时改用按评论 ID 定位的接口。
+    for (let page = 1; page <= 10; page++) {
+      const { top, items, more } = await this.replyChildren(type, oid, root, page);
+      if (page === 1 && top?.rpid === root && matches(top)) hits.add(root);
+      for (const reply of items) {
+        if (reply.root === root && matches(reply)) hits.add(reply.rpid);
+      }
+      if (hits.size > 1) return null;
+      if ((!notice && hits.size === 1) || !more) {
+        return hits.size === 1 ? { root, parent: hits.values().next().value } : null;
+      }
+    }
+    return null;
   }
 
   async inbox(limit = 8) {
@@ -1950,8 +1961,8 @@ export class Bilibili {
       const probe = async () => {
         try {
           if (parent) {
-            const kids = await this.replyChildren(target.oid, root || parent, 20).catch(() => []);
-            return kids.find((r) => r.rpid === rpid) ?? null;
+            const { items } = await this.replyChildren(target.type, target.oid, root || parent);
+            return items.find((r) => r.rpid === rpid) ?? null;
           }
           const pub = await this.replyList(target.type, target.oid, 30, 0, 0);
           return pub.find((r) => r.rpid === rpid) ?? null;

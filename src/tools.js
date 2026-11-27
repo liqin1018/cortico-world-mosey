@@ -15,7 +15,7 @@ export const TOOL_DECLS = [
           enum: ['status', 'brief', 'feed', 'following', 'open', 'comments', 'inbox', 'search', 'weekly', 'books', 'read', 'note', 'login', 'history', 'whoami', 'watch', 'groups', 'join_group', 'stickers', 'images', 'test_image', 'creator_probe'],
           description: '要做什么。',
         },
-        platform: { type: 'string', enum: ['bilibili', 'douyin'], description: '去哪个平台；open 会从链接自动判断。' },
+        platform: { type: 'string', enum: ['bilibili', 'douyin', 'douyin_creator'], description: '去哪个平台；open 从链接判断，douyin_creator 仅用于 login。' },
         url: { type: 'string', description: '视频 / 动态 / 专栏链接（open 用）。' },
         id: { type: 'string', description: 'BV 号、av 号、动态 ID、cv 号或抖音视频 ID（open 用）。' },
         query: { type: 'string', description: '搜索词（search 用）；stickers 用它按名字/标签筛。' },
@@ -59,7 +59,7 @@ export const TOOL_DECLS = [
   {
     name: 'stroll_act',
     description:
-      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态；按「动态」组的设置自动带图：图片工坊/本地目录/现画。想指定某张图就把路径放进 file，不传就每次现画）、dm、save（B站稍后再看）、sticker（发表情包）、image（把自己画的图/本地图片发到抖音私信、群聊或评论区）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回复楼中楼要带 reply_to（B站 rpid / 抖音 cid）和通知给出的 root（主评论 ID）。默认只生成待审批草稿，草稿不是已发送，30 分钟内有效；等主人在面板点批准后才会发送。点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
+      '做一个公开动作：like/unlike、follow/unfollow、comment、reply、post（B站动态；按「动态」组的设置自动带图：图片工坊/本地目录/现画。想指定某张图就把路径放进 file，不传就每次现画）、dm、save（B站稍后再看）、sticker（发表情包）、image（把自己画的图/本地图片发到抖音私信、群聊或评论区）、collect_stickers（收藏抖音表情包）、sticker_name（给收藏的表情改名字）。comment/reply 的 target 可以是视频、B站动态（t.bilibili.com/… 或 opus 链接）或专栏；回 B站通知只用该条通知的 reply_notice_id 定位。直接回指定楼中楼评论才传 target、reply_to（B站 rpid / 抖音 cid）及已知的 root（主评论 ID）。默认只生成待审批草稿，草稿不是已发送，有效期看回执的 expiresAt；等主人在面板点批准后才会发送。点赞在 auto_low_risk 下、私信主人（dm）在任何非 dry_run 模式下都直接发。表情包的发送和收藏只在抖音聊天里，跟私信一样直接发、不占公开额度。不要自己批准，不要绕过额度。',
     tags: ['act', 'speak'],
     parameters: {
       type: 'object',
@@ -91,6 +91,7 @@ export const TOOL_DECLS = [
           description: 'image 用：chat 发到私信/群（默认），comment 发到评论区（这时 target 要给视频链接）。',
         },
         reply_to: { type: 'string', description: '回复评论时，对方那条评论的 ID（B站 rpid / 抖音 cid），不能为 0。' },
+        reply_notice_id: { type: 'string', description: '回复 B站评论通知（含 @）时，照抄这一条通知或 inbox 给出的 reply_notice_id；无需另填 target、reply_to 或 root。' },
         root: {
           type: 'string',
           description:
@@ -137,6 +138,53 @@ export const TOOL_DECLS = [
   },
 ];
 
+export const LOCAL_READ_ACTIONS = ['history', 'weekly', 'books', 'read', 'note', 'images'];
+export const BILI_READ_ACTIONS = ['search'];
+export const DY_READ_ACTIONS = ['groups', 'join_group', 'stickers', 'creator_probe'];
+export const DY_WRITE_ACTIONS = ['sticker', 'image', 'collect_stickers', 'sticker_name'];
+
+export function activeToolDecls({ bilibili, douyin }) {
+  if (bilibili && douyin) return TOOL_DECLS;
+  const platform = bilibili ? 'bilibili' : douyin ? 'douyin' : '';
+  const label = bilibili ? 'B站' : '抖音';
+  const read = TOOL_DECLS[0];
+  const write = TOOL_DECLS[1];
+  const select = (decl, description, overrides, omit = []) => {
+    const properties = { ...decl.parameters.properties, ...overrides };
+    for (const key of omit) delete properties[key];
+    return { ...decl, description, parameters: { ...decl.parameters, properties } };
+  };
+  const action = (values) => ({ type: 'string', enum: values, description: '要执行的动作。' });
+  if (!platform) return [select(read, '本地工具：books 看书库、read 读一段、note 记摘抄、weekly 看周报、history 查历史、images 查本地图片。', {
+    action: action(LOCAL_READ_ACTIONS),
+  }, ['platform', 'url', 'id', 'query', 'tag', 'frames', 'hd', 'at', 'watch_action'])];
+  const without = bilibili ? DY_READ_ACTIONS : BILI_READ_ACTIONS;
+  return [
+    select(read, `${label}：brief 看候选和收件箱，status 查登录和额度，feed 刷候选，following 看关注流，open 看作品，comments 看评论，inbox 看通知和私信，watch 陪看，login 打开登录窗。${bilibili ? 'search 搜索，视频可读字幕和弹幕。' : 'groups 查会话，join_group 通过邀请加入群，stickers 查表情库；发布图文可用创作者中心登录和 creator_probe。'} history/weekly 查本地记录，books/read/note 读书和记摘抄，images 查图片，test_image 测图片工坊。`, {
+      action: action(read.parameters.properties.action.enum.filter((name) => !without.includes(name))),
+      platform: { type: 'string', enum: bilibili ? [platform] : [platform, 'douyin_creator'], description: douyin ? 'douyin_creator 仅用于 login。' : '当前启用的平台。' },
+      url: { type: 'string', description: douyin ? '视频、图文或群邀请链接。' : '视频、动态或专栏链接。' },
+      id: { type: 'string', description: douyin ? '视频 ID。' : 'BV 号、av 号、动态 ID 或 cv 号。' },
+      query: { type: 'string', description: douyin ? '查找表情时用的关键词。' : '搜索词。' },
+      frames: { type: 'integer', minimum: 0, maximum: 9, description: 'open 用：抽几帧画面；0 为不抽帧。' },
+      watch_action: { ...read.parameters.properties.watch_action, description: 'start 开始陪看；stop 结束；mark 看这里；status 查进度。' },
+    }, bilibili ? ['tag'] : ['at', 'hd']),
+    select(write, `${label}：点赞、关注、评论、回复、发动态、私信。${bilibili ? 'save 加入稍后再看；reply_notice_id 用于回复评论通知。' : '支持发图、发/收藏表情和给表情改名；群消息用 dm。'} 公开动作默认生成待审批草稿，未批准不会发送；不要自己批准。`, {
+      action: action(write.parameters.properties.action.enum.filter((name) => bilibili ? !DY_WRITE_ACTIONS.includes(name) : name !== 'save')),
+      platform: { type: 'string', enum: [platform] },
+      target: { type: 'string', description: bilibili ? '作品链接/ID，或关注、私信目标的 UID。' : '作品链接、主页或 sec_uid；发私信写「主人」或推送里的会话名。' },
+      text: { type: 'string', description: douyin ? write.parameters.properties.text.description : '评论、动态或私信正文。' },
+      reply_to: { type: 'string', description: `对方那条评论的 ${bilibili ? 'rpid' : 'cid'}，不能为 0。` },
+      root: { type: 'string', description: '楼中楼所属主评论的 ID。' },
+      mention_owner: { type: 'boolean', description: '真的 @ 主人；正文不要手写 @昵称。' },
+      file: { ...write.parameters.properties.file, description: bilibili ? '发图文动态时指定本地图片路径。' : write.parameters.properties.file.description },
+    }, bilibili ? ['where', 'mention'] : ['reply_notice_id']),
+    select(TOOL_DECLS[2], '看或修改摸鱼的额度、审批、安静时段、兴趣和手刹。', {
+      patch: { ...TOOL_DECLS[2].parameters.properties.patch, description: 'set 用：JSON 对象，例如 {"dailyLikes":6,"approval":"confirm"}。' },
+    }),
+  ];
+}
+
 export const TOOL_SUMMARIES = {
   stroll: { zh: '出门看看：状态、候选、打开视频、消息、搜索。只读。', en: 'Look around: status, feed, open a video, inbox, search. Read-only.' },
   stroll_act: { zh: '点赞/评论/关注/发动态/私信；默认先出草稿等主人批准。', en: 'Like, comment, follow, post or DM; drafts wait for the owner.' },
@@ -146,7 +194,7 @@ export const TOOL_SUMMARIES = {
 export const EVENT_DECLS = [
   { type: 'stroll.due', description: { zh: '自己该出门溜达了（每天最多几次）。', en: 'A scheduled outing is due.' }, trigger: 'debounce' },
   { type: 'stroll.sent', description: { zh: '主人批准后，公开动作真的发出去了。', en: 'An approved public action was sent.' }, trigger: 'flush' },
-  { type: 'stroll.draft_expired', description: { zh: '待批草稿超过 30 分钟已作废，没有发送；需要重新提一次。', en: 'A draft expired before approval; nothing was sent.' }, trigger: 'flush' },
+  { type: 'stroll.draft_expired', description: { zh: '待批草稿到期后已作废，没有发送；需要重新提一次。', en: 'A draft expired before approval; nothing was sent.' }, trigger: 'flush' },
   { type: 'stroll.risk', description: { zh: '平台风控/验证，已自动停手。', en: 'A platform risk signal paused all writes.' }, trigger: 'flush' },
   { type: 'stroll.reply', description: { zh: '有人回复或 @ 了她，或者主人刚发来私信（会立刻把她叫起来回）。', en: 'Someone replied or mentioned her, or the owner just sent a DM (she is woken to answer right away).' }, trigger: 'debounce' },
   { type: 'stroll.watch', description: { zh: '和主人一起看时，页面/进度/评论区的新情况。', en: 'The shared watch page changed: title, progress or comments.' }, trigger: 'debounce' },

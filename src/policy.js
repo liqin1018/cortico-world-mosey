@@ -396,6 +396,7 @@ export class Policy {
   summary() {
     const label = Object.fromEntries(Object.entries(ACTION_CAPS).map(([k, v]) => [k, v.short]));
     const parts = Object.keys(ACTION_CAPS)
+      .filter((action) => !(action === 'save' && this.cfg.bilibili === false) && !(action === 'group' && this.cfg.douyin === false))
       .map((action) => {
         const left = this.remaining(action);
         return `${label[action]}${this.store.usage(action)}/${left.dailyCap}`;

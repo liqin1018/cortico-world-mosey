@@ -22,7 +22,7 @@
 | 修改没通过、回滚、只改文档措辞没动行为 | 不升版本、不写 CHANGELOG |
 | 同一轮里反复修到通过 | 只升一次，不按尝试次数累加 |
 
-平时改完代码跑 `npm run check`；验证通过后升版本、写日志；要让他马上用就跑 `npm run deploy:local`，然后让他重启 Coopanion 试。
+平时改完插件代码跑 `npm run check`；验证通过后升版本、写日志，具备写入权限后默认执行 `npm run deploy:local`。本地部署不等于发布，不触发 GitHub 或 npm 更新。
 
 如果用户没说要发布，而你说"已发布"，就是最严重的错误。
 
@@ -115,9 +115,9 @@ npm run release:check
 npm run deploy:local
 ```
 
-目标目录固定 `F:/Coopanion/data/local-extensions/cortico-world-mosey`。脚本是「先写临时目录再替换」，**不要**自己 `rm -rf` 再 `cp`，会把安装目录搞成空壳。
+默认安装目录为 `F:/Coopanion/data/local-extensions/cortico-world-mosey`。脚本先准备新文件，通过 Coopanion 的正常退出入口等进程完全退出，再备份、替换，校验版本后重新打开。替换失败尝试回滚；退出超时不覆盖。**不要**自己删除安装目录再复制。
 
-跑完要提醒用户：**完全退出 Coopanion 再打开**（宿主对前端资源做了 immutable 缓存，刷页面无效）。
+传入其他目录只同步插件文件，不控制 Coopanion；不要把自定义目录模式用在正在运行的其他 Coopanion 安装上。
 
 ### ⑥ 提交
 

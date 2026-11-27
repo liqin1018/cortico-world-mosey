@@ -1,9 +1,11 @@
 import fs from 'node:fs';
+import { execFile } from 'node:child_process';
+import vm from 'node:vm';
 import zlib from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_GROUPS, DEFAULTS } from '../src/config.js';
-import { mapAtNotice, secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
+import { CONFIG_GROUPS, DEFAULTS, validatePolicyPatch } from '../src/config.js';
+import { DouyinBrowser, mapAtNotice, secUidOf, stripLeadingFakeAt } from '../src/douyin.js';
 import { pickFrameTimes } from '../src/bilibili.js';
 import { approvalFor } from '../src/policy.js';
 import { DRAFT_TTL_MS, Store } from '../src/store.js';
@@ -21,6 +23,7 @@ import {
   subtitleBudget,
 } from '../src/util.js';
 import { StrollWorld } from '../src/world.js';
+import { readWatchRoom, watchGuest } from '../src/watch-room.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = path.join(root, '.smoke-data');
@@ -138,6 +141,103 @@ world.watch = prevWatchObj;
 world.douyin.watchDigest = prevWatchDigest;
 world.douyin.watchShot = prevWatchShot;
 world.bili.mediaText = prevWatchMedia;
+
+{
+  const makeWorld = (id) => new StrollWorld({
+    cfg: { ...cfg, watchScroll: true, watchTalk: true }, timezone: 'Asia/Shanghai',
+    dataDir: path.join(tmp, id), persist: () => {},
+  });
+  const host = makeWorld('watch-host');
+  const guest = makeWorld('watch-guest');
+  const url = 'https://www.bilibili.com/video/BV1xx411c7mD?p=2&vd_source=fixture';
+  let playing = { url, title: '多人测试', time: 8, duration: 80, paused: false };
+  let windows = 0;
+  let guestWindows = 0;
+  let closed = 0;
+  let next = 0;
+  let hostReads = 0;
+  let shots = 0;
+  let options;
+  const jpeg = Buffer.from('shared-jpeg-fixture');
+  const hostEvents = [];
+  const guestEvents = [];
+  host.push = async (...args) => { hostEvents.push(args); return true; };
+  guest.push = async (...args) => { guestEvents.push(args); return true; };
+  host.douyin.watchStart = async (link, opts) => { windows++; options = opts; return { url: link, title: playing.title }; };
+  host.douyin.watchDigest = async () => { hostReads++; return playing; };
+  host.douyin.watchStop = async () => { closed++; };
+  host.douyin.watchNext = async () => { next++; };
+  host.douyin.watchRoomShot = async () => { shots++; return { bytes: jpeg }; };
+  host.bili.mediaText = async () => ({ ok: true, subtitles: [{ text: '当前分P的字幕' }], danmaku: [] });
+  guest.douyin.watchStart = async () => { guestWindows++; };
+  guest.douyin.watchStop = async () => { guestWindows++; };
+  guest.douyin.watchDigest = async () => { throw new Error('跟看实例不读浏览器'); };
+
+  try {
+    check('多人模式拒绝仿冒站点', !(await host.watchStart('https://www.bilibili.com.example.org/video/BV1xx411c7mD', true)).ok && windows === 0);
+    const started = await host.invoke('stroll', 'watch_start', [url, 'shared']);
+    host.stopWatchTimer();
+    const code = (await host.invoke('stroll', 'watch_status', ['panel'])).code;
+    check('发起端只开一个窗口、不带登录态、不主动播放', started.ok && windows === 1 && options.manual && !options.cookies && !!code);
+    check('陪看短码不进模型回执，模型不能关窗口', !(await host.watchStatus()).code &&
+      !asJson(await host.toolStroll({ action: 'watch', watch_action: 'stop' })).ok);
+    await host.watchTick();
+    const joined = await guest.invoke('stroll', 'watch_join', [code]);
+    guest.stopWatchTimer();
+    check('第二实例凭码加入，不开窗口、不拿跟踪参数', joined.ok && guestWindows === 0 && guest.watch.last.url === url.split('&')[0] && guest.watch.last.time === 8);
+    check('无效短码和第三条鱼被拒绝', !(await readWatchRoom({ ...watchGuest(code), key: 'invalid' }).catch(() => null)) &&
+      !(await readWatchRoom(watchGuest(code)).catch(() => null)));
+
+    playing = { ...playing, time: 42, paused: true };
+    const readsBefore = hostReads;
+    await host.watchTick();
+    await guest.watchTick();
+    check('拖进度和暂停只采样一次，两条鱼读到同一状态和字幕', hostReads === readsBefore + 1 &&
+      guest.watch.last.time === 42 && guest.watch.last.paused && hostEvents.at(-1)?.[1] === guestEvents.at(-1)?.[1] &&
+      /当前分P的字幕/.test(guestEvents.at(-1)?.[1] ?? '') && !next);
+    const marked = await host.invoke('stroll', 'watch_mark');
+    await guest.watchTick();
+    const markEvent = guestEvents.at(-1);
+    const eventCount = guestEvents.length;
+    await guest.watchTick();
+    check('看这里仅截图一次，两条鱼得到相同帧且不重复投递', marked.ok && shots === 1 &&
+      markEvent?.[4]?.[0]?.bytes.equals(jpeg) && hostEvents.at(-1)?.[4]?.[0]?.bytes.equals(jpeg) && guestEvents.length === eventCount);
+    check('跟看端不能标记主窗口', !(await guest.invoke('stroll', 'watch_mark')).ok);
+
+    playing = { ...playing, url: 'https://example.org/private', title: '不应共享的标题' };
+    await host.watchTick();
+    await guest.watchTick();
+    check('切到非视频站点时不泄露链接或标题', guest.watch.last === null && !guest.watch.url && !guest.watch.title.includes('不应共享'));
+    playing = { ...playing, url: 'https://www.douyin.com/video/7521111111111111111?share_id=fixture', title: '抖音下一条', time: 0, paused: false };
+    await host.watchTick();
+    await guest.watchTick();
+    check('主人换到抖音，两条鱼跟随但不自动切片', guest.watch.last.platform === 'douyin' && guest.watch.last.time === 0 && !next);
+
+    const { port, key, viewer } = guest.watchRoom;
+    const file = new URL('../src/watch-room.js', import.meta.url).href;
+    const childScript = `import { readWatchRoom } from ${JSON.stringify(file)}; const value = await readWatchRoom(JSON.parse(process.argv[1])); console.log(value.state.platform);`;
+    const platform = await new Promise((resolve, reject) => {
+      execFile(process.execPath, ['--input-type=module', '-e', childScript, JSON.stringify({ port, key, viewer, after: 0 })],
+        { timeout: 5000 }, (error, stdout) => error ? reject(error) : resolve(stdout.trim()));
+    });
+    check('独立进程能读到同一个房间', platform === 'douyin');
+
+    await guest.invoke('stroll', 'watch_stop');
+    check('跟看退出不关主窗口', !guest.watch && host.watch && !closed && !guestWindows);
+    const rejoined = await guest.invoke('stroll', 'watch_join', [code]);
+    guest.stopWatchTimer();
+    check('退出后同一条鱼可重新加入', rejoined.ok);
+    playing = null;
+    host.douyin.watchPage = { isClosed: () => true };
+    await host.watchTick();
+    for (let count = 0; count < 3; count++) await guest.watchTick();
+    check('主窗口关闭，两边结束且短码失效', !host.watch && !guest.watch && closed === 1 && !guestWindows &&
+      !(await readWatchRoom({ port, key, viewer, after: 0 }).catch(() => null)));
+  } finally {
+    if (guest.watch) await guest.watchStop();
+    if (host.watch) await host.watchStop();
+  }
+}
 
 /* ---- 发完事后核实：抖音吞了就提醒，但 10 分钟内不刷屏 ---- */
 const prevSendWarnAt = world.lastSendWarnAt;
@@ -977,6 +1077,53 @@ check('model cannot approve', asJson(await world.toolAct({ action: 'approve', dr
 const rejected = world.rejectDraft(draft.id);
 check('reject', rejected.ok === true);
 
+const ttlSchema = world.webUi().config.find((group) => group.id === 'world:stroll')?.schema.properties['worlds.stroll.draftTtlMinutes'];
+check('基础设置里的草稿有效期默认 30 分钟、可调至 24 小时',
+  DEFAULTS.draftTtlMinutes === 30 && ttlSchema?.type === 'integer' &&
+    ttlSchema.minimum === 30 && ttlSchema.maximum === 1440 && ttlSchema['x-hot'] === true);
+check('草稿有效期设置校验上下界和无效输入',
+  validatePolicyPatch({ draftTtlMinutes: -1 }).draftTtlMinutes === 30 &&
+    validatePolicyPatch({ draftTtlMinutes: 2000 }).draftTtlMinutes === 1440 &&
+    validatePolicyPatch({ draftTtlMinutes: '无效' }).draftTtlMinutes === undefined);
+
+const ttlCfg = { ...DEFAULTS, enabled: true, draftTtlMinutes: 120 };
+const ttlWorld = new StrollWorld({ cfg: ttlCfg, dataDir: path.join(tmp, 'ttl'), persist: (patch) => Object.assign(ttlCfg, patch) });
+const ttlArgs = { action: 'comment', platform: 'bilibili', target: 'BV1SVsd6MEGZ', text: '测试审批有效期' };
+let ttlSends = 0;
+ttlWorld.bili.comment = async () => {
+  ttlSends += 1;
+  return { ok: true, rpid: '123', visibility: 'public' };
+};
+const ttlReceipt = asJson(await ttlWorld.toolAct(ttlArgs));
+check('两小时草稿的回执与已落盘截止时间一致，创建不发送',
+  ttlReceipt.draft === true && ttlReceipt.sent === false && ttlSends === 0 &&
+    ttlReceipt.expiresInSec === 7200 && /120 分钟内有效.*前可批准/.test(ttlReceipt.message) &&
+    new Store(ttlWorld.store.dir, ttlWorld.store.timeZone).load().draft(ttlReceipt.id)?.expiresAt === ttlReceipt.expiresAt,
+  JSON.stringify(ttlReceipt));
+const ttlItem = ttlWorld.store.draft(ttlReceipt.id);
+const created = Date.parse(ttlItem.createdAt);
+const deadline = Date.parse(ttlItem.expiresAt);
+ttlWorld.store.data.drafts.push({ id: 'legacy-ttl', createdAt: ttlItem.createdAt, status: 'pending' });
+ttlCfg.draftTtlMinutes = 30;
+const shortTtlReceipt = asJson(await ttlWorld.toolAct(ttlArgs));
+ttlWorld.compactStatus = async () => ({});
+const pendingTtl = (await ttlWorld.panelStatus()).drafts.find((item) => item.id === ttlReceipt.id);
+check('调短设置只影响下一条草稿，面板保留原批准截止时间',
+  shortTtlReceipt.draft === true && shortTtlReceipt.expiresInSec === 1800 &&
+    pendingTtl?.expiresAt === ttlReceipt.expiresAt && pendingTtl.expiresInSec > 1800);
+ttlWorld.store.expireDueDrafts(created + DRAFT_TTL_MS);
+check('过了旧版的 30 分钟，旧草稿到期而两小时草稿仍待批',
+  ttlWorld.store.draft('legacy-ttl')?.status === 'expired' && ttlItem.status === 'pending');
+ttlWorld.store.expireDueDrafts(deadline - 1);
+check('配置草稿在截止前 1 毫秒仍待批', ttlItem.status === 'pending');
+ttlWorld.store.expireDueDrafts(deadline);
+ttlCfg.draftTtlMinutes = 1440;
+const elapsedTtl = await ttlWorld.approveDraft(ttlReceipt.id, 'smoke');
+check('配置草稿到截止时间即作废，延长设置不恢复，批准不发送',
+  elapsedTtl.code === 'DRAFT_EXPIRED' && elapsedTtl.sent === false && ttlSends === 0);
+const deniedTtl = asJson(await ttlWorld.toolPolicy({ action: 'set', patch: { draftTtlMinutes: 60 } }));
+check('模型不能改草稿有效期', deniedTtl.code === 'FORBIDDEN_FIELD' && ttlCfg.draftTtlMinutes === 1440);
+
 /* ---------------- B站草稿审批：过期可见、审批拒绝、主动回执 ---------------- */
 const draftSnapshot = world.store.data.drafts;
 const actionsSnapshot = world.store.data.actions;
@@ -1637,8 +1784,9 @@ world.bili.request = async () => ({
 });
 const mappedAt = await world.bili.mentions(6);
 check(
-  'mentions 只读 @ 并带上 rpid',
-  mappedAt.length === 1 && mappedAt[0].kind === 'at' && mappedAt[0].rpid === '12' && mappedAt[0].bvid === 'BV1GJ411x7h7',
+  'mentions 用通知编号定位，source_id 只作为待核对线索',
+  mappedAt.length === 1 && mappedAt[0].kind === 'at' && mappedAt[0].reply_notice_id === 'at:7' &&
+    mappedAt[0].commentHints[0] === '12' && mappedAt[0].bvid === 'BV1GJ411x7h7',
   JSON.stringify(mappedAt[0]),
 );
 check(
@@ -1667,20 +1815,16 @@ const prevCfgDyM = world.cfg.douyin;
 world.cfg.douyin = false;
 world.douyin.noticeMentions = async () => [];
 const atItem = {
+  ...mappedAt[0],
   id: 'at-1',
-  kind: 'at',
-  user: '阿澈',
-  text: '@小月 这个怎么弄',
-  where: '搬砖教程',
-  url: 'https://www.bilibili.com/video/BV1GJ411x7h7#reply12',
-  bvid: 'BV1GJ411x7h7',
-  rpid: '12',
+  at: 0,
 };
 world.bili.mentions = async () => [atItem];
 await world.mentionBeat();
 check(
-  '有人 @ 她就叫她，并给出 reply_to',
-  mPushes.length === 1 && /有人在评论区 @ 你了/.test(mPushes[0].text) && /reply_to=12/.test(mPushes[0].text),
+  'B站有人 @ 她就给出该条通知编号，而不是猜 reply_to',
+  mPushes.length === 1 && /有人在评论区 @ 你了/.test(mPushes[0].text) &&
+    /reply_notice_id=at:7/.test(mPushes[0].text) && !/reply_to=/.test(mPushes[0].text),
   JSON.stringify(mPushes).slice(0, 200),
 );
 check(
@@ -1860,6 +2004,127 @@ world.push = prevPushM;
 world.running = prevRunningM;
 world.cfg.bilibili = prevCfgM.bilibili;
 world.cfg.mentionWatch = prevCfgM.mentionWatch;
+
+/* ---------------- B站楼中楼：多人、翻页与审批 ---------------- */
+{
+  const rw = new StrollWorld({
+    cfg: { ...cfg, bilibili: true, douyin: false, approval: 'confirm' }, timezone: 'Asia/Shanghai',
+    dataDir: path.join(tmp, 'bili-reply'), persist: () => {},
+  });
+  const root = '9007199254740993';
+  const first = '9007199254740995';
+  const second = '9007199254740997';
+  const ctime = 1794292879;
+  const dyn = '9007199254740999';
+  const url = `https://t.bilibili.com/${dyn}`;
+  const body = '这段解释挺清楚。'.repeat(22);
+  const rawNotice = (id, mid, text) => ({
+    id, user: { mid }, reply_time: ctime,
+    item: { uri: url, root_id: root, source_id: first, target_id: root, source_content: text },
+  });
+  const msg = [rawNotice('11', '101', '@小月 这条怎么弄'), rawNotice('12', '102', body)];
+  const rawReply = (rpid, mid, message, time = ctime) => ({ rpid_str: rpid, mid, root, ctime: time, content: { message } });
+  const page1 = [rawReply(first, '101', msg[0].item.source_content), rawReply('8', '102', body, ctime - 10), rawReply('9', '103', body)];
+  const page2 = [rawReply(second, '102', body)];
+  const reads = [];
+  const writes = [];
+  const pushes = [];
+  let waitForWrite;
+  rw.push = async (type, text) => { pushes.push({ type, text }); return true; };
+  rw.bili.dmSessions = async () => [];
+  rw.bili.dynamic = async () => ({ id: dyn, oid: '42', commentType: 17, url });
+  rw.bili.request = async (route, params) => {
+    if (route === '/x/msgfeed/reply') return { items: msg };
+    if (route === '/x/msgfeed/at') return { items: [] };
+    if (route === '/x/v2/reply/reply') {
+      reads.push(params);
+      if (params.root !== root) return { replies: [] };
+      if (params.pn === 1) return { replies: page1, page: { count: 21 } };
+      return { replies: page2, page: { count: 21 } };
+    }
+    if (route === '/x/v2/reply/add') {
+      writes.push(params);
+      await waitForWrite;
+      return { rpid: '9001' };
+    }
+    throw new Error(`Unexpected test route: ${route}`);
+  };
+  rw.bili.findReply = async (type, oid, id) => type === 17 && oid === '42' && id === root ? { rpid: root, root: '0' } : null;
+
+  await rw.pushReplies();
+  check('B站同楼不同通知有不同回复编号，推送时不请求评论', pushes.length === 1 &&
+    /reply_notice_id=reply:11/.test(pushes[0].text) && /reply_notice_id=reply:12/.test(pushes[0].text) && !reads.length);
+  rw.inboxCache = (await rw.inbox('bilibili', 8)).items;
+  check('收件箱通知展示截断，但定位仍用完整正文', rw.inboxCache.find((item) => item.id === '12')?.replyText === body && body.length > 140);
+  const request = { action: 'reply', platform: 'bilibili', text: '这条解释看明白了' };
+  const plan = (args) => rw.buildPlan('reply', { ...request, ...args }, { byOwner: true });
+  const firstPlan = await plan({ reply_notice_id: 'reply:11' });
+  const secondPlan = await plan({ reply_notice_id: 'reply:12' });
+  check('同一楼连续回不同人，按 UID、原文和时间找到各自留言',
+    firstPlan.parent === first && secondPlan.parent === second && firstPlan.root === root && secondPlan.root === root);
+  check('B站动态子评论查询传真实 oid/type 并翻到第二页', reads.some((query) => query.pn === 2) && reads.every((query) => query.oid === '42' && query.type === 17));
+  check('同文回复不同 B站子评论不共享去重键', firstPlan.ok && secondPlan.ok && firstPlan.dedupeKey !== secondPlan.dedupeKey);
+  check('显式子评论 ID 不会被通知或新旧顺序覆盖', (await plan({ target: url, root, reply_to: first })).parent === first);
+  check('显式主评论 ID 回主楼，不改回某条子评论', (await plan({ target: url, root, reply_to: root })).parent === root);
+  check('缺目标、目标不属该楼或通知失效均不猜',
+    (await plan({ target: url, root, reply_to: '0' })).code === 'NO_REPLY_TARGET' &&
+    (await plan({ target: url, root: '123', reply_to: first })).code === 'NO_REPLY_TARGET' &&
+    (await plan({ reply_notice_id: 'reply:0' })).code === 'NO_REPLY_TARGET');
+  check('回复通知绑定原作品，另传 target 不会改变目标',
+    (await plan({ reply_notice_id: 'reply:12', target: 'BV1GJ411x7h7' })).target === `dyn:${dyn}`);
+
+  const same = rawReply('9002', '102', body);
+  page2.push(same);
+  const pendingBefore = rw.store.pendingDrafts().length;
+  const noTarget = asJson(await rw.toolAct({ ...request, reply_notice_id: 'reply:12' }));
+  const noPanelTarget = await rw.replyToMessage('reply:12', request.text);
+  check('同用户同秒同正文的目标冲突：工具和面板都不发、不建草稿',
+    noTarget.code === 'NO_REPLY_TARGET' && noPanelTarget.code === 'NO_REPLY_TARGET' &&
+    !writes.length && rw.store.pendingDrafts().length === pendingBefore);
+  page2.pop();
+  const receipt = asJson(await rw.toolAct({ ...request, reply_notice_id: 'reply:12' }));
+  const draft = rw.store.draft(receipt.id);
+  check('B站审批草稿锁住核对后的 root/parent，未批准不发', receipt.sent === false && draft?.root === root && draft.parent === second && !writes.length);
+  rw.bili.feed = async () => [];
+  rw.compactStatus = async () => ({ policy: {}, pending: rw.store.pendingDrafts(), mustDo: [] });
+  const briefIds = async () => (await rw.brief('bilibili')).inbox.map((item) => item.reply_notice_id);
+  const pendingRepeat = asJson(await rw.toolAct({ ...request, reply_notice_id: 'reply:12', text: '我再换个开头说一次' }));
+  check('已待审批的 B站通知换正文也不建第二份草稿', pendingRepeat.code === 'REPLY_PENDING' &&
+    pendingRepeat.draftId === draft.id && rw.store.pendingDrafts().length === 1, JSON.stringify(pendingRepeat));
+  check('出门简报跳过待审批通知，保留同楼其他留言', JSON.stringify(await briefIds()) === '["reply:11"]');
+  check('面板直发也不绕过同一目标的待批草稿', (await rw.replyToMessage('reply:12', request.text)).code === 'REPLY_PENDING' && !writes.length);
+  const legacy = rw.store.addDraft(secondPlan);
+  const blocked = await rw.approveDraft(legacy.id);
+  check('旧版 B站回复草稿不发送', blocked.sent === false && blocked.code === 'NO_REPLY_TARGET' && !writes.length);
+  const redundant = rw.makeDraft(secondPlan);
+  page1.push(rawReply('9001', '104', request.text));
+  let finishWrite;
+  waitForWrite = new Promise((resolve) => { finishWrite = resolve; });
+  const approving = rw.approveDraft(draft.id);
+  const concurrent = await rw.approveDraft(redundant.id);
+  finishWrite();
+  const approved = await approving;
+  check('批准只发送草稿绑定的目标，发送后仍按正确评论区类型回查可见性',
+    approved.ok && approved.result.visibility === 'public' && writes.length === 1 &&
+    writes[0].root === root && writes[0].parent === second && writes[0].type === 17);
+  check('同时批准两份指向同一评论的旧草稿只发送一次', concurrent.code === 'REPLY_PENDING');
+  rw.store.load();
+  check('已批准回复的旧通知重启后也不会回到简报', JSON.stringify(await briefIds()) === '["reply:11"]');
+  const sentRepeat = asJson(await rw.toolAct({ ...request, target: url, root, reply_to: second, text: '另一种说法也不能重复回' }));
+  check('已发回复换成显式评论 ID 和不同正文也不建草稿', sentRepeat.code === 'DUPLICATE' && !rw.store.pendingDrafts().length && writes.length === 1);
+  const oldKey = `bilibili:reply:dyn:${dyn}:r${first}:旧正文`;
+  rw.store.markSeen(oldKey);
+  check('历史回复键也按精确目标拦截，不要求原正文', (await plan({ target: url, root, reply_to: first })).code === 'DUPLICATE');
+  delete rw.store.data.seen[oldKey];
+  const stale = rw.makeDraft(firstPlan);
+  stale.expiresAt = new Date(Date.now() - 1_000).toISOString();
+  check('回复草稿过期后原通知重新列为可回复', JSON.stringify(await briefIds()) === '["reply:11"]');
+  rw.store.data.lastWriteAt = Date.now() - 2_000;
+  rw.store.data.lastWriteByPlat.bilibili = rw.store.data.lastWriteAt;
+  const panel = await rw.replyToMessage('reply:11', request.text);
+  check('面板按通知编号回复另一人，并标记该条消息',
+    panel.ok && writes.length === 2 && writes[1].parent === first && !!rw.store.seenAt('msg:11'), JSON.stringify(panel));
+}
 
 /* ---------------- 抖音楼中楼：通知 → 计划/草稿 → 请求 ---------------- */
 {
@@ -3036,7 +3301,7 @@ world.douyin.strangerEntry = async () => null;
 world.douyin.conversationRows = async () => [
   { name: '阿柚', at: '10:20', preview: '在吗' },
   { name: '摸鱼群', at: '09:00', preview: '大家好' },
-  { name: '陌生人阿', at: '刚刚', preview: '你好呀' },
+  { name: '陌生人阿 昨天 10:39', at: '刚刚', preview: '你好呀' },
 ];
 world.strangerScanAt = 0;
 world.strangerListAt = 0;
@@ -3045,6 +3310,11 @@ check(
   '文件夹和入口都没有时，主列表差集也能发现',
   sPushes.length === 1 && /陌生人阿/.test(sPushes[0].text) && !/摸鱼群/.test(sPushes[0].text),
   JSON.stringify(sPushes.map((p) => p.text)),
+);
+check(
+  '陌生人推送、快车道和去重使用同一个去掉时间的昵称',
+  /target=陌生人阿 text=/.test(sPushes[0]?.text ?? '') &&
+    world.isStrangerFast('陌生人阿') && world.store.data.strangerSeen['douyin:陌生人阿'] === '你好呀',
 );
 world.douyin.conversationRows = prevRows;
 world.douyin.strangerThreads = prevST;
@@ -3266,11 +3536,107 @@ world.douyin.doShareCardTo = prevDoShare;
 world.douyin.shareFailAt = prevShareFailAt;
 
 // 发送路线：陌生人必须走「按昵称回会话」，绝不能掉进「私信主人」
+function fakeStrangerChat({ main = [], folder = [], select = true, drift = false } = {}) {
+  const calls = [];
+  let folderOpen = false;
+  let selected = null;
+  const makeRows = (names, inFolder) => names.map(([name, group = false]) => {
+    const attrs = new Map();
+    return {
+      inFolder,
+      innerText: `${name}\n你好`,
+      '__reactProps$smoke': { conversationId: name, toParticipantSecUserId: group ? '' : 'mock-user' },
+      closest: () => inFolder,
+      querySelector: (selector) => selector.includes('ConversationItemtitle') ? { innerText: name } : null,
+      querySelectorAll: () => [],
+      setAttribute: (key, value) => attrs.set(key, value),
+      removeAttribute: (key) => attrs.delete(key),
+      getAttribute: (key) => attrs.get(key),
+    };
+  });
+  const mainRows = makeRows(main, false);
+  const folderRows = makeRows(folder, true);
+  const doc = {
+    querySelector: () => folderOpen ? { querySelectorAll: () => folderRows } : null,
+    querySelectorAll(selector) {
+      let rows = folderOpen ? [...mainRows, ...folderRows] : mainRows;
+      if (selector.includes('data-stroll-dm-reply')) rows = rows.filter((row) => row.getAttribute('data-stroll-dm-reply') !== undefined);
+      if (selector.includes('curConversation')) rows = rows.filter((row) => row === selected);
+      return rows;
+    },
+  };
+  const page = {
+    url: () => 'https://www.douyin.com/chat',
+    isClosed: () => false,
+    waitForTimeout: async () => {},
+    evaluate: async (fn, arg) => vm.runInNewContext(`(${fn})(arg)`, { document: doc, arg }),
+    locator: (selector) => ({
+      click: async () => {
+        const [row] = doc.querySelectorAll(selector);
+        if (!row || !selector.includes('data-stroll-dm-reply')) throw new Error('no matched row');
+        calls.push(row.inFolder ? 'folder' : 'main');
+        if (select) selected = row;
+      },
+      waitFor: async () => {},
+    }),
+    keyboard: { press: async (key) => calls.push(key) },
+  };
+  const browser = new DouyinBrowser({ dataDir: tmp, cfg });
+  browser.chatPageForSend = async () => page;
+  browser.isLoggedIn = async () => true;
+  browser.strangerInboxOpen = async () => folderOpen;
+  browser.openStrangerInbox = async () => (folderOpen = folderRows.length > 0);
+  browser.closeStrangerInbox = async () => { folderOpen = false; };
+  browser.scrollConversationList = async () => null;
+  browser.scheduleClose = () => {};
+  browser.waitMsgInput = async () => ({ click: async () => calls.push('input'), evaluate: async () => '' });
+  browser.insertTextFast = async () => {
+    if (drift) selected = null;
+    return true;
+  };
+  return { browser, calls, page };
+}
+
+const folderReply = fakeStrangerChat({ folder: [['小鹿 3 天后消失 07:51 在线']] });
+const folderReceipt = await folderReply.browser.replyDm('小鹿 昨天 10:39', '在的', { stranger: true }).catch((error) => error);
+check('陌生人文件夹：时间与临时会话标签不混入昵称，选中正确会话才发送',
+  folderReceipt.sent === true && folderReply.calls.join(',') === 'folder,input,Enter', folderReceipt.message);
+
+const mainReply = fakeStrangerChat({ main: [['小鹿 昨天 10:39'], ['小鹿、群友 11/15', true]] });
+const mainRowsRead = await mainReply.browser.conversationRows(mainReply.page);
+check('陌生人主列表读取正确剥掉日期和时刻', mainRowsRead[0]?.name === '小鹿' && mainRowsRead[0]?.preview === '你好');
+const mainReceipt = await mainReply.browser.replyDm('小鹿', '在的', { stranger: true }).catch((error) => error);
+check('没有陌生人文件夹时回主列表，不点包含昵称的群',
+  mainReceipt.sent === true && mainReply.calls.join(',') === 'main,input,Enter', mainReceipt.message);
+
+for (const [label, setup, code, expectedCalls] of [
+  ['只有包含名', { main: [['小鹿、群友', true]] }, 'NO_DM', ''],
+  ['同名重复', { folder: [['小鹿 昨天'], ['小鹿 3天后消失']] }, 'THREAD_DRIFT', ''],
+  ['同名群', { main: [['小鹿', true]] }, 'THREAD_DRIFT', 'main'],
+  ['点击没切换', { folder: [['小鹿']], select: false }, 'THREAD_DRIFT', 'folder'],
+  ['打字后切错会话', { main: [['小鹿']], drift: true }, 'THREAD_DRIFT', 'main,input'],
+]) {
+  const { browser, calls } = fakeStrangerChat(setup);
+  const failure = await browser.replyDm('小鹿', '在的', { stranger: true }).catch((error) => error);
+  check(`陌生人回复拒绝发送：${label}`, failure.code === code && calls.join(',') === expectedCalls,
+    JSON.stringify({ code: failure.code, calls }));
+}
+
 const prevDyReplyCard = world.douyin.replyDm;
 const prevDmFast = world.douyinDmFast;
 const stSent = [];
-world.douyin.replyDm = async (who, text) => {
-  stSent.push(['replyDm', who, text]);
+const wrongChat = fakeStrangerChat({ folder: [['新网友']], select: false });
+world.douyin.replyDm = wrongChat.browser.replyDm.bind(wrongChat.browser);
+const prevDmUsage = Number(world.store.data.usage[sDay]?.dm ?? 0);
+const prevStrangerUsage = Number(world.store.data.strangerReply?.[sDay] ?? 0);
+const wrongChatReceipt = await world.executePlan({ ...stPlan }, 'model');
+check('无法确认陌生人收件人：回执失败，不扣私信额度或记陌生人已回复',
+  wrongChatReceipt.ok === false && wrongChatReceipt.code === 'THREAD_DRIFT' &&
+    Number(world.store.data.usage[sDay]?.dm ?? 0) === prevDmUsage &&
+    Number(world.store.data.strangerReply?.[sDay] ?? 0) === prevStrangerUsage,
+  JSON.stringify(wrongChatReceipt));
+world.douyin.replyDm = async (who, text, opts) => {
+  stSent.push(['replyDm', who, text, opts]);
   return { ok: true, sent: true, fast: true };
 };
 world.douyinDmFast = async (uid, text) => {
@@ -3281,7 +3647,7 @@ world.store.data.lastChatAt = 0;
 const stRes = await world.executePlan({ ...stPlan }, 'model');
 check(
   '陌生人回信走会话，不走主人私信',
-  stRes.ok === true && stSent[0]?.[0] === 'replyDm' && stSent[0][1] === '新网友',
+  stRes.ok === true && stSent[0]?.[0] === 'replyDm' && stSent[0][1] === '新网友' && stSent[0][3]?.stranger === true,
   JSON.stringify(stSent),
 );
 check('回执写明是陌生人会话', stRes.to === 'stranger' && /陌生人/.test(stRes.receipt), JSON.stringify(stRes.receipt));
@@ -3988,6 +4354,103 @@ world.cfg.strangerDmBlock = prevStranger.block;
 world.cfg.dailyDms = prevStranger.dms;
 world.store.data.strangerDm[sDay] = 0;
 world.strangerScanAt = 0;
+
+/* ---- 平台开关：提示词、工具、运行中的入口 ---- */
+{
+  const platformCfg = { ...DEFAULTS, enabled: true, quietFrom: 0, quietTo: 0 };
+  const fish = new StrollWorld({
+    cfg: platformCfg, dataDir: path.join(tmp, 'platform-switch'), persist: () => {},
+    log: { info: () => {}, warn: () => {} },
+  });
+  const baseline = fish.tools();
+  const toolsByName = Object.fromEntries(baseline.map(({ name, handler }) => [name, handler]));
+  let biliReads = 0;
+  let dyReads = 0;
+  let sent = 0;
+  let notified = 0;
+  let watchClosed = 0;
+  fish.bili.status = async () => { biliReads++; return { loggedIn: true }; };
+  fish.douyin.status = async () => { dyReads++; return { loggedIn: true }; };
+  fish.bili.readCredentials = () => ({ sessdata: 'fixture' });
+  fish.bili.followFeed = async () => { biliReads++; return [{ platform: 'bilibili', at: 1 }]; };
+  fish.douyin.following = async () => { dyReads++; return [{ platform: 'douyin', at: 1 }]; };
+  fish.bili.comment = async () => { sent++; return { rpid: '100' }; };
+  fish.douyin.closeWatch = async () => { watchClosed++; };
+  fish.host = { pushEvent: async () => { notified++; } };
+  const draft = fish.makeDraft({ action: 'comment', platform: 'douyin', target: '1234567890123456789', text: '未发送的测试草稿' });
+  const promptTemplate = fs.readFileSync(path.join(root, 'src', 'ENV_PROMPT.md'), 'utf8');
+  for (const [bilibili, douyin] of [[true, true], [true, false], [false, true], [false, false]]) {
+    fish.applyLiveConfig({ bilibili, douyin });
+    const variables = fish.envPromptVars();
+    const prompt = promptTemplate.replace(/\{\{(stroll\.[\w.]+)\}\}/g, (_, name) => variables[name]);
+    const tools = fish.tools();
+    const schema = JSON.stringify(tools);
+    const label = `${Number(bilibili)}/${Number(douyin)}`;
+    check(`平台开关 ${label}：完整提示词只包含启用平台`, !prompt.includes('{{stroll.') &&
+      prompt.includes('本地书库') && prompt.includes('### B站') === bilibili && prompt.includes('### 抖音') === douyin &&
+      (bilibili || !prompt.includes('B站')) && (douyin || !prompt.includes('抖音')));
+    check(`平台开关 ${label}：工具名和平台专属字段正确`, tools.length === (bilibili || douyin ? 3 : 1) &&
+      schema.includes('reply_notice_id') === bilibili && schema.includes('"search"') === bilibili &&
+      schema.includes('douyin_creator') === douyin && schema.includes('"join_group"') === douyin &&
+      (bilibili || !/B站|bilibili/.test(schema)) && (douyin || !/抖音|douyin/.test(schema)));
+    const before = [biliReads, dyReads];
+    const status = asJson(await toolsByName.stroll({ action: 'status' }));
+    check(`平台开关 ${label}：旧状态工具只查询启用平台`, biliReads - before[0] === Number(bilibili) &&
+      dyReads - before[1] === Number(douyin) && Boolean(status.bili.loggedIn) === bilibili && Boolean(status.douyin.loggedIn) === douyin);
+  }
+  check('双关仍可查本地记录和书库', asJson(await toolsByName.stroll({ action: 'history' })).ok &&
+    asJson(await toolsByName.stroll({ action: 'books' })).ok);
+  check('双关时本地草稿仍保留', fish.store.draft(draft.id)?.status === 'pending' && (await fish.panelStatus()).drafts[0].platformOff === true);
+  fish.applyLiveConfig({ bilibili: true });
+  const totalBefore = fish.store.usage('comment');
+  const noWrite = asJson(await toolsByName.stroll_act({ action: 'comment', target: 'https://www.douyin.com/video/1234567890123456789', text: '测试' }));
+  const noApproval = await fish.approveDraft(draft.id);
+  check('停用平台不准备新写入，旧草稿不可批准、不扣额度', noWrite.code === 'PLATFORM_OFF' && noApproval.code === 'PLATFORM_OFF' &&
+    noApproval.sent === false && sent === 0 && fish.store.usage('comment') === totalBefore && fish.store.draft(draft.id)?.status === 'pending');
+  check('停用平台的工具、面板登录和平台事件都拒绝',
+    asJson(await toolsByName.stroll({ action: 'groups' })).code === 'PLATFORM_OFF' &&
+    (await fish.invoke('stroll', 'login', ['douyin'])).code === 'PLATFORM_OFF' &&
+    !(await fish.push('stroll.reply', '测试', { platform: 'douyin' })) && notified === 0);
+  const following = asJson(await toolsByName.stroll({ action: 'following', platform: 'both' }));
+  check('关注流只拉启用平台，不把停用当成失败', following.ok && following.items.length === 1 &&
+    following.items[0].platform === 'bilibili' && !following.errors);
+  const loginBrowser = new DouyinBrowser({ dataDir: path.join(tmp, 'bili-login'), cfg: platformCfg });
+  const mainPage = { isClosed: () => false };
+  const qrPage = { url: () => 'https://passport.bilibili.com/login' };
+  loginBrowser.page = mainPage;
+  loginBrowser.launch = async (opts) => {
+    loginBrowser.assertPlatformOn(opts.platform);
+    return loginBrowser.context ??= { newPage: async () => qrPage };
+  };
+  loginBrowser.goto = async () => {};
+  check('只开 B站时，扫码窗仍可用共享浏览器', (await loginBrowser.loginWindow(qrPage.url(), { platform: 'bilibili' })).ok &&
+    loginBrowser.page === mainPage && loginBrowser.loginPage === qrPage);
+  fish.applyLiveConfig({ douyin: true });
+  fish.watch = { platform: 'bilibili', title: '还在陪看' };
+  const closedBefore = watchClosed;
+  fish.applyLiveConfig({ douyin: false });
+  await Promise.resolve();
+  check('关抖音不关 B站陪看', fish.watch?.platform === 'bilibili' && watchClosed === closedBefore);
+  fish.applyLiveConfig({ bilibili: false, douyin: true });
+  const fetchBefore = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => { fetches++; throw new Error('unexpected fetch'); };
+  try {
+    const short = 'https://b23.tv/test';
+    check('停用 B站时拒绝搜索和短链，平台参数不能绕过',
+      asJson(await toolsByName.stroll({ action: 'search', query: '测试' })).code === 'PLATFORM_OFF' &&
+      asJson(await toolsByName.stroll({ action: 'open', url: short, platform: 'douyin' })).code === 'PLATFORM_OFF' &&
+      await fish.expandBiliLink(short) === short && fetches === 0);
+    fish.applyLiveConfig({ bilibili: true });
+    fish.bili.takeTurn = async () => fish.applyLiveConfig({ bilibili: false });
+    const queued = await fish.bili.request('/x/web-interface/nav', {}, { anon: true }).catch((error) => error);
+    check('排队中的 B站请求重新检查开关，不发送', queued.code === 'PLATFORM_OFF' && fetches === 0);
+  } finally {
+    globalThis.fetch = fetchBefore;
+  }
+  check('重新启用后恢复工具、监听和未过期草稿', fish.douyin.warm && fish.tools().some(({ name }) => name === 'stroll_act') &&
+    !(await fish.panelStatus()).drafts[0].platformOff);
+}
 
 console.log(checks.map(([n, ok]) => `${ok ? 'ok' : 'NO'}  ${n}`).join('\n'));
 console.log(`\n${checks.length} checks passed`);

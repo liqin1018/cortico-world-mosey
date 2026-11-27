@@ -3,6 +3,8 @@
  * 所有公开动作都有硬额度；额度不是建议值，Policy 会按它拦截。
  */
 
+const DRAFT_TTL_MINUTES = { min: 30, max: 24 * 60 };
+
 export const DEFAULTS = {
   enabled: false,
 
@@ -11,6 +13,7 @@ export const DEFAULTS = {
 
   /** confirm: 公开动作全部进草稿箱等主人点批准；auto_low_risk: 点赞自动，其余草稿；auto_all: 全部按额度自动；dry_run: 只读。 */
   approval: 'confirm',
+  draftTtlMinutes: DRAFT_TTL_MINUTES.min,
   allowFollow: true,
   /** browser：她自己点；off：抖音关注改手动（网页端对部分账号不生效） */
   douyinCommentVia: 'manual',
@@ -207,12 +210,14 @@ const BASIC = {
       [P + 'bilibili']: {
         type: 'boolean',
         title: '去 B站',
-        description: '要不要去 B站。只读不用登录，点赞评论才需要登录态。',
+        description: '关闭后停止 B站的新读写、监听和通知，保留登录态与记录。保存后到「系统提示词 → 立即应用」同步当前对话的提示词和工具。',
+        'x-hot': true,
       },
       [P + 'douyin']: {
         type: 'boolean',
         title: '去抖音',
-        description: '要不要去抖音。用独立浏览器资料，第一次要在面板扫码登录。',
+        description: '关闭后停止抖音的新读写、监听和通知，保留登录态与记录。保存后到「系统提示词 → 立即应用」同步当前对话的提示词和工具。',
+        'x-hot': true,
       },
       [P + 'background']: {
         type: 'boolean',
@@ -227,6 +232,15 @@ const BASIC = {
         'x-options': 'stroll-approval',
         'x-hot': true,
         'x-warning': true,
+      },
+      [P + 'draftTtlMinutes']: {
+        type: 'integer',
+        title: '草稿有效期',
+        description: '默认 30 分钟，最长 24 小时。只影响新建的待审批草稿；到期没批准就作废，不会发送。',
+        minimum: DRAFT_TTL_MINUTES.min,
+        maximum: DRAFT_TTL_MINUTES.max,
+        'x-suffix': ' 分钟',
+        'x-hot': true,
       },
     },
   },
@@ -1073,6 +1087,7 @@ export const CONFIG_GROUPS = [
 /** 可经 stroll_policy 修改的字段及边界。 */
 export const POLICY_FIELDS = {
   approval: { type: 'enum', values: ['confirm', 'auto_low_risk', 'auto_all', 'dry_run'] },
+  draftTtlMinutes: { type: 'int', ...DRAFT_TTL_MINUTES },
   ownerUid: { type: 'string', max: 20 },
   ownerName: { type: 'string', max: 40 },
   ownerDouyin: { type: 'string', max: 500 },

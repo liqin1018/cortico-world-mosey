@@ -32,18 +32,17 @@ Coopanion（Windows Electron 桌宠）的「摸鱼」插件：让桌宠自己去
 cd "F:/AI/agent/Codex/Codex Project/Coopanion插件/摸鱼插件/stroll"
 
 node scripts/smoke.mjs          # 等同 npm run check；离线断言必须全绿
-node scripts/deploy-local.mjs   # 等同 npm run deploy:local；同步到安装目录
-# 然后必须让人类「完全退出 Coopanion 再打开」
+node scripts/deploy-local.mjs   # 通过验证、升版写日志后默认执行：正常退出 → 同步 → 重开
 ```
 
 **为什么必须重启**：宿主对前端资源做了 immutable 缓存，刷新面板 / 重载插件都会跑旧代码。
 「改了没生效」九成是没重启。
 
-验证一个改动的正确顺序：
+每轮插件代码修改的默认收尾流程（只改开发文档不触发部署）：
 
-1. `npm run check` 全绿（红就是没改对，别继续）
-2. `npm run deploy:local`
-3. 请人类重启 Coopanion
+1. `npm run check` 全绿后升版本、写 `CHANGELOG.md`；测试失败不升号、不部署。
+2. 具备必要写入权限后，默认运行 `npm run deploy:local`。脚本通过安装器的正常退出入口等 Coopanion 完全退出，再更新插件并重新打开；不强杀，也不要求用户先退出再回消息。
+3. 核对安装目录的 `package.json` 版本和宿主是否已启动；未完成时分别说明安装与启动状态。
 4. 让人类在面板 / 抖音真机上复现一次
 5. **读 `F:/Coopanion/data/logs/core.log`**，用日志证明行为变了 —— 不要凭「代码看起来对」宣布修好
 
@@ -89,13 +88,15 @@ node scripts/deploy-local.mjs   # 等同 npm run deploy:local；同步到安装�
 
 ### B站评论审批链路（当前主线）
 
-- `stroll_act` 返回的 `draft_...` 是草稿号，不是 B站 `rpid`。回执里 `status` 是 `pending_owner_approval`、`sent: false`，并保留 `draft: true`、`id`、`expiresAt`、`expiresInSec`；草稿内部状态是 `pending`，30 分钟有效。
+- `stroll_act` 返回的 `draft_...` 是草稿号，不是 B站 `rpid`。回执里 `status` 是 `pending_owner_approval`、`sent: false`，并有 `draft: true`、`id`、`expiresAt`、`expiresInSec`。有效期默认 30 分钟、最长 24 小时，在创建时固定；旧草稿仍按 30 分钟算。
 - 只有主人在面板批准后才会执行 `comment`，成功回执才带 `rpid` 和 `visibility`。草稿创建后立即 `save()`；写盘失败返回 `DRAFT_SAVE_FAILED`，不进入待审批。
 - 创建、查询、审批和 tick 都走 `store.expireDueDrafts()`：过期草稿标 `status: expired`、`sent: false`，保留 3 天，不物理删除。`approveDraft` 对过期草稿返回 `DRAFT_EXPIRED`，不发网络请求、不扣额度。
 - 过期后会推 `stroll.draft_expired`（`trigger: flush`）：tick 一次最多推一条，最多列 3 条预览；安静时段延后；推送成功才写 `expiredNotifiedAt`，失败下轮重试；不使用 `interrupt`。
 - `history` / `status` / `brief` 都带 `expiredDrafts`，字段为 `id` / `action` / `platform` / `preview` / `expiredSec` / `status: 'expired'` / `sent: false`。
 - `visibility=public/hidden/unknown` 是**发送后**的可见性检查，不是审批状态。`hidden/unknown` 不自动重试。
 - 健康检查只看最近一条已发 B站评论在发送时记录的 `extra.visibility`；只有 `hidden` 才报。
+- B站回复通知从 `reply_notice_id` 找到本条通知，再按发言人 UID、完整正文和时间逐页核对楼里的评论。通知 `root_id` 只是主楼锚点，不能直接拿 `source_id` / `target_id` 猜收件人。显式 `reply_to` 要核对是否属于该作品、该楼；核对失败看 `stroll reply target not confirmed`，成功看 `stroll reply anchor` 的 `root` / `parent`。旧版生成的 B站回复草稿要重新创建，不能直接批准。
+- B站回复按确认后的评论区和 `parent` 去重，不按正文或主楼 `root`；`REPLY_PENDING` 是待批或发送中，`DUPLICATE` 是最近 7 天已回。通知的已回复记录与 `msg:` 已读、`atpush:` 已推送分别维护；只有已知待批或已回复的通知才从 `brief` 隐藏，不删收件箱消息。
 
 ### B站评论问题排查顺序
 
